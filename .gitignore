@@ -1,0 +1,31 @@
+# Keil 编译和中间文件
+*.o
+*.d
+*.crf
+*.dep
+*.uvoptx
+*.uvgui.*
+*.uvbak
+*.bak
+*.iex
+*.htm
+*.lnp
+*.sct
+*.build_log.htm
+*.scvd
+
+# 输出目录
+Objects/
+Listings/
+DebugConfig/
+
+
+# 多工程工作区文件
+*.uvmpw
+
+# 其他可能产生的临时文件
+*.uvgui
+*.uvguix.*
+
+MDK-ARM/.vscode
+MDK-ARM/glovesV1.0_VGT6/
