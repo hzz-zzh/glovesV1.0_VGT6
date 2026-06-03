@@ -448,6 +448,11 @@
               <FileType>1</FileType>
               <FilePath>..\Task\src\uartDebugTask.c</FilePath>
             </File>
+            <File>
+              <FileName>systemManagerTask.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Task\src\systemManagerTask.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

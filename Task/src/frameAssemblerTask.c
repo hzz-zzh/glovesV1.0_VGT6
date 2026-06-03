@@ -1,4 +1,4 @@
-﻿#include "frameAssemblerTask.h"
+#include "frameAssemblerTask.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -10,7 +10,7 @@
 
 #define FRAME_ASSEMBLER_GET_TIMEOUT_MS          (10U)
 #define FRAME_ASSEMBLER_IDLE_DELAY_MS           (1U)
-#define FRAME_ASSEMBLER_MAX_TIME_DIFF_US        (5000U)
+#define FRAME_ASSEMBLER_MAX_TIME_DIFF_US        (5000ULL)
 #define FRAME_ASSEMBLER_PENDING_TIMEOUT_MS      (100U)
 
 static FrameAssemblerStats_t s_frame_assembler_stats;
@@ -29,22 +29,16 @@ static uint32_t FrameAssembler_MsToTicks(uint32_t timeout_ms)
     return (ticks > 0xFFFFFFFEULL) ? 0xFFFFFFFEUL : (uint32_t)ticks;
 }
 
-/* 使用有符号差值处理 uint32_t 时间戳回绕场景 */
-static int32_t FrameAssembler_TimeDiffSigned(uint32_t newer_or_older, uint32_t reference)
+/* 64 位微秒时间戳  直接按单调递增时间计算绝对差值 */
+static uint64_t FrameAssembler_TimeDiffAbsUs(GloveTimestampUs_t a, GloveTimestampUs_t b)
 {
-    return (int32_t)(newer_or_older - reference);
+    return (a >= b) ? (a - b) : (b - a);
 }
 
-static uint32_t FrameAssembler_TimeDiffAbsUs(uint32_t a, uint32_t b)
+static uint8_t FrameAssembler_IsFirstOlder(GloveTimestampUs_t first_timestamp_us,
+                                           GloveTimestampUs_t second_timestamp_us)
 {
-    int32_t diff = FrameAssembler_TimeDiffSigned(a, b);
-
-    return (diff >= 0) ? (uint32_t)diff : (uint32_t)(-diff);
-}
-
-static uint8_t FrameAssembler_IsFirstOlder(uint32_t first_timestamp_us, uint32_t second_timestamp_us)
-{
-    return (FrameAssembler_TimeDiffSigned(first_timestamp_us, second_timestamp_us) < 0) ? 1U : 0U;
+    return (first_timestamp_us < second_timestamp_us) ? 1U : 0U;
 }
 
 static uint8_t FrameAssembler_IsPendingTimeout(uint32_t start_tick)
@@ -56,8 +50,8 @@ static uint8_t FrameAssembler_IsPendingTimeout(uint32_t start_tick)
 }
 
 /* 当前以 IMU 时间戳作为 RawFrame 时间戳 因为姿态算法主要依赖 IMU 数据 */
-static uint32_t FrameAssembler_SelectFrameTimestamp(const GloveImuSensorData_t *imu,
-                                                    const GloveTouchSensorData_t *touch)
+static GloveTimestampUs_t FrameAssembler_SelectFrameTimestamp(const GloveImuSensorData_t *imu,
+                                                              const GloveTouchSensorData_t *touch)
 {
     (void)touch;
     return imu->timestamp_us;
@@ -91,7 +85,7 @@ static GloveStatus_t FrameAssembler_PublishRawFrame(const GloveImuSensorBlock_t 
 {
     GloveRawFrameBlock_t *raw;
     GloveStatus_t status;
-    uint32_t frame_timestamp_us;
+    GloveTimestampUs_t frame_timestamp_us;
 
     raw = DataManager_AllocRawFrame();
     if (raw == NULL)
@@ -126,7 +120,7 @@ static GloveStatus_t FrameAssembler_PublishRawFrame(const GloveImuSensorBlock_t 
 static GloveStatus_t FrameAssembler_TryAssemble(GloveImuSensorBlock_t **imu,
                                                 GloveTouchSensorBlock_t **touch)
 {
-    uint32_t time_diff_us;
+    uint64_t time_diff_us;
     GloveStatus_t status;
 
     if ((imu == NULL) || (touch == NULL) || (*imu == NULL) || (*touch == NULL))
@@ -244,5 +238,3 @@ void FrameAssemblerTask(void *argument)
         }
     }
 }
-
-

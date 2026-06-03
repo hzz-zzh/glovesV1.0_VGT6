@@ -49,7 +49,7 @@ void AppData_ClearFullFrame(GloveFullFrame_t *frame)
  */
 void AppData_BuildRawFrameFromSensors(GloveRawFrame_t *raw,
                                       uint32_t frame_id,
-                                      uint32_t timestamp_us,
+                                      GloveTimestampUs_t timestamp_us,
                                       const GloveImuSensorData_t *imu,
                                       const GloveTouchSensorData_t *touch)
 {

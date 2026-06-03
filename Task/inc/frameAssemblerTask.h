@@ -1,4 +1,4 @@
-﻿#ifndef FRAME_ASSEMBLER_TASK_H
+#ifndef FRAME_ASSEMBLER_TASK_H
 #define FRAME_ASSEMBLER_TASK_H
 
 #ifdef __cplusplus
@@ -21,7 +21,7 @@ typedef struct
     uint32_t raw_alloc_failures;
     uint32_t raw_publish_failures;
     uint32_t last_frame_id;
-    uint32_t last_time_diff_us;
+    uint64_t last_time_diff_us;
     GloveStatus_t last_status;
 } FrameAssemblerStats_t;
 

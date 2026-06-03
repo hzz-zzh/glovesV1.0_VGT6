@@ -25,9 +25,9 @@ static void Test_SetError(GloveStatus_t status)
     s_test_stats.fail_count++;
 }
 
-static uint32_t Test_MakeTimestampUs(uint32_t seq)
+static GloveTimestampUs_t Test_MakeTimestampUs(uint32_t seq)
 {
-    return seq * 10000U;
+    return (GloveTimestampUs_t)seq * 10000ULL;
 }
 
 static void Test_FillImuSensor(GloveImuSensorBlock_t *block, uint32_t seq)
@@ -50,9 +50,6 @@ static void Test_FillImuSensor(GloveImuSensorBlock_t *block, uint32_t seq)
         block->data.imu[i].gyro_radps.x = (float)i + 1.10f;
         block->data.imu[i].gyro_radps.y = (float)i + 1.20f;
         block->data.imu[i].gyro_radps.z = (float)i + 1.30f;
-
-        block->data.imu[i].temperature_cdeg = (int16_t)(2500 + (int16_t)i);
-        block->data.imu[i].status = 0U;
 
         block->data.quat[i].w = 1.0f;
         block->data.quat[i].x = (float)i * 0.01f;

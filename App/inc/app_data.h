@@ -22,6 +22,9 @@ typedef enum
     GLOVE_STATUS_NOT_READY = 7
 } GloveStatus_t;
 
+/* 8 字节微秒时间戳 用于采集 合帧 算法 通信和存储链路 */
+typedef uint64_t GloveTimestampUs_t;
+
 /* 手套左右手标识，后续做标定、协议上报时用 */
 typedef enum
 {
@@ -50,25 +53,23 @@ typedef struct
 /* 单个 IMU 的原始采样值 */
 typedef struct
 {
-    GloveVector3f_t accel_mps2;       /* 加速度，单位 m/s^2 */
-    GloveVector3f_t gyro_radps;       /* 角速度，单位 rad/s */
-    int16_t temperature_cdeg;         /* 温度，单位 0.01 摄氏度 */
-    uint16_t status;                  /* 传感器状态位 */
+    GloveVector3f_t accel_mps2;       /* 加速度 单位 m/s^2 */
+    GloveVector3f_t gyro_radps;       /* 角速度 单位 rad/s */
 } GloveImuSample_t;
 
 /* 单个触觉阵列点的采样值 */
 typedef struct
 {
     uint16_t value;                   /* 当前触觉采样值 */
-    uint16_t baseline;                /* 基线值，用于压力/触觉变化量计算 */
+    uint16_t baseline;                /* 基线值 用于压力/触觉变化量计算 */
 } GloveTouchSample_t;
 
 /*由 IMU_CAN_Task 产生，包含一次 16 路 IMU 采集结果 */
 typedef struct
 {
     uint32_t sensor_seq;              /* IMU 采集序号 */
-    uint32_t timestamp_us;            /* IMU 数据时间戳，单位 us */
-    uint32_t valid_flags;            
+    GloveTimestampUs_t timestamp_us;  /* IMU 数据时间戳 单位 us */
+    uint32_t valid_flags;             /* 有效标志 */
 
     GloveImuSample_t imu[GLOVE_IMU_COUNT];
     GloveQuaternion_t quat[GLOVE_IMU_COUNT];
@@ -78,7 +79,7 @@ typedef struct
 typedef struct
 {
     uint32_t sensor_seq;              /* 触觉采集序号 */
-    uint32_t timestamp_us;            /* 触觉数据时间戳，单位 us */
+    GloveTimestampUs_t timestamp_us;  /* 触觉数据时间戳 单位 us */
     uint32_t valid_flags;             /* 有效标志 */
 
     GloveTouchSample_t touch[GLOVE_TOUCH_COUNT];
@@ -88,7 +89,7 @@ typedef struct
 typedef struct
 {
     uint32_t frame_id;                /* 单调递增帧号，用于日志和通讯对齐 */
-    uint32_t timestamp_us;            /* 合帧时间戳，单位 us */
+    GloveTimestampUs_t timestamp_us;  /* 合帧时间戳 单位 us */
     uint32_t valid_flags;             /* 本帧有效数据标志 */
 
     GloveImuSample_t imu[GLOVE_IMU_COUNT];
@@ -104,7 +105,7 @@ typedef struct
 typedef struct
 {
     uint32_t frame_id;                /* 与输入 RawFrame 保持一致 */
-    uint32_t timestamp_us;            /* 与输入 RawFrame 保持一致 */
+    GloveTimestampUs_t timestamp_us;  /* 与输入 RawFrame 保持一致 */
     uint32_t valid_flags;             /* 算法结果有效标志 */
 
     GloveQuaternion_t imu_attitude[GLOVE_IMU_COUNT];
@@ -116,7 +117,7 @@ typedef struct
 typedef struct
 {
     uint32_t frame_id;
-    uint32_t timestamp_us;
+    GloveTimestampUs_t timestamp_us;
     uint32_t valid_flags;
 
     GloveRawFrame_t raw;
@@ -148,7 +149,7 @@ void AppData_ClearFullFrame(GloveFullFrame_t *frame);
 
 void AppData_BuildRawFrameFromSensors(GloveRawFrame_t *raw,
                                       uint32_t frame_id,
-                                      uint32_t timestamp_us,
+                                      GloveTimestampUs_t timestamp_us,
                                       const GloveImuSensorData_t *imu,
                                       const GloveTouchSensorData_t *touch);
 
