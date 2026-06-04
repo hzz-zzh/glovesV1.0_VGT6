@@ -743,7 +743,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : INT_GAUGE_BQ_Pin */
   GPIO_InitStruct.Pin = INT_GAUGE_BQ_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(INT_GAUGE_BQ_GPIO_Port, &GPIO_InitStruct);
 

@@ -339,7 +339,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32H563xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32H5xx_HAL_Driver/Inc;../Drivers/STM32H5xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H5xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include/;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM33_NTZ/non_secure/;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/;../Middlewares/Third_Party/CMSIS/RTOS2/Include/;../App/inc;../Task/inc;../Services/inc</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32H5xx_HAL_Driver/Inc;../Drivers/STM32H5xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H5xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include/;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM33_NTZ/non_secure/;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/;../Middlewares/Third_Party/CMSIS/RTOS2/Include/;../App/inc;../Task/inc;../Services/inc;..\Bsp\inc;..\Devices\inc</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -453,6 +453,11 @@
               <FileType>1</FileType>
               <FilePath>..\Task\src\systemManagerTask.c</FilePath>
             </File>
+            <File>
+              <FileName>dataProcessTask.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Task\src\dataProcessTask.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -477,6 +482,31 @@
               <FileName>data_manager.md</FileName>
               <FileType>5</FileType>
               <FilePath>..\Services\data_manager.md</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Devices</GroupName>
+          <Files>
+            <File>
+              <FileName>bq25622.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\bq25622.c</FilePath>
+            </File>
+            <File>
+              <FileName>max17043.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\max17043.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Bsp</GroupName>
+          <Files>
+            <File>
+              <FileName>i2c_bus.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Bsp\src\i2c_bus.c</FilePath>
             </File>
           </Files>
         </Group>
