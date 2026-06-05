@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "data_manager.h"
 
 /* USER CODE END Includes */
 
@@ -132,6 +133,10 @@ int main(void)
 
   /* Init scheduler */
   osKernelInitialize();
+  if (DataManager_Init() != GLOVE_STATUS_OK)
+  {
+    Error_Handler();
+  }
   /* Call init function for freertos objects (in app_freertos.c) */
   MX_FREERTOS_Init();
 
