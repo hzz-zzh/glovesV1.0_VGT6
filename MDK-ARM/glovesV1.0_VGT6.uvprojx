@@ -339,7 +339,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32H563xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32H5xx_HAL_Driver/Inc;../Drivers/STM32H5xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H5xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include/;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM33_NTZ/non_secure/;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/;../Middlewares/Third_Party/CMSIS/RTOS2/Include/;../App/inc;../Task/inc;../Services/inc;..\Bsp\inc;..\Devices\inc</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32H5xx_HAL_Driver/Inc;../Drivers/STM32H5xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H5xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include/;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM33_NTZ/non_secure/;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/;../Middlewares/Third_Party/CMSIS/RTOS2/Include/;../App/inc;../Task/inc;../Services/inc;../Bsp/inc;../Devices/inc</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -458,6 +458,11 @@
               <FileType>1</FileType>
               <FilePath>..\Task\src\dataProcessTask.c</FilePath>
             </File>
+            <File>
+              <FileName>imuCanTask.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Task\src\imuCanTask.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -507,6 +512,26 @@
               <FileName>i2c_bus.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Bsp\src\i2c_bus.c</FilePath>
+            </File>
+            <File>
+              <FileName>hi04_can.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Bsp\src\hi04_can.c</FilePath>
+            </File>
+            <File>
+              <FileName>hi04_driver.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Bsp\src\hi04_driver.c</FilePath>
+            </File>
+            <File>
+              <FileName>hi04_fdcan_stm32h563.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Bsp\src\hi04_fdcan_stm32h563.c</FilePath>
+            </File>
+            <File>
+              <FileName>hi04_j1939.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Bsp\src\hi04_j1939.c</FilePath>
             </File>
           </Files>
         </Group>
