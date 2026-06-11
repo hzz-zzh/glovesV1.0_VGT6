@@ -49,6 +49,7 @@ extern "C" {
 extern UART_HandleTypeDef huart1;
 extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
+extern XSPI_HandleTypeDef hxspi1;
 /* USER CODE END EM */
 
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);

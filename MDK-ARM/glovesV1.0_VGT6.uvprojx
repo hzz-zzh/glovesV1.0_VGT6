@@ -503,6 +503,11 @@
               <FileType>1</FileType>
               <FilePath>..\Devices\src\max17043.c</FilePath>
             </File>
+            <File>
+              <FileName>w25q512jv.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\w25q512jv.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
