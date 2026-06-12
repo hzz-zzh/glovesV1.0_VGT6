@@ -38,7 +38,6 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define IMU_CAN_TASK_PUBLISH_PERIOD_MS          (10U)
 #define IMU_CAN_TASK_QUEUE_TIMEOUT_MS           (0U)
 #define IMU_CAN_TASK_FRAME_FLAGS_REQUIRED       (HI04_SEEN_ACCEL | HI04_SEEN_GYRO)
-#define IMU_CAN_TASK_VALID_NODE_SHIFT           (16U)
 #define IMU_CAN_TASK_G_TO_MPS2                  (9.80665f)
 #define IMU_CAN_TASK_DEG_TO_RAD                 (0.01745329251994329577f)
 #define IMU_CAN_TASK_J1939_PRIORITY             (3U)
@@ -843,9 +842,9 @@ static void ImuCanTask_PublishSnapshot(void)
                                        out_i,
                                        bus->devices[local_i].seen_mask,
                                        &bus->devices[local_i].latest);
-                block->data.valid_flags |= (1UL << (IMU_CAN_TASK_VALID_NODE_SHIFT + out_i));
                 if ((bus->devices[local_i].seen_mask & HI04_SEEN_QUAT) != 0U)
                 {
+                    block->data.valid_flags |= GLOVE_FRAME_VALID_IMU_BIT(out_i);
                     any_quat_valid = 1U;
                 }
                 any_valid = 1U;

@@ -28,13 +28,13 @@ typedef struct
 void DataProcessTask(void *argument);
 void DataProcessTask_GetStats(DataProcessStats_t *stats);
 
-/*
- * Override this weak function in the algorithm module when the calibrated
- * hand kinematic model is ready. The task keeps the DataManager ownership
- * flow unchanged either way.
- */
-GloveStatus_t DataProcess_SolveJointAngles(const GloveRawFrame_t *raw,
-                                           float joint_angle_rad[GLOVE_JOINT_DOF_COUNT]);
+GloveStatus_t DataProcessTask_SetHandSide(GloveHandSide_t hand_side);
+GloveStatus_t DataProcessTask_SetCalibration(uint8_t imu_id,
+                                             const GloveQuaternion_t *c_calib,
+                                             const GloveQuaternion_t *m_calib);
+GloveStatus_t DataProcessTask_SetCalibrationTable(const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
+                                                  const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT]);
+GloveStatus_t DataProcessTask_ResetCalibration(void);
 
 #ifdef __cplusplus
 }

@@ -159,8 +159,7 @@ IMU 和触觉采样频率不一致
 ```text
 获取 GloveRawFrame_t
 进行 IMU 姿态解算
-计算 21 自由度关节角
-计算关节角速度
+计算 21 自由度关节角 deg
 生成 GloveProcessedFrame_t
 合成 GloveFullFrame_t
 调用 DataManager_PublishFullFrame

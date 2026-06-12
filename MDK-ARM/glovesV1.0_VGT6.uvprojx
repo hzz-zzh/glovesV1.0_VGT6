@@ -428,6 +428,11 @@
               <FileType>1</FileType>
               <FilePath>..\App\src\app_data.c</FilePath>
             </File>
+            <File>
+              <FileName>hand_solve.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\App\src\hand_solve.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -462,6 +467,16 @@
               <FileName>imuCanTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Task\src\imuCanTask.c</FilePath>
+            </File>
+            <File>
+              <FileName>storageTask.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Task\src\storageTask.c</FilePath>
+            </File>
+            <File>
+              <FileName>touchAdcTask.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Task\src\touchAdcTask.c</FilePath>
             </File>
           </Files>
         </Group>

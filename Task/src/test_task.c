@@ -39,7 +39,9 @@ static void Test_FillImuSensor(GloveImuSensorBlock_t *block, uint32_t seq)
 
     block->data.sensor_seq = seq;
     block->data.timestamp_us = Test_MakeTimestampUs(seq);
-    block->data.valid_flags = GLOVE_FRAME_FLAG_IMU_VALID | GLOVE_FRAME_FLAG_QUAT_VALID;
+    block->data.valid_flags = GLOVE_FRAME_FLAG_IMU_VALID |
+                              GLOVE_FRAME_FLAG_QUAT_VALID |
+                              GLOVE_FRAME_VALID_IMU_ALL_MASK;
 
     for (uint32_t i = 0U; i < GLOVE_IMU_COUNT; i++)
     {
@@ -95,8 +97,7 @@ static void Test_FillProcessedFrame(GloveProcessedFrame_t *processed, const Glov
 
     for (uint32_t i = 0U; i < GLOVE_JOINT_DOF_COUNT; i++)
     {
-        processed->joint_angle_rad[i] = (float)i * 0.01f;
-        processed->joint_velocity_radps[i] = (float)i * 0.001f;
+        processed->joint_angle_deg[i] = (float)i;
     }
 }
 

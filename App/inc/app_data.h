@@ -109,8 +109,7 @@ typedef struct
     uint32_t valid_flags;             /* 算法结果有效标志 */
 
     GloveQuaternion_t imu_attitude[GLOVE_IMU_COUNT];
-    float joint_angle_rad[GLOVE_JOINT_DOF_COUNT];
-    float joint_velocity_radps[GLOVE_JOINT_DOF_COUNT];
+    float joint_angle_deg[GLOVE_JOINT_DOF_COUNT];
 } GloveProcessedFrame_t;
 
 /* SD 卡和 RS485 都只消费 FullFrame，确保原始数据和对应算法结果绑定在一起 */

@@ -36,6 +36,12 @@ extern "C" {
 #define GLOVE_FRAME_FLAG_TOUCH_VALID            (0x00000004UL)
 #define GLOVE_FRAME_FLAG_ALGORITHM_VALID        (0x00000008UL)
 
+#define GLOVE_FRAME_VALID_IMU_BIT_SHIFT         (16U)
+#define GLOVE_FRAME_VALID_IMU_BIT(index)        (1UL << (GLOVE_FRAME_VALID_IMU_BIT_SHIFT + (index)))
+#define GLOVE_FRAME_VALID_IMU_ALL_MASK          (((1UL << GLOVE_IMU_COUNT) - 1UL) << \
+                                                 GLOVE_FRAME_VALID_IMU_BIT_SHIFT)
+#define GLOVE_IMU_VALID_ALL_MASK                ((1UL << GLOVE_IMU_COUNT) - 1UL)
+
 #ifdef __cplusplus
 }
 #endif

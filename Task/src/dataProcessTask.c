@@ -1,40 +1,83 @@
 #include "dataProcessTask.h"
 
-#include <math.h>
 #include <stddef.h>
 #include <string.h>
 
-#include "cmsis_compiler.h"
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
 #include "task.h"
+
 #include "data_manager.h"
+#include "hand_solve.h"
 
 #define DATA_PROCESS_GET_RAW_TIMEOUT_MS         (10U)
 #define DATA_PROCESS_IDLE_DELAY_MS              (1U)
 #define DATA_PROCESS_FULL_PUBLISH_TIMEOUT_MS    (0U)
-#define DATA_PROCESS_QUAT_EPSILON               (1.0e-12f)
-#define DATA_PROCESS_US_PER_SECOND_F            (1000000.0f)
 
 typedef struct
 {
-    uint8_t parent_imu;
-    uint8_t child_imu;
-} DataProcessJointPair_t;
+    HandSolveLayout_t layout;
+    GloveQuaternion_t c_calib[GLOVE_IMU_COUNT];
+    GloveQuaternion_t m_calib[GLOVE_IMU_COUNT];
+} DataProcessAlgorithmConfig_t;
 
-static const DataProcessJointPair_t s_default_joint_pairs[GLOVE_JOINT_DOF_COUNT] = {
-    {0U, 1U},  {1U, 2U},   {2U, 3U},   {0U, 2U},
-    {0U, 4U},  {4U, 5U},   {5U, 6U},   {0U, 5U},
-    {0U, 7U},  {7U, 8U},   {8U, 9U},   {0U, 8U},
-    {0U, 10U}, {10U, 11U}, {11U, 12U}, {0U, 11U},
-    {0U, 13U}, {13U, 14U}, {14U, 15U}, {0U, 14U},
-    {0U, 0U}
-};
+static const GloveQuaternion_t s_identity_quat = {1.0f, 0.0f, 0.0f, 0.0f};
 
 static DataProcessStats_t s_data_process_stats;
-static float s_last_joint_angle_rad[GLOVE_JOINT_DOF_COUNT];
-static GloveTimestampUs_t s_last_processed_timestamp_us;
-static uint8_t s_last_joint_angle_valid;
+static DataProcessAlgorithmConfig_t s_algorithm_config = {
+    {
+        1U,
+        {
+            {2U, 3U, 4U},
+            {5U, 6U, 7U},
+            {8U, 9U, 10U},
+            {11U, 12U, 13U},
+            {14U, 15U, 16U}
+        },
+        GLOVE_HAND_LEFT
+    },
+    {
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f}
+    },
+    {
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f}
+    }
+};
+
+static uint8_t DataProcess_IsValidHandSide(GloveHandSide_t hand_side)
+{
+    return ((hand_side == GLOVE_HAND_LEFT) || (hand_side == GLOVE_HAND_RIGHT)) ? 1U : 0U;
+}
+
+static uint8_t DataProcess_IsValidImuId(uint8_t imu_id)
+{
+    return ((imu_id >= 1U) && (imu_id <= GLOVE_IMU_COUNT)) ? 1U : 0U;
+}
+
+static uint32_t DataProcess_GetRawImuValidMask(const GloveRawFrame_t *raw)
+{
+    if (raw == NULL)
+    {
+        return 0UL;
+    }
+
+    return (raw->valid_flags & GLOVE_FRAME_VALID_IMU_ALL_MASK) >>
+           GLOVE_FRAME_VALID_IMU_BIT_SHIFT;
+}
 
 static uint8_t DataProcess_HasValidImuInput(const GloveRawFrame_t *raw)
 {
@@ -45,7 +88,24 @@ static uint8_t DataProcess_HasValidImuInput(const GloveRawFrame_t *raw)
         return 0U;
     }
 
-    return ((raw->valid_flags & required_flags) == required_flags) ? 1U : 0U;
+    if ((raw->valid_flags & required_flags) != required_flags)
+    {
+        return 0U;
+    }
+
+    return (DataProcess_GetRawImuValidMask(raw) == GLOVE_IMU_VALID_ALL_MASK) ? 1U : 0U;
+}
+
+static void DataProcess_CopyAlgorithmConfig(DataProcessAlgorithmConfig_t *config)
+{
+    if (config == NULL)
+    {
+        return;
+    }
+
+    taskENTER_CRITICAL();
+    *config = s_algorithm_config;
+    taskEXIT_CRITICAL();
 }
 
 static GloveTimestampUs_t DataProcess_GetKernelTimeUs(void)
@@ -61,168 +121,30 @@ static GloveTimestampUs_t DataProcess_GetKernelTimeUs(void)
                                 (uint64_t)tick_freq);
 }
 
-static GloveQuaternion_t DataProcess_NormalizeQuaternion(const GloveQuaternion_t *quat)
+static GloveStatus_t DataProcess_SolveJointAnglesDeg(const GloveRawFrame_t *raw,
+                                                     float joint_angle_deg[GLOVE_JOINT_DOF_COUNT])
 {
-    GloveQuaternion_t normalized = {1.0f, 0.0f, 0.0f, 0.0f};
-    float norm_sq;
-    float inv_norm;
+    DataProcessAlgorithmConfig_t config;
 
-    if (quat == NULL)
-    {
-        return normalized;
-    }
-
-    norm_sq = (quat->w * quat->w) +
-              (quat->x * quat->x) +
-              (quat->y * quat->y) +
-              (quat->z * quat->z);
-
-    if (norm_sq <= DATA_PROCESS_QUAT_EPSILON)
-    {
-        return normalized;
-    }
-
-    inv_norm = 1.0f / sqrtf(norm_sq);
-    normalized.w = quat->w * inv_norm;
-    normalized.x = quat->x * inv_norm;
-    normalized.y = quat->y * inv_norm;
-    normalized.z = quat->z * inv_norm;
-
-    return normalized;
-}
-
-static GloveQuaternion_t DataProcess_QuaternionConjugate(const GloveQuaternion_t *quat)
-{
-    GloveQuaternion_t conjugate = {1.0f, 0.0f, 0.0f, 0.0f};
-
-    if (quat == NULL)
-    {
-        return conjugate;
-    }
-
-    conjugate.w = quat->w;
-    conjugate.x = -quat->x;
-    conjugate.y = -quat->y;
-    conjugate.z = -quat->z;
-
-    return conjugate;
-}
-
-static GloveQuaternion_t DataProcess_QuaternionMultiply(const GloveQuaternion_t *left,
-                                                        const GloveQuaternion_t *right)
-{
-    GloveQuaternion_t product = {1.0f, 0.0f, 0.0f, 0.0f};
-
-    if ((left == NULL) || (right == NULL))
-    {
-        return product;
-    }
-
-    product.w = (left->w * right->w) -
-                (left->x * right->x) -
-                (left->y * right->y) -
-                (left->z * right->z);
-    product.x = (left->w * right->x) +
-                (left->x * right->w) +
-                (left->y * right->z) -
-                (left->z * right->y);
-    product.y = (left->w * right->y) -
-                (left->x * right->z) +
-                (left->y * right->w) +
-                (left->z * right->x);
-    product.z = (left->w * right->z) +
-                (left->x * right->y) -
-                (left->y * right->x) +
-                (left->z * right->w);
-
-    return product;
-}
-
-static float DataProcess_GetRelativeAngleRad(const GloveQuaternion_t *parent,
-                                             const GloveQuaternion_t *child)
-{
-    GloveQuaternion_t normalized_parent;
-    GloveQuaternion_t normalized_child;
-    GloveQuaternion_t parent_inverse;
-    GloveQuaternion_t relative;
-    float vector_norm;
-
-    normalized_parent = DataProcess_NormalizeQuaternion(parent);
-    normalized_child = DataProcess_NormalizeQuaternion(child);
-    parent_inverse = DataProcess_QuaternionConjugate(&normalized_parent);
-    relative = DataProcess_QuaternionMultiply(&parent_inverse, &normalized_child);
-
-    if (relative.w < 0.0f)
-    {
-        relative.w = -relative.w;
-        relative.x = -relative.x;
-        relative.y = -relative.y;
-        relative.z = -relative.z;
-    }
-
-    vector_norm = sqrtf((relative.x * relative.x) +
-                        (relative.y * relative.y) +
-                        (relative.z * relative.z));
-
-    return 2.0f * atan2f(vector_norm, relative.w);
-}
-
-__WEAK GloveStatus_t DataProcess_SolveJointAngles(const GloveRawFrame_t *raw,
-                                                  float joint_angle_rad[GLOVE_JOINT_DOF_COUNT])
-{
-    if ((raw == NULL) || (joint_angle_rad == NULL))
+    if ((raw == NULL) || (joint_angle_deg == NULL))
     {
         return GLOVE_STATUS_INVALID_PARAM;
     }
 
     if (DataProcess_HasValidImuInput(raw) == 0U)
     {
+        (void)memset(joint_angle_deg, 0, sizeof(float) * GLOVE_JOINT_DOF_COUNT);
         return GLOVE_STATUS_NOT_READY;
     }
 
-    for (uint32_t i = 0U; i < GLOVE_JOINT_DOF_COUNT; i++)
-    {
-        const DataProcessJointPair_t *pair = &s_default_joint_pairs[i];
+    DataProcess_CopyAlgorithmConfig(&config);
 
-        joint_angle_rad[i] =
-            DataProcess_GetRelativeAngleRad(&raw->quat[pair->parent_imu],
-                                            &raw->quat[pair->child_imu]);
-    }
-
-    return GLOVE_STATUS_OK;
-}
-
-static void DataProcess_UpdateJointVelocity(GloveProcessedFrame_t *processed)
-{
-    GloveTimestampUs_t diff_us;
-    float dt_s;
-
-    if (processed == NULL)
-    {
-        return;
-    }
-
-    if ((s_last_joint_angle_valid != 0U) &&
-        (processed->timestamp_us > s_last_processed_timestamp_us))
-    {
-        diff_us = processed->timestamp_us - s_last_processed_timestamp_us;
-        dt_s = (float)diff_us / DATA_PROCESS_US_PER_SECOND_F;
-
-        if (dt_s > 0.0f)
-        {
-            for (uint32_t i = 0U; i < GLOVE_JOINT_DOF_COUNT; i++)
-            {
-                processed->joint_velocity_radps[i] =
-                    (processed->joint_angle_rad[i] - s_last_joint_angle_rad[i]) / dt_s;
-            }
-        }
-    }
-
-    (void)memcpy(s_last_joint_angle_rad,
-                 processed->joint_angle_rad,
-                 sizeof(s_last_joint_angle_rad));
-    s_last_processed_timestamp_us = processed->timestamp_us;
-    s_last_joint_angle_valid = 1U;
+    return HandSolve_SolveAnglesDeg(raw->quat,
+                                    DataProcess_GetRawImuValidMask(raw),
+                                    &config.layout,
+                                    config.c_calib,
+                                    config.m_calib,
+                                    joint_angle_deg);
 }
 
 static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
@@ -246,17 +168,13 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
                      sizeof(processed->imu_attitude));
     }
 
-    status = DataProcess_SolveJointAngles(raw, processed->joint_angle_rad);
+    status = DataProcess_SolveJointAnglesDeg(raw, processed->joint_angle_deg);
     if (status != GLOVE_STATUS_OK)
     {
-        if (DataProcess_HasValidImuInput(raw) == 0U)
-        {
-            s_data_process_stats.invalid_input_frames++;
-        }
+        s_data_process_stats.invalid_input_frames++;
         return status;
     }
 
-    DataProcess_UpdateJointVelocity(processed);
     processed->valid_flags = GLOVE_FRAME_FLAG_ALGORITHM_VALID;
 
     return GLOVE_STATUS_OK;
@@ -298,6 +216,81 @@ static void DataProcess_SetLastStatus(GloveStatus_t status)
     s_data_process_stats.last_status = status;
 }
 
+GloveStatus_t DataProcessTask_SetHandSide(GloveHandSide_t hand_side)
+{
+    if (DataProcess_IsValidHandSide(hand_side) == 0U)
+    {
+        return GLOVE_STATUS_INVALID_PARAM;
+    }
+
+    taskENTER_CRITICAL();
+    s_algorithm_config.layout.hand_side = hand_side;
+    taskEXIT_CRITICAL();
+
+    return GLOVE_STATUS_OK;
+}
+
+GloveStatus_t DataProcessTask_SetCalibration(uint8_t imu_id,
+                                             const GloveQuaternion_t *c_calib,
+                                             const GloveQuaternion_t *m_calib)
+{
+    uint32_t index;
+
+    if ((DataProcess_IsValidImuId(imu_id) == 0U) ||
+        ((c_calib == NULL) && (m_calib == NULL)))
+    {
+        return GLOVE_STATUS_INVALID_PARAM;
+    }
+
+    index = (uint32_t)imu_id - 1U;
+
+    taskENTER_CRITICAL();
+    if (c_calib != NULL)
+    {
+        s_algorithm_config.c_calib[index] = *c_calib;
+    }
+    if (m_calib != NULL)
+    {
+        s_algorithm_config.m_calib[index] = *m_calib;
+    }
+    taskEXIT_CRITICAL();
+
+    return GLOVE_STATUS_OK;
+}
+
+GloveStatus_t DataProcessTask_SetCalibrationTable(const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
+                                                  const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT])
+{
+    if ((c_calib == NULL) || (m_calib == NULL))
+    {
+        return GLOVE_STATUS_INVALID_PARAM;
+    }
+
+    taskENTER_CRITICAL();
+    (void)memcpy(s_algorithm_config.c_calib,
+                 c_calib,
+                 sizeof(s_algorithm_config.c_calib));
+    (void)memcpy(s_algorithm_config.m_calib,
+                 m_calib,
+                 sizeof(s_algorithm_config.m_calib));
+    taskEXIT_CRITICAL();
+
+    return GLOVE_STATUS_OK;
+}
+
+GloveStatus_t DataProcessTask_ResetCalibration(void)
+{
+    taskENTER_CRITICAL();
+    for (uint32_t i = 0U; i < GLOVE_IMU_COUNT; i++)
+    {
+        s_algorithm_config.c_calib[i] = s_identity_quat;
+        s_algorithm_config.m_calib[i] = s_identity_quat;
+    }
+    taskEXIT_CRITICAL();
+
+    return GLOVE_STATUS_OK;
+}
+
 void DataProcessTask_GetStats(DataProcessStats_t *stats)
 {
     if (stats != NULL)
@@ -321,9 +314,6 @@ void DataProcessTask(void *argument)
 
     (void)argument;
     (void)memset(&s_data_process_stats, 0, sizeof(s_data_process_stats));
-    (void)memset(s_last_joint_angle_rad, 0, sizeof(s_last_joint_angle_rad));
-    s_last_processed_timestamp_us = 0ULL;
-    s_last_joint_angle_valid = 0U;
 
     for (;;)
     {
