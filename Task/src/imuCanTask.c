@@ -8,6 +8,7 @@
 #include "app_freertos.h"
 #include "cmsis_os2.h"
 #include "data_manager.h"
+#include "glove_hand_config.h"
 #include "hi04_driver.h"
 #include "hi04_fdcan_stm32h563.h"
 #include "main.h"
@@ -22,16 +23,14 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define IMU_CAN_TASK_LOGICAL_FIRST_NODE_ID      (1U)
 
 #define IMU_CAN_TASK_BUS1_CAN_HANDLE            (&hfdcan1)
-#define IMU_CAN_TASK_BUS1_FIRST_NODE_ID         (1U)
+#define IMU_CAN_TASK_BUS1_FIRST_NODE_ID         (0x11U)
 #define IMU_CAN_TASK_BUS1_NODE_COUNT            (8U)
 #define IMU_CAN_TASK_BUS1_CONFIG_NODE_COUNT     (8U)
-#define IMU_CAN_TASK_BUS1_OUTPUT_BASE_INDEX     (0U)
 
 #define IMU_CAN_TASK_BUS2_CAN_HANDLE            (&hfdcan2)
-#define IMU_CAN_TASK_BUS2_FIRST_NODE_ID         (1U)
+#define IMU_CAN_TASK_BUS2_FIRST_NODE_ID         (0x11U)
 #define IMU_CAN_TASK_BUS2_NODE_COUNT            (8U)
 #define IMU_CAN_TASK_BUS2_CONFIG_NODE_COUNT     (8U)
-#define IMU_CAN_TASK_BUS2_OUTPUT_BASE_INDEX     (8U)
 
 #define IMU_CAN_TASK_SET_IMU_BUS_INDEX          (0U)
 
@@ -72,7 +71,6 @@ typedef struct
     uint8_t first_node_id;
     uint8_t node_count;
     uint8_t config_node_count;
-    uint8_t output_base_index;
 } ImuCanTaskBusConfig_t;
 
 typedef struct
@@ -122,16 +120,46 @@ typedef struct
 static const ImuCanTaskBusConfig_t s_bus_configs[IMU_CAN_TASK_BUS_COUNT] =
 {
     { IMU_CAN_TASK_BUS1_CAN_HANDLE, IMU_CAN_TASK_BUS1_FIRST_NODE_ID,
-      IMU_CAN_TASK_BUS1_NODE_COUNT, IMU_CAN_TASK_BUS1_CONFIG_NODE_COUNT,
-      IMU_CAN_TASK_BUS1_OUTPUT_BASE_INDEX },
+      IMU_CAN_TASK_BUS1_NODE_COUNT, IMU_CAN_TASK_BUS1_CONFIG_NODE_COUNT },
     { IMU_CAN_TASK_BUS2_CAN_HANDLE, IMU_CAN_TASK_BUS2_FIRST_NODE_ID,
-      IMU_CAN_TASK_BUS2_NODE_COUNT, IMU_CAN_TASK_BUS2_CONFIG_NODE_COUNT,
-      IMU_CAN_TASK_BUS2_OUTPUT_BASE_INDEX }
+      IMU_CAN_TASK_BUS2_NODE_COUNT, IMU_CAN_TASK_BUS2_CONFIG_NODE_COUNT }
 };
 
 static ImuCanTaskBusRuntime_t s_buses[IMU_CAN_TASK_BUS_COUNT];
 static ImuCanTaskStats_t s_imu_can_stats;
 static uint32_t s_sensor_seq;
+
+static const uint8_t s_left_bus1_output_index[IMU_CAN_TASK_MAX_NODES_PER_BUS] =
+{
+    1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U
+};
+
+static const uint8_t s_left_bus2_output_index[IMU_CAN_TASK_MAX_NODES_PER_BUS] =
+{
+    13U, 14U, 15U, 10U, 11U, 12U, 0U, 9U
+};
+
+static const uint8_t s_right_bus1_output_index[IMU_CAN_TASK_MAX_NODES_PER_BUS] =
+{
+    13U, 14U, 15U, 10U, 11U, 12U, 7U, 8U
+};
+
+static const uint8_t s_right_bus2_output_index[IMU_CAN_TASK_MAX_NODES_PER_BUS] =
+{
+    1U, 2U, 3U, 4U, 5U, 6U, 0U, 9U
+};
+
+static const uint8_t *const s_left_output_maps[IMU_CAN_TASK_BUS_COUNT] =
+{
+    s_left_bus1_output_index,
+    s_left_bus2_output_index
+};
+
+static const uint8_t *const s_right_output_maps[IMU_CAN_TASK_BUS_COUNT] =
+{
+    s_right_bus1_output_index,
+    s_right_bus2_output_index
+};
 
 static uint64_t ImuCanTask_TimeUs(void)
 {
@@ -140,32 +168,98 @@ static uint64_t ImuCanTask_TimeUs(void)
 
 static uint32_t ImuCanTask_TotalLogicalNodeCount(void)
 {
-    uint32_t total = 0U;
+    return GLOVE_IMU_COUNT;
+}
+
+static const uint8_t *const *ImuCanTask_GetOutputMaps(void)
+{
+    return (GloveHandConfig_GetHandSide() == GLOVE_HAND_RIGHT) ?
+           s_right_output_maps :
+           s_left_output_maps;
+}
+
+static bool ImuCanTask_GetBusIndex(const ImuCanTaskBusRuntime_t *bus,
+                                   uint32_t *bus_index)
+{
+    if ((bus == NULL) || (bus_index == NULL))
+    {
+        return false;
+    }
 
     for (uint32_t i = 0U; i < IMU_CAN_TASK_BUS_COUNT; i++)
     {
-        uint32_t end = (uint32_t)s_bus_configs[i].output_base_index +
-                       (uint32_t)s_bus_configs[i].node_count;
-        if (end > total)
+        if (bus == &s_buses[i])
         {
-            total = end;
+            *bus_index = i;
+            return true;
         }
     }
 
-    return (total > GLOVE_IMU_COUNT) ? GLOVE_IMU_COUNT : total;
+    return false;
 }
 
-static uint32_t ImuCanTask_BusOutputIndex(const ImuCanTaskBusRuntime_t *bus,
-                                          uint32_t local_index)
+static bool ImuCanTask_BusOutputIndex(const ImuCanTaskBusRuntime_t *bus,
+                                      uint32_t local_index,
+                                      uint32_t *output_index)
 {
-    return (uint32_t)bus->config->output_base_index + local_index;
+    uint32_t bus_index;
+    const uint8_t *const *maps = ImuCanTask_GetOutputMaps();
+    uint8_t mapped_index;
+
+    if ((bus == NULL) || (bus->config == NULL) || (output_index == NULL) ||
+        (bus->config->node_count > IMU_CAN_TASK_MAX_NODES_PER_BUS) ||
+        (local_index >= bus->config->node_count) ||
+        (local_index >= IMU_CAN_TASK_MAX_NODES_PER_BUS) ||
+        (ImuCanTask_GetBusIndex(bus, &bus_index) == false) ||
+        (bus_index >= IMU_CAN_TASK_BUS_COUNT) ||
+        (maps[bus_index] == NULL))
+    {
+        return false;
+    }
+
+    mapped_index = maps[bus_index][local_index];
+    if (mapped_index >= GLOVE_IMU_COUNT)
+    {
+        return false;
+    }
+
+    *output_index = (uint32_t)mapped_index;
+    return true;
 }
 
 static uint32_t ImuCanTask_BusLogicalNodeId(const ImuCanTaskBusRuntime_t *bus,
                                             uint32_t local_index)
 {
-    return IMU_CAN_TASK_LOGICAL_FIRST_NODE_ID +
-           ImuCanTask_BusOutputIndex(bus, local_index);
+    uint32_t output_index;
+
+    if (ImuCanTask_BusOutputIndex(bus, local_index, &output_index) == false)
+    {
+        return 0U;
+    }
+
+    return IMU_CAN_TASK_LOGICAL_FIRST_NODE_ID + output_index;
+}
+
+static bool ImuCanTask_ValidateBusMap(uint32_t bus_index, uint8_t node_count)
+{
+    if ((bus_index >= IMU_CAN_TASK_BUS_COUNT) ||
+        (node_count > IMU_CAN_TASK_MAX_NODES_PER_BUS) ||
+        (s_left_output_maps[bus_index] == NULL) ||
+        (s_right_output_maps[bus_index] == NULL))
+    {
+        return false;
+    }
+
+    for (uint32_t local_i = 0U; local_i < node_count; local_i++)
+    {
+        if ((s_left_output_maps[bus_index][local_i] >= GLOVE_IMU_COUNT) ||
+            (s_right_output_maps[bus_index][local_i] >= GLOVE_IMU_COUNT))
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static bool ImuCanTask_NodeToLocalIndex(const ImuCanTaskBusRuntime_t *bus,
@@ -197,23 +291,31 @@ static bool ImuCanTask_LogicalNodeToBus(uint32_t logical_node_id,
     }
 
     output_index = logical_node_id - IMU_CAN_TASK_LOGICAL_FIRST_NODE_ID;
+    if (output_index >= GLOVE_IMU_COUNT)
+    {
+        return false;
+    }
 
     for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
     {
         ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
-        if (bus->config == NULL)
+        if ((bus->config == NULL) ||
+            (bus->config->node_count > IMU_CAN_TASK_MAX_NODES_PER_BUS))
         {
             continue;
         }
 
-        uint32_t base = bus->config->output_base_index;
         uint32_t count = bus->config->node_count;
-
-        if ((output_index >= base) && (output_index < (base + count)))
+        for (uint32_t local_i = 0U; local_i < count; local_i++)
         {
-            *bus_out = bus;
-            *local_index_out = output_index - base;
-            return true;
+            uint32_t mapped_index;
+            if ((ImuCanTask_BusOutputIndex(bus, local_i, &mapped_index) == true) &&
+                (mapped_index == output_index))
+            {
+                *bus_out = bus;
+                *local_index_out = local_i;
+                return true;
+            }
         }
     }
 
@@ -829,8 +931,8 @@ static void ImuCanTask_PublishSnapshot(void)
 
         for (uint32_t local_i = 0U; local_i < bus->config->node_count; local_i++)
         {
-            uint32_t out_i = ImuCanTask_BusOutputIndex(bus, local_i);
-            if (out_i >= GLOVE_IMU_COUNT)
+            uint32_t out_i;
+            if (ImuCanTask_BusOutputIndex(bus, local_i, &out_i) == false)
             {
                 continue;
             }
@@ -1048,8 +1150,7 @@ void ImuCanTask(void *argument)
         s_buses[i].port.time_us = ImuCanTask_TimeUs;
 
         if ((s_bus_configs[i].node_count > IMU_CAN_TASK_MAX_NODES_PER_BUS) ||
-            ((uint32_t)s_bus_configs[i].output_base_index +
-             (uint32_t)s_bus_configs[i].node_count > GLOVE_IMU_COUNT))
+            (ImuCanTask_ValidateBusMap(i, s_bus_configs[i].node_count) == false))
         {
             s_imu_can_stats.init_error_count++;
             s_imu_can_stats.last_error = 80U + i;

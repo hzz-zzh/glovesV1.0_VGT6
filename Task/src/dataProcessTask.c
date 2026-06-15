@@ -8,6 +8,7 @@
 #include "task.h"
 
 #include "data_manager.h"
+#include "glove_hand_config.h"
 #include "hand_solve.h"
 
 #define DATA_PROCESS_GET_RAW_TIMEOUT_MS         (10U)
@@ -106,6 +107,8 @@ static void DataProcess_CopyAlgorithmConfig(DataProcessAlgorithmConfig_t *config
     taskENTER_CRITICAL();
     *config = s_algorithm_config;
     taskEXIT_CRITICAL();
+
+    config->layout.hand_side = GloveHandConfig_GetHandSide();
 }
 
 static GloveTimestampUs_t DataProcess_GetKernelTimeUs(void)
@@ -218,9 +221,17 @@ static void DataProcess_SetLastStatus(GloveStatus_t status)
 
 GloveStatus_t DataProcessTask_SetHandSide(GloveHandSide_t hand_side)
 {
+    GloveStatus_t status;
+
     if (DataProcess_IsValidHandSide(hand_side) == 0U)
     {
         return GLOVE_STATUS_INVALID_PARAM;
+    }
+
+    status = GloveHandConfig_SetHandSide(hand_side);
+    if (status != GLOVE_STATUS_OK)
+    {
+        return status;
     }
 
     taskENTER_CRITICAL();
@@ -314,6 +325,7 @@ void DataProcessTask(void *argument)
 
     (void)argument;
     (void)memset(&s_data_process_stats, 0, sizeof(s_data_process_stats));
+    (void)DataProcessTask_SetHandSide(GloveHandConfig_GetHandSide());
 
     for (;;)
     {

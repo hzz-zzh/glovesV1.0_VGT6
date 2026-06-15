@@ -23,7 +23,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "data_manager.h"
+#include "glove_hand_config.h"
 #include "modbus_time_sync.h"
+#include "uart_redirect.h"
 
 /* USER CODE END Includes */
 
@@ -146,7 +148,9 @@ int main(void)
   MX_TIM2_Init();
   MX_USART2_UART_Init();
   MX_TIM5_Init();
+  printf("hello");
   /* USER CODE BEGIN 2 */
+  GloveHandConfig_InitFromGpio();
 
   /* USER CODE END 2 */
 
