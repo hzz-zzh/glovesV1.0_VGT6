@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "data_manager.h"
 
 /* USER CODE END Includes */
 
@@ -134,6 +135,7 @@ const osThreadAttr_t storageTask_attributes = {
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
+  (void)DataManager_Init();
 
   /* USER CODE END Init */
 

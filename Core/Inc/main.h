@@ -47,9 +47,11 @@ extern "C" {
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
 extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
 extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
 extern XSPI_HandleTypeDef hxspi1;
+extern TIM_HandleTypeDef htim5;
 /* USER CODE END EM */
 
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
@@ -86,6 +88,9 @@ void Error_Handler(void);
 #define TOUCH_COL_SEL3_GPIO_Port GPIOC
 #define DISABLE_CHARGE_Pin GPIO_PIN_8
 #define DISABLE_CHARGE_GPIO_Port GPIOA
+#define PPS_IN_Pin GPIO_PIN_15
+#define PPS_IN_GPIO_Port GPIOA
+#define PPS_IN_EXTI_IRQn EXTI15_IRQn
 #define USER_LED_Pin GPIO_PIN_0
 #define USER_LED_GPIO_Port GPIOD
 #define INT_GAUGE_BQ_Pin GPIO_PIN_3
