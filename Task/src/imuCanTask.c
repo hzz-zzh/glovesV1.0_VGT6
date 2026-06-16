@@ -401,7 +401,7 @@ static bool ImuCanTask_ConfigFdcan(ImuCanTaskBusRuntime_t *bus)
     }
 
     if (HAL_FDCAN_ConfigInterruptLines(bus->port.hfdcan,
-                                       FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                       FDCAN_IT_GROUP_RX_FIFO0,
                                        FDCAN_INTERRUPT_LINE0) != HAL_OK)
     {
         s_imu_can_stats.last_error = 4U;

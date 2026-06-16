@@ -154,6 +154,15 @@ int main(void)
   MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
   GloveHandConfig_InitFromGpio();
+  HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_RESET);
+  HAL_Delay(10U);
+  HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_SET);
+  HAL_Delay(100U);
+  if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
@@ -727,7 +736,7 @@ static void MX_TIM2_Init(void)
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim2.Init.Period = 99;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
   {
     Error_Handler();
@@ -957,13 +966,16 @@ static void MX_GPIO_Init(void)
                           |TOUCH_COL_SEL3_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, TOUCH_COL_SEL0_Pin|PERIPH_PWR_EN_Pin|TOUCH_COL_SEL1_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, TOUCH_COL_SEL0_Pin|TOUCH_COL_SEL1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DISABLE_CHARGE_GPIO_Port, DISABLE_CHARGE_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(USER_LED_GPIO_Port, USER_LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : IMU_RST_Pin TOUCH_ROW_SEL0_Pin RS485_EN_Pin TOUCH_COL_SEL4_Pin
                            TOUCH_COL_SEL3_Pin */

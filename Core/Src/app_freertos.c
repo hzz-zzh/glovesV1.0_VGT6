@@ -59,7 +59,7 @@ osThreadId_t uartDebugTaskHandle;
 const osThreadAttr_t uartDebugTask_attributes = {
   .name = "uartDebugTask",
   .priority = (osPriority_t) osPriorityLow,
-  .stack_size = 128 * 4
+  .stack_size = 1024 * 4
 };
 /* Definitions for testTask */
 osThreadId_t testTaskHandle;
@@ -164,10 +164,8 @@ void MX_FREERTOS_Init(void) {
   uartDebugTaskHandle = osThreadNew(UartDebugTask, NULL, &uartDebugTask_attributes);
 #endif
 
-#if FREERTOS_ENABLE_TEST_TASK
   /* creation of testTask */
   testTaskHandle = osThreadNew(StartTestTask, NULL, &testTask_attributes);
-#endif
 
   /* creation of frameAssemblerTask */
   frameAssemblerTaskHandle = osThreadNew(FrameAssemblerTask, NULL, &frameAssemblerTask_attributes);
