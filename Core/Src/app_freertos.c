@@ -33,6 +33,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define FREERTOS_ENABLE_UART_DEBUG_TASK            (0)
+#define FREERTOS_ENABLE_TEST_TASK                  (0)
 
 /* USER CODE END PD */
 
@@ -157,11 +159,15 @@ void MX_FREERTOS_Init(void) {
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
+#if FREERTOS_ENABLE_UART_DEBUG_TASK
   /* creation of uartDebugTask */
   uartDebugTaskHandle = osThreadNew(UartDebugTask, NULL, &uartDebugTask_attributes);
+#endif
 
+#if FREERTOS_ENABLE_TEST_TASK
   /* creation of testTask */
   testTaskHandle = osThreadNew(StartTestTask, NULL, &testTask_attributes);
+#endif
 
   /* creation of frameAssemblerTask */
   frameAssemblerTaskHandle = osThreadNew(FrameAssemblerTask, NULL, &frameAssemblerTask_attributes);

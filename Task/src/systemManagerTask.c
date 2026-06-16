@@ -1,18 +1,26 @@
 #include "systemManagerTask.h"
 
 #include <string.h>
+#include <stdio.h>
 
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "bq25622.h"
 #include "i2c_bus.h"
 #include "max17043.h"
+#include "uart_redirect.h"
 
 #define SYSTEM_MANAGER_BATTERY_READ_PERIOD_MS      (1000U)
 #define SYSTEM_MANAGER_BATTERY_STARTUP_DELAY_MS    (600U)
+#define SYSTEM_MANAGER_BQ25622_TIMEOUT_MS          (20U)
+#define SYSTEM_MANAGER_BQ25622_INPUT_CURRENT_MA    (2500U)
+#define SYSTEM_MANAGER_BQ25622_CHARGE_VOLTAGE_MV   (4200U)
+#define SYSTEM_MANAGER_BQ25622_CHARGE_CURRENT_MA   (160U)
 #define SYSTEM_MANAGER_MAX17043_TIMEOUT_MS         (20U)
 
 static GloveBatteryStatus_t s_battery_status;
+static Bq25622Handle_t s_bq25622;
 static Max17043Handle_t s_max17043;
 
 static uint32_t SystemManager_MsToTicks(uint32_t timeout_ms)
@@ -86,6 +94,44 @@ void SystemManagerTask(void *argument)
 
     (void)argument;
     (void)memset(&s_battery_status, 0, sizeof(s_battery_status));
+
+    status = Bq25622_Init(&s_bq25622, I2C_BUS_1, SYSTEM_MANAGER_BQ25622_TIMEOUT_MS);
+    if (status == GLOVE_STATUS_OK)
+    {
+        status = Bq25622_DisableWatchdog(&s_bq25622);
+    }
+    if (status == GLOVE_STATUS_OK)
+    {
+        status = Bq25622_SetInputCurrentLimitMa(&s_bq25622,
+                                                SYSTEM_MANAGER_BQ25622_INPUT_CURRENT_MA);
+    }
+    if (status == GLOVE_STATUS_OK)
+    {
+        status = Bq25622_EnableExternalIlim(&s_bq25622);
+    }
+    if (status == GLOVE_STATUS_OK)
+    {
+        status = Bq25622_SetChargeVoltageLimitMv(&s_bq25622,
+                                                 SYSTEM_MANAGER_BQ25622_CHARGE_VOLTAGE_MV);
+    }
+    if (status == GLOVE_STATUS_OK)
+    {
+        status = Bq25622_SetChargeCurrentLimitMa(&s_bq25622,
+                                                 SYSTEM_MANAGER_BQ25622_CHARGE_CURRENT_MA);
+    }
+    if (status == GLOVE_STATUS_OK)
+    {
+        (void)Bq25622_PrintChargeStatus(&s_bq25622);
+    }
+    printf("[System] BQ25622 charge config status=%u iindpm=%u mA vreg=%u mV ichg=%u mA\r\n",
+           (unsigned int)status,
+           (unsigned int)SYSTEM_MANAGER_BQ25622_INPUT_CURRENT_MA,
+           (unsigned int)SYSTEM_MANAGER_BQ25622_CHARGE_VOLTAGE_MV,
+           (unsigned int)SYSTEM_MANAGER_BQ25622_CHARGE_CURRENT_MA);
+    if (status != GLOVE_STATUS_OK)
+    {
+        SystemManager_UpdateBatteryFailure(status);
+    }
 
     status = Max17043_Init(&s_max17043, I2C_BUS_1, SYSTEM_MANAGER_MAX17043_TIMEOUT_MS);
     if (status != GLOVE_STATUS_OK)
