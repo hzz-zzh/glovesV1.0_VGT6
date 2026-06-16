@@ -13,10 +13,11 @@
 
 #define SYSTEM_MANAGER_BATTERY_READ_PERIOD_MS      (1000U)
 #define SYSTEM_MANAGER_BATTERY_STARTUP_DELAY_MS    (600U)
+#define SYSTEM_MANAGER_BQ25622_DEBUG_PERIOD_MS     (5000U)
 #define SYSTEM_MANAGER_BQ25622_TIMEOUT_MS          (20U)
 #define SYSTEM_MANAGER_BQ25622_INPUT_CURRENT_MA    (2500U)
 #define SYSTEM_MANAGER_BQ25622_CHARGE_VOLTAGE_MV   (4200U)
-#define SYSTEM_MANAGER_BQ25622_CHARGE_CURRENT_MA   (160U)
+#define SYSTEM_MANAGER_BQ25622_CHARGE_CURRENT_MA   (2400U)
 #define SYSTEM_MANAGER_MAX17043_TIMEOUT_MS         (20U)
 
 static GloveBatteryStatus_t s_battery_status;
@@ -91,6 +92,7 @@ void SystemManagerTask(void *argument)
     GloveStatus_t status;
     uint32_t period_ticks;
     uint32_t next_wake_tick;
+    uint32_t bq_debug_elapsed_ms = 0U;
 
     (void)argument;
     (void)memset(&s_battery_status, 0, sizeof(s_battery_status));
@@ -121,7 +123,7 @@ void SystemManagerTask(void *argument)
     }
     if (status == GLOVE_STATUS_OK)
     {
-        (void)Bq25622_PrintChargeStatus(&s_bq25622);
+        (void)Bq25622_DumpDebugRegisters(&s_bq25622);
     }
     printf("[System] BQ25622 charge config status=%u iindpm=%u mA vreg=%u mV ichg=%u mA\r\n",
            (unsigned int)status,
@@ -154,6 +156,13 @@ void SystemManagerTask(void *argument)
         else
         {
             SystemManager_UpdateBatteryFailure(status);
+        }
+
+        bq_debug_elapsed_ms += SYSTEM_MANAGER_BATTERY_READ_PERIOD_MS;
+        if (bq_debug_elapsed_ms >= SYSTEM_MANAGER_BQ25622_DEBUG_PERIOD_MS)
+        {
+            bq_debug_elapsed_ms = 0U;
+            (void)Bq25622_DumpDebugRegisters(&s_bq25622);
         }
 
         next_wake_tick += period_ticks;

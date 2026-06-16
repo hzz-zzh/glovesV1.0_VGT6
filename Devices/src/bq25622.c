@@ -105,8 +105,7 @@ static GloveStatus_t Bq25622_ReadRegister16(const Bq25622Handle_t *handle,
                                             uint8_t reg_addr,
                                             uint16_t *value)
 {
-    uint8_t low_byte;
-    uint8_t high_byte;
+    uint8_t data[BQ25622_REGISTER_SIZE_BYTES];
     GloveStatus_t status;
 
     if ((handle == NULL) || (value == NULL))
@@ -115,25 +114,22 @@ static GloveStatus_t Bq25622_ReadRegister16(const Bq25622Handle_t *handle,
         return GLOVE_STATUS_INVALID_PARAM;
     }
 
-    status = Bq25622_ReadRegister8(handle, reg_addr, &low_byte);
+    status = I2cBus_MemRead(handle->bus_id,
+                            BQ25622_I2C_ADDRESS_7BIT,
+                            reg_addr,
+                            I2C_BUS_MEM_ADDR_SIZE_8BIT,
+                            data,
+                            BQ25622_REGISTER_SIZE_BYTES,
+                            handle->timeout_ms);
     if (status != GLOVE_STATUS_OK)
     {
-        printf("[BQ25622] read16 low reg=0x%02X status=%u\r\n",
+        printf("[BQ25622] read16 reg=0x%02X status=%u\r\n",
                (unsigned int)reg_addr,
                (unsigned int)status);
         return status;
     }
 
-    status = Bq25622_ReadRegister8(handle, (uint8_t)(reg_addr + 1U), &high_byte);
-    if (status != GLOVE_STATUS_OK)
-    {
-        printf("[BQ25622] read16 high reg=0x%02X status=%u\r\n",
-               (unsigned int)(reg_addr + 1U),
-               (unsigned int)status);
-        return status;
-    }
-
-    *value = (uint16_t)low_byte | ((uint16_t)high_byte << 8);
+    *value = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
 
     return GLOVE_STATUS_OK;
 }
@@ -525,7 +521,7 @@ GloveStatus_t Bq25622_PrintChargeStatus(const Bq25622Handle_t *handle)
         return status;
     }
 
-    printf("[BQ25622] status STAT0=0x%02X treg=%u vsys=%u iindpm_or_ilim=%u vindpm=%u safety=%u wd=%u STAT1=0x%02X chg=%u vbus=%u FAULT0=0x%02X\r\n",
+    printf("[BQ25622] status STAT0=0x%02X treg=%u vsys=%u iindpm_or_ilim=%u vindpm=%u safety=%u wd=%u STAT1=0x%02X chg=%u vbus=%u FAULT0=0x%02X ts=%u vbus_fault=%u bat_fault=%u sys_fault=%u tshut=%u\r\n",
            (unsigned int)status0,
            (unsigned int)((status0 >> 5) & 0x01U),
            (unsigned int)((status0 >> 4) & 0x01U),
@@ -536,7 +532,12 @@ GloveStatus_t Bq25622_PrintChargeStatus(const Bq25622Handle_t *handle)
            (unsigned int)status1,
            (unsigned int)((status1 >> 3) & 0x03U),
            (unsigned int)(status1 & 0x07U),
-           (unsigned int)fault0);
+           (unsigned int)fault0,
+           (unsigned int)(fault0 & 0x07U),
+           (unsigned int)((fault0 >> 7) & 0x01U),
+           (unsigned int)((fault0 >> 6) & 0x01U),
+           (unsigned int)((fault0 >> 5) & 0x01U),
+           (unsigned int)((fault0 >> 3) & 0x01U));
 
     return GLOVE_STATUS_OK;
 }
@@ -610,7 +611,7 @@ GloveStatus_t Bq25622_DumpDebugRegisters(const Bq25622Handle_t *handle)
            (unsigned int)ctrl4,
            (unsigned int)((ctrl4 & BQ25622_CHARGER_CONTROL_4_EN_EXTILIM_MASK) != 0U));
 
-    printf("[BQ25622] dump STAT0=0x%02X treg=%u vsys=%u iindpm_or_ilim=%u vindpm=%u safety=%u wd=%u STAT1=0x%02X chg=%u vbus=%u FAULT0=0x%02X\r\n",
+    printf("[BQ25622] dump STAT0=0x%02X treg=%u vsys=%u iindpm_or_ilim=%u vindpm=%u safety=%u wd=%u STAT1=0x%02X chg=%u vbus=%u FAULT0=0x%02X ts=%u vbus_fault=%u bat_fault=%u sys_fault=%u tshut=%u\r\n",
            (unsigned int)status0,
            (unsigned int)((status0 >> 5) & 0x01U),
            (unsigned int)((status0 >> 4) & 0x01U),
@@ -621,7 +622,12 @@ GloveStatus_t Bq25622_DumpDebugRegisters(const Bq25622Handle_t *handle)
            (unsigned int)status1,
            (unsigned int)((status1 >> 3) & 0x03U),
            (unsigned int)(status1 & 0x07U),
-           (unsigned int)fault0);
+           (unsigned int)fault0,
+           (unsigned int)(fault0 & 0x07U),
+           (unsigned int)((fault0 >> 7) & 0x01U),
+           (unsigned int)((fault0 >> 6) & 0x01U),
+           (unsigned int)((fault0 >> 5) & 0x01U),
+           (unsigned int)((fault0 >> 3) & 0x01U));
 
     return GLOVE_STATUS_OK;
 }
