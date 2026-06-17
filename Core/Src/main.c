@@ -154,6 +154,8 @@ int main(void)
   MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
   GloveHandConfig_InitFromGpio();
+  printf("[Hand] side=%s\r\n",
+         (GloveHandConfig_GetHandSide() == GLOVE_HAND_RIGHT) ? "RIGHT" : "LEFT");
   HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_RESET);
   HAL_Delay(10U);
