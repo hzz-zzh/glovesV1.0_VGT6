@@ -26,6 +26,8 @@ extern DMA_HandleTypeDef handle_GPDMA1_Channel1;
 
 extern DMA_HandleTypeDef handle_GPDMA1_Channel0;
 
+extern DMA_HandleTypeDef handle_GPDMA2_Channel0;
+
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
 
@@ -121,17 +123,17 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     PB0     ------> ADC1_INP9
     PB1     ------> ADC1_INP5
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4;
+    GPIO_InitStruct.Pin = ADIN_CH10_Pin|ADIN_CH13_Pin|ADIN_CH12_Pin|ADIN_CH4_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_7;
+    GPIO_InitStruct.Pin = ADIN_CH15_Pin|ADIN_CH7_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+    GPIO_InitStruct.Pin = ADIN_CH9_Pin|ADIN_CH5_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
@@ -139,6 +141,8 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     /* USER CODE BEGIN ADC1_MspInit 1 */
 
     /* USER CODE END ADC1_MspInit 1 */
+
+    __HAL_LINKDMA(hadc, DMA_Handle, handle_GPDMA2_Channel0);
 
   }
 
@@ -170,15 +174,17 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
     PB0     ------> ADC1_INP9
     PB1     ------> ADC1_INP5
     */
-    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4);
+    HAL_GPIO_DeInit(GPIOC, ADIN_CH10_Pin|ADIN_CH13_Pin|ADIN_CH12_Pin|ADIN_CH4_Pin);
 
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_3|GPIO_PIN_7);
+    HAL_GPIO_DeInit(GPIOA, ADIN_CH15_Pin|ADIN_CH7_Pin);
 
-    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_0|GPIO_PIN_1);
+    HAL_GPIO_DeInit(GPIOB, ADIN_CH9_Pin|ADIN_CH5_Pin);
 
     /* USER CODE BEGIN ADC1_MspDeInit 1 */
 
     /* USER CODE END ADC1_MspDeInit 1 */
+
+    HAL_DMA_DeInit(hadc->DMA_Handle);
   }
 
 }

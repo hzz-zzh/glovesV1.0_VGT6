@@ -46,6 +46,7 @@ extern "C" {
 
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
+extern ADC_HandleTypeDef hadc1;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern I2C_HandleTypeDef hi2c1;
@@ -66,12 +67,28 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define IMU_RST_Pin GPIO_PIN_13
 #define IMU_RST_GPIO_Port GPIOC
+#define ADIN_CH10_Pin GPIO_PIN_0
+#define ADIN_CH10_GPIO_Port GPIOC
+#define ADIN_CH13_Pin GPIO_PIN_2
+#define ADIN_CH13_GPIO_Port GPIOC
+#define ADIN_CH12_Pin GPIO_PIN_3
+#define ADIN_CH12_GPIO_Port GPIOC
 #define IMU_SYNC_Pin GPIO_PIN_1
 #define IMU_SYNC_GPIO_Port GPIOA
 #define POWER_ON_OFF_Pin GPIO_PIN_2
 #define POWER_ON_OFF_GPIO_Port GPIOA
+#define ADIN_CH15_Pin GPIO_PIN_3
+#define ADIN_CH15_GPIO_Port GPIOA
+#define ADIN_CH7_Pin GPIO_PIN_7
+#define ADIN_CH7_GPIO_Port GPIOA
+#define ADIN_CH4_Pin GPIO_PIN_4
+#define ADIN_CH4_GPIO_Port GPIOC
 #define TOUCH_ROW_SEL0_Pin GPIO_PIN_5
 #define TOUCH_ROW_SEL0_GPIO_Port GPIOC
+#define ADIN_CH9_Pin GPIO_PIN_0
+#define ADIN_CH9_GPIO_Port GPIOB
+#define ADIN_CH5_Pin GPIO_PIN_1
+#define ADIN_CH5_GPIO_Port GPIOB
 #define L_R_HAND_FLAG_Pin GPIO_PIN_12
 #define L_R_HAND_FLAG_GPIO_Port GPIOE
 #define EEPROM_SCL_Pin GPIO_PIN_10
@@ -88,6 +105,8 @@ void Error_Handler(void);
 #define TOUCH_COL_SEL3_GPIO_Port GPIOC
 #define DISABLE_CHARGE_Pin GPIO_PIN_8
 #define DISABLE_CHARGE_GPIO_Port GPIOA
+#define TOUCH_COL_SEL2_Pin GPIO_PIN_9
+#define TOUCH_COL_SEL2_GPIO_Port GPIOA
 #define PPS_IN_Pin GPIO_PIN_15
 #define PPS_IN_GPIO_Port GPIOA
 #define PPS_IN_EXTI_IRQn EXTI15_IRQn
