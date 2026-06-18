@@ -16,7 +16,7 @@
 #define STORAGE_USER_KEY_ACTIVE_LEVEL      GPIO_PIN_SET
 #define STORAGE_ENABLE_SIM_LOG_DATA        (1U)
 #define STORAGE_SIM_FRAME_PERIOD_MS        (20U)
-#define STORAGE_KEY_DEBUG_PRINT            (1U)
+#define STORAGE_KEY_DEBUG_PRINT            (0U)
 #define STORAGE_KEY_LEVEL_PRINT_MS         (1000U)
 
 volatile uint32_t storage_task_stack_min_words = UINT32_MAX;
