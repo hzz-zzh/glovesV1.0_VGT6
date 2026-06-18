@@ -23,6 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "data_manager.h"
+#include <stdint.h>
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
@@ -35,6 +37,7 @@
 /* USER CODE BEGIN PD */
 #define FREERTOS_ENABLE_UART_DEBUG_TASK            (0)
 #define FREERTOS_ENABLE_TEST_TASK                  (0)
+#define FREERTOS_ENABLE_SD_LOG_TEST_ONLY           (1)
 
 /* USER CODE END PD */
 
@@ -59,7 +62,7 @@ osThreadId_t uartDebugTaskHandle;
 const osThreadAttr_t uartDebugTask_attributes = {
   .name = "uartDebugTask",
   .priority = (osPriority_t) osPriorityLow,
-  .stack_size = 128 * 4
+  .stack_size = 1024 * 4
 };
 /* Definitions for testTask */
 osThreadId_t testTaskHandle;
@@ -137,7 +140,8 @@ const osThreadAttr_t storageTask_attributes = {
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
-  (void)DataManager_Init();
+  GloveStatus_t dm_status = DataManager_Init();
+  printf("[RTOS] DataManager_Init status=%u\r\n", (unsigned int)dm_status);
 
   /* USER CODE END Init */
 
@@ -159,11 +163,14 @@ void MX_FREERTOS_Init(void) {
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
-  /* creation of uartDebugTask */
-  uartDebugTaskHandle = osThreadNew(UartDebugTask, NULL, &uartDebugTask_attributes);
+//  /* creation of uartDebugTask */
+//  uartDebugTaskHandle = osThreadNew(UartDebugTask, NULL, &uartDebugTask_attributes);
 
+#if FREERTOS_ENABLE_SD_LOG_TEST_ONLY == 0
+#if FREERTOS_ENABLE_TEST_TASK
   /* creation of testTask */
   testTaskHandle = osThreadNew(StartTestTask, NULL, &testTask_attributes);
+#endif
 
   /* creation of frameAssemblerTask */
   frameAssemblerTaskHandle = osThreadNew(FrameAssemblerTask, NULL, &frameAssemblerTask_attributes);
@@ -185,11 +192,23 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of rs485Task */
   rs485TaskHandle = osThreadNew(Rs485Task, NULL, &rs485Task_attributes);
+#endif
 
   /* creation of storageTask */
   storageTaskHandle = osThreadNew(StorageTask, NULL, &storageTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
+  printf("[RTOS] handles default=0x%08lX test=0x%08lX frame=0x%08lX sys=0x%08lX time=0x%08lX imu=0x%08lX touch=0x%08lX data=0x%08lX rs485=0x%08lX storage=0x%08lX\r\n",
+         (unsigned long)(uintptr_t)defaultTaskHandle,
+         (unsigned long)(uintptr_t)testTaskHandle,
+         (unsigned long)(uintptr_t)frameAssemblerTaskHandle,
+         (unsigned long)(uintptr_t)systemManagerTaskHandle,
+         (unsigned long)(uintptr_t)timeSyncTaskHandle,
+         (unsigned long)(uintptr_t)imuCanTaskHandle,
+         (unsigned long)(uintptr_t)touchAdcTaskHandle,
+         (unsigned long)(uintptr_t)dataProcessTaskHandle,
+         (unsigned long)(uintptr_t)rs485TaskHandle,
+         (unsigned long)(uintptr_t)storageTaskHandle);
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 

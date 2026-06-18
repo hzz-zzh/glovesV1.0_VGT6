@@ -18,7 +18,7 @@
 #define SD_LOG_DATA_TYPE_IMU          (0x01U)
 #define SD_LOG_DATA_TYPE_JOINT        (0x02U)
 #define SD_LOG_DATA_TYPE_TACTILE      (0x03U)
-#define SD_LOG_MOUNT_RETRY_COUNT      (5U)
+#define SD_LOG_MOUNT_RETRY_COUNT      (1U)
 #define SD_LOG_MOUNT_RETRY_DELAY_MS   (100U)
 #define SD_LOG_SYNC_INTERVAL_BYTES    (64U * 1024U)
 #define SD_LOG_MAX_FILE_ID            (9999U)

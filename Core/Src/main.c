@@ -160,24 +160,31 @@ int main(void)
   GloveHandConfig_InitFromGpio();
   printf("[Hand] side=%s\r\n",
          (GloveHandConfig_GetHandSide() == GLOVE_HAND_RIGHT) ? "RIGHT" : "LEFT");
+  printf("[Boot] after hand\r\n");
   HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_RESET);
+  printf("[Boot] before imu delay\r\n");
   HAL_Delay(10U);
   HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_SET);
   HAL_Delay(100U);
+  printf("[Boot] after imu delay\r\n");
+  printf("[Boot] before pwm\r\n");
   if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
   {
-    Error_Handler();
   }
 
   /* USER CODE END 2 */
 
   /* Init scheduler */
+  printf("[Boot] before kernel\r\n");
   osKernelInitialize();
+  printf("[Boot] kernel initialized\r\n");
   /* Call init function for freertos objects (in app_freertos.c) */
   MX_FREERTOS_Init();
+  printf("[Boot] freertos init done\r\n");
 
   /* Start scheduler */
+  printf("[Boot] starting scheduler\r\n");
   osKernelStart();
 
   /* We should never get here as control is now taken by the scheduler */
@@ -740,11 +747,7 @@ static void MX_SDMMC1_SD_Init(void)
   hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd1.Init.ClockDiv = 0;
-  if (HAL_SD_Init(&hsd1) != HAL_OK)
-  {
-    return;
-  }
+  hsd1.Init.ClockDiv = 5;
   /* USER CODE BEGIN SDMMC1_Init 2 */
 
   /* USER CODE END SDMMC1_Init 2 */
@@ -1072,7 +1075,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin : USER_KEY_Pin */
   GPIO_InitStruct.Pin = USER_KEY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(USER_KEY_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : STATUS_CHARGE_Pin */
@@ -1163,6 +1166,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  printf("[Error] handler\r\n");
   __disable_irq();
   while (1)
   {

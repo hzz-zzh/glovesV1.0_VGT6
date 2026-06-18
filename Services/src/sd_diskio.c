@@ -14,6 +14,10 @@ static volatile DSTATUS sd_status = STA_NOINIT;
 volatile uint32_t sd_disk_last_hal_status = 0U;
 volatile uint32_t sd_disk_last_hal_error = 0U;
 volatile uint32_t sd_disk_last_result = RES_OK;
+volatile uint32_t sd_disk_init_count = 0U;
+volatile uint32_t sd_disk_last_state_before = 0U;
+volatile uint32_t sd_disk_last_state_after = 0U;
+volatile uint32_t sd_disk_last_card_state = 0U;
 
 static osSemaphoreId_t sd_dma_sem;
 static __ALIGNED(4) uint8_t sd_scratch[SD_DISK_BLOCK_SIZE];
@@ -91,24 +95,48 @@ static DRESULT SdDisk_WaitDma(void)
 
 DSTATUS disk_initialize(BYTE pdrv)
 {
+  HAL_StatusTypeDef hal_status;
+
+  sd_disk_init_count++;
+  sd_disk_last_state_before = hsd1.State;
+  sd_disk_last_card_state = 0xFFFFFFFFU;
+
   if (pdrv != SD_DISK_PDRV)
   {
+    sd_disk_last_result = RES_PARERR;
     return STA_NOINIT;
   }
 
   SdDisk_EnsureSemaphore();
 
-  if (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER)
+  if (hsd1.State == HAL_SD_STATE_READY)
   {
-    sd_status = 0U;
+    const HAL_SD_CardStateTypeDef card_state = HAL_SD_GetCardState(&hsd1);
+    sd_disk_last_card_state = (uint32_t)card_state;
+    if (card_state == HAL_SD_CARD_TRANSFER)
+    {
+      sd_status = 0U;
+      sd_disk_last_state_after = hsd1.State;
+      (void)SdDisk_SetResult(RES_OK, HAL_OK);
+      return sd_status;
+    }
+    (void)HAL_SD_DeInit(&hsd1);
   }
-  else if (HAL_SD_Init(&hsd1) == HAL_OK)
+
+  hal_status = HAL_SD_Init(&hsd1);
+  sd_disk_last_state_after = hsd1.State;
+  sd_disk_last_hal_status = (uint32_t)hal_status;
+  sd_disk_last_hal_error = HAL_SD_GetError(&hsd1);
+
+  if (hal_status == HAL_OK)
   {
     sd_status = 0U;
+    sd_disk_last_result = RES_OK;
   }
   else
   {
     sd_status = STA_NOINIT;
+    sd_disk_last_result = RES_NOTRDY;
   }
 
   return sd_status;
