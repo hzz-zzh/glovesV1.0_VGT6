@@ -37,7 +37,7 @@
 /* USER CODE BEGIN PD */
 #define FREERTOS_ENABLE_UART_DEBUG_TASK            (0)
 #define FREERTOS_ENABLE_TEST_TASK                  (0)
-#define FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY        (1)
+#define FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY        (0)
 #define FREERTOS_ENABLE_SD_LOG_TEST_ONLY           (0)
 
 /* USER CODE END PD */

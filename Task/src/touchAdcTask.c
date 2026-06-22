@@ -7,13 +7,13 @@
 #include "data_manager.h"
 #include "main.h"
 
-#define TOUCH_ADC_DEBUG_ENABLE         (1U)
+#define TOUCH_ADC_DEBUG_ENABLE         (0U)
 #define TOUCH_ADC_DEBUG_PRINT_PERIOD   (20U)
 #define TOUCH_ADC_DEBUG_ERROR_PERIOD   (50U)
 #define TOUCH_ADC_DEBUG_ALLOC_PERIOD   (100U)
 #define TOUCH_ADC_DEBUG_PUBLISH_PERIOD (100U)
 #define TOUCH_ADC_DEBUG_TRACE_FIRST_FRAME (0U)
-#define TOUCH_ADC_MUX_HOLD_TEST_ENABLE (1U)
+#define TOUCH_ADC_MUX_HOLD_TEST_ENABLE (0U)
 #define TOUCH_ADC_MUX_HOLD_COL         (15U)
 #define TOUCH_ADC_PERIOD_MS             (10U)
 #define TOUCH_ADC_QUEUE_TIMEOUT_MS      (0U)
@@ -250,6 +250,7 @@ static void TouchAdcTask_SelectRowGroup(GPIO_PinState row_sel)
   TouchAdcTask_MuxSettle();
 }
 
+#if (TOUCH_ADC_MUX_HOLD_TEST_ENABLE != 0U)
 static void TouchAdcTask_ForceMuxGpioOutput(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -292,7 +293,6 @@ static void TouchAdcTask_PrintMuxHoldReadback(uint8_t col, uint8_t decoded_addr)
 
 static void TouchAdcTask_RunMuxHoldTest(void)
 {
-#if (TOUCH_ADC_MUX_HOLD_TEST_ENABLE != 0U)
   uint8_t col = (uint8_t)(TOUCH_ADC_MUX_HOLD_COL % TOUCH_ADC_COLUMN_COUNT);
   uint8_t decoded_addr = (uint8_t)(7U - (col & 0x07U));
 
@@ -307,8 +307,8 @@ static void TouchAdcTask_RunMuxHoldTest(void)
     TouchAdcTask_PrintMuxHoldReadback(col, decoded_addr);
     osDelay(1000U);
   }
-#endif
 }
+#endif
 
 static uint16_t TouchAdcTask_MapTouchIndex(uint8_t row, uint8_t col)
 {
@@ -552,7 +552,9 @@ void TouchAdcTask(void *argument)
 
   s_touch_adc_task_id = osThreadGetId();
   TouchAdcTask_PrintStartup();
+#if (TOUCH_ADC_MUX_HOLD_TEST_ENABLE != 0U)
   TouchAdcTask_RunMuxHoldTest();
+#endif
   period_ticks = TouchAdcTask_MsToTicks(TOUCH_ADC_PERIOD_MS);
   next_wake_tick = osKernelGetTickCount();
 
