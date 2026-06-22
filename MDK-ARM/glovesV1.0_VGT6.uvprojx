@@ -499,6 +499,11 @@
               <FilePath>..\Services\src\data_manager.c</FilePath>
             </File>
             <File>
+              <FileName>acq_sync.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Services\src\acq_sync.c</FilePath>
+            </File>
+            <File>
               <FileName>frame_pool.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Services\src\frame_pool.c</FilePath>

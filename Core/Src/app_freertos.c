@@ -77,7 +77,7 @@ osThreadId_t frameAssemblerTaskHandle;
 const osThreadAttr_t frameAssemblerTask_attributes = {
   .name = "frameAssemblerTask",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 512 * 4
+  .stack_size = 1024 * 4
 };
 /* Definitions for systemManagerTask */
 osThreadId_t systemManagerTaskHandle;

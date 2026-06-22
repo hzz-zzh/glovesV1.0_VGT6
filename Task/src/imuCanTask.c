@@ -6,6 +6,7 @@
 
 #include "app_data.h"
 #include "app_freertos.h"
+#include "acq_sync.h"
 #include "cmsis_os2.h"
 #include "data_manager.h"
 #include "glove_hand_config.h"
@@ -81,6 +82,10 @@ typedef struct
     uint32_t node_last_rx_id[IMU_CAN_TASK_MAX_NODES_PER_BUS];
     uint32_t node_last_rx_dlc[IMU_CAN_TASK_MAX_NODES_PER_BUS];
     uint8_t node_last_rx_data[IMU_CAN_TASK_MAX_NODES_PER_BUS][8];
+    uint32_t node_sync_seq[IMU_CAN_TASK_MAX_NODES_PER_BUS];
+    GloveTimestampUs_t node_sync_timestamp_us[IMU_CAN_TASK_MAX_NODES_PER_BUS];
+    uint32_t node_sync_seen_mask[IMU_CAN_TASK_MAX_NODES_PER_BUS];
+    uint8_t node_sync_valid[IMU_CAN_TASK_MAX_NODES_PER_BUS];
     bool fdcan_started;
 } ImuCanTaskBusRuntime_t;
 
@@ -169,6 +174,33 @@ static uint64_t ImuCanTask_TimeUs(void)
 static uint32_t ImuCanTask_TotalLogicalNodeCount(void)
 {
     return GLOVE_IMU_COUNT;
+}
+
+static uint32_t ImuCanTask_SeenBitForMsg(hi04_msg_type_t msg_type)
+{
+    switch (msg_type)
+    {
+        case HI04_MSG_ACCEL:
+            return HI04_SEEN_ACCEL;
+        case HI04_MSG_GYRO:
+            return HI04_SEEN_GYRO;
+        case HI04_MSG_MAG:
+            return HI04_SEEN_MAG;
+        case HI04_MSG_QUAT:
+            return HI04_SEEN_QUAT;
+        case HI04_MSG_PITCH_ROLL:
+            return HI04_SEEN_PITCH_ROLL;
+        case HI04_MSG_YAW:
+            return HI04_SEEN_YAW;
+        case HI04_MSG_ENV:
+            return HI04_SEEN_ENV;
+        case HI04_MSG_TIME:
+            return HI04_SEEN_TIME;
+        case HI04_MSG_CANFD0:
+            return HI04_SEEN_CANFD0;
+        default:
+            return 0U;
+    }
 }
 
 static const uint8_t *const *ImuCanTask_GetOutputMaps(void)
@@ -805,7 +837,8 @@ static void ImuCanTask_ProcessFrame(ImuCanTaskBusRuntime_t *bus,
 
     if (hi04_device_process_frame(&bus->devices[index], frame, &msg_type))
     {
-        (void)msg_type;
+        AcqSyncSnapshot_t sync;
+
         bus->node_last_rx_id[index] = frame->id & HI04_CAN_EFF_MASK;
         bus->node_last_rx_dlc[index] = frame->dlc;
         (void)memset(bus->node_last_rx_data[index], 0,
@@ -813,6 +846,17 @@ static void ImuCanTask_ProcessFrame(ImuCanTaskBusRuntime_t *bus,
         if (frame->dlc <= sizeof(bus->node_last_rx_data[index]))
         {
             (void)memcpy(bus->node_last_rx_data[index], frame->data, frame->dlc);
+        }
+        if (AcqSync_GetLatest(&sync) != 0U)
+        {
+            if (bus->node_sync_seq[index] != sync.seq)
+            {
+                bus->node_sync_seen_mask[index] = 0U;
+            }
+            bus->node_sync_seq[index] = sync.seq;
+            bus->node_sync_timestamp_us[index] = sync.timestamp_us;
+            bus->node_sync_seen_mask[index] |= ImuCanTask_SeenBitForMsg(msg_type);
+            bus->node_sync_valid[index] = 1U;
         }
         s_imu_can_stats.parsed_frame_count++;
     }
@@ -912,6 +956,9 @@ static void ImuCanTask_FillOneImu(GloveImuSensorData_t *data,
 static void ImuCanTask_PublishSnapshot(void)
 {
     GloveImuSensorBlock_t *block;
+    AcqSyncSnapshot_t sync;
+    GloveTimestampUs_t block_sync_timestamp_us = 0ULL;
+    uint32_t block_sync_seq = 0U;
     uint8_t any_valid = 0U;
     uint8_t any_quat_valid = 0U;
 
@@ -921,9 +968,6 @@ static void ImuCanTask_PublishSnapshot(void)
         s_imu_can_stats.publish_drop_count++;
         return;
     }
-
-    block->data.sensor_seq = s_sensor_seq++;
-    block->data.timestamp_us = (GloveTimestampUs_t)ImuCanTask_TimeUs();
 
     for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
     {
@@ -937,14 +981,51 @@ static void ImuCanTask_PublishSnapshot(void)
                 continue;
             }
 
-            if ((bus->devices[local_i].seen_mask & IMU_CAN_TASK_FRAME_FLAGS_REQUIRED) ==
+            if ((bus->node_sync_valid[local_i] != 0U) &&
+                (bus->node_sync_seq[local_i] >= block_sync_seq))
+            {
+                block_sync_seq = bus->node_sync_seq[local_i];
+                block_sync_timestamp_us = bus->node_sync_timestamp_us[local_i];
+            }
+        }
+    }
+
+    for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
+    {
+        ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
+
+        for (uint32_t local_i = 0U; local_i < bus->config->node_count; local_i++)
+        {
+            uint32_t out_i;
+            uint32_t seen_mask;
+
+            if (ImuCanTask_BusOutputIndex(bus, local_i, &out_i) == false)
+            {
+                continue;
+            }
+
+            if (block_sync_seq != 0U)
+            {
+                if ((bus->node_sync_valid[local_i] == 0U) ||
+                    (bus->node_sync_seq[local_i] != block_sync_seq))
+                {
+                    continue;
+                }
+                seen_mask = bus->node_sync_seen_mask[local_i];
+            }
+            else
+            {
+                seen_mask = bus->devices[local_i].seen_mask;
+            }
+
+            if ((seen_mask & IMU_CAN_TASK_FRAME_FLAGS_REQUIRED) ==
                 IMU_CAN_TASK_FRAME_FLAGS_REQUIRED)
             {
                 ImuCanTask_FillOneImu(&block->data,
                                        out_i,
-                                       bus->devices[local_i].seen_mask,
+                                       seen_mask,
                                        &bus->devices[local_i].latest);
-                if ((bus->devices[local_i].seen_mask & HI04_SEEN_QUAT) != 0U)
+                if ((seen_mask & HI04_SEEN_QUAT) != 0U)
                 {
                     block->data.valid_flags |= GLOVE_FRAME_VALID_IMU_BIT(out_i);
                     any_quat_valid = 1U;
@@ -956,6 +1037,22 @@ static void ImuCanTask_PublishSnapshot(void)
 
     if (any_valid != 0U)
     {
+        if (block_sync_seq != 0U)
+        {
+            block->data.sensor_seq = block_sync_seq;
+            block->data.timestamp_us = block_sync_timestamp_us;
+        }
+        else if (AcqSync_GetLatest(&sync) != 0U)
+        {
+            block->data.sensor_seq = sync.seq;
+            block->data.timestamp_us = sync.timestamp_us;
+        }
+        else
+        {
+            block->data.sensor_seq = s_sensor_seq++;
+            block->data.timestamp_us = (GloveTimestampUs_t)ImuCanTask_TimeUs();
+        }
+
         block->data.valid_flags |= GLOVE_FRAME_FLAG_IMU_VALID;
         if (any_quat_valid != 0U)
         {

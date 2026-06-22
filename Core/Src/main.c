@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "acq_sync.h"
 #include "data_manager.h"
 #include "glove_hand_config.h"
 #include "modbus_time_sync.h"
@@ -169,10 +170,14 @@ int main(void)
   HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_SET);
   HAL_Delay(100U);
   printf("[Boot] after imu delay\r\n");
+  AcqSync_Reset();
   printf("[Boot] before pwm\r\n");
   if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
   {
+    Error_Handler();
   }
+  __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
+  __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_UPDATE);
 
   /* USER CODE END 2 */
 
@@ -997,7 +1002,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 921600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -1217,6 +1222,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
+  if (htim->Instance == TIM2)
+  {
+    AcqSync_OnTim2PeriodElapsedFromIsr();
+  }
   ModbusTimeSync_OnTimPeriodElapsed(htim);
 
   /* USER CODE END Callback 1 */

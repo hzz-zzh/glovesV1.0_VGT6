@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "acq_sync.h"
 #include "cmsis_os2.h"
 #include "data_manager.h"
 #include "main.h"
@@ -15,7 +16,7 @@
 #define TOUCH_ADC_DEBUG_TRACE_FIRST_FRAME (0U)
 #define TOUCH_ADC_MUX_HOLD_TEST_ENABLE (0U)
 #define TOUCH_ADC_MUX_HOLD_COL         (15U)
-#define TOUCH_ADC_PERIOD_MS             (10U)
+#define TOUCH_ADC_SYNC_WAIT_TIMEOUT_MS  (osWaitForever)
 #define TOUCH_ADC_QUEUE_TIMEOUT_MS      (0U)
 #define TOUCH_ADC_DMA_TIMEOUT_MS        (5U)
 #define TOUCH_ADC_DMA_DONE_FLAG         (1UL << 0)
@@ -47,11 +48,6 @@ static uint32_t s_touch_adc_dma_storage[TOUCH_ADC_CHANNEL_COUNT / 2U];
 static osThreadId_t s_touch_adc_task_id = NULL;
 static uint8_t s_touch_adc_trace_frame = 0U;
 static uint8_t s_touch_adc_trace_dma_once = 0U;
-
-static GloveTimestampUs_t TouchAdcTask_GetTimeUs(void)
-{
-  return (GloveTimestampUs_t)HAL_GetTick() * 1000ULL;
-}
 
 static uint32_t TouchAdcTask_MsToTicks(uint32_t timeout_ms)
 {
@@ -139,9 +135,8 @@ static void TouchAdcTask_PrintSamples(uint32_t seq, const GloveTouchSensorBlock_
 static void TouchAdcTask_PrintStartup(void)
 {
 #if (TOUCH_ADC_DEBUG_ENABLE != 0U)
-  printf("[TOUCH] task_start id=0x%08lX period_ms=%lu channels=%lu count=%lu\r\n",
+  printf("[TOUCH] task_start id=0x%08lX trigger=tim2_sync channels=%lu count=%lu\r\n",
          (unsigned long)(uintptr_t)s_touch_adc_task_id,
-         (unsigned long)TOUCH_ADC_PERIOD_MS,
          (unsigned long)TOUCH_ADC_CHANNEL_COUNT,
          (unsigned long)GLOVE_TOUCH_COUNT);
 #endif
@@ -471,16 +466,20 @@ static GloveStatus_t TouchAdcTask_CaptureRowGroup(GloveTouchSensorBlock_t *block
   return GLOVE_STATUS_OK;
 }
 
-static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block, uint32_t seq)
+static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
+                                               const AcqSyncSnapshot_t *sync)
 {
   uint32_t index;
+  uint32_t seq;
   uint8_t col;
   GloveStatus_t status;
 
-  if (block == NULL)
+  if ((block == NULL) || (sync == NULL) || (sync->valid == 0U))
   {
     return GLOVE_STATUS_INVALID_PARAM;
   }
+
+  seq = sync->seq;
 
 #if (TOUCH_ADC_DEBUG_TRACE_FIRST_FRAME != 0U)
   s_touch_adc_trace_frame = (seq == 0U) ? 1U : 0U;
@@ -488,8 +487,8 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block, u
 #endif
   TouchAdcTask_Trace("frame_begin", seq, GLOVE_TOUCH_COUNT);
 
-  block->data.sensor_seq = seq;
-  block->data.timestamp_us = TouchAdcTask_GetTimeUs();
+  block->data.sensor_seq = sync->seq;
+  block->data.timestamp_us = sync->timestamp_us;
   block->data.valid_flags = GLOVE_FRAME_FLAG_NONE;
 
   for (index = 0U; index < GLOVE_TOUCH_COUNT; index++)
@@ -543,28 +542,37 @@ void TouchAdcTask(void *argument)
   uint32_t error_count = 0U;
   uint32_t alloc_fail_count = 0U;
   uint32_t publish_fail_count = 0U;
-  uint32_t period_ticks;
-  uint32_t next_wake_tick;
+  AcqSyncSnapshot_t sync;
   GloveStatus_t status;
   GloveStatus_t publish_status;
 
   (void)argument;
 
   s_touch_adc_task_id = osThreadGetId();
+  AcqSync_RegisterTouchTask(s_touch_adc_task_id);
   TouchAdcTask_PrintStartup();
 #if (TOUCH_ADC_MUX_HOLD_TEST_ENABLE != 0U)
   TouchAdcTask_RunMuxHoldTest();
 #endif
-  period_ticks = TouchAdcTask_MsToTicks(TOUCH_ADC_PERIOD_MS);
-  next_wake_tick = osKernelGetTickCount();
 
   for (;;)
   {
-    GloveTouchSensorBlock_t *touch = DataManager_AllocTouchSensor();
+    GloveTouchSensorBlock_t *touch;
+
+    if (AcqSync_WaitForTouchSync(&sync, TOUCH_ADC_SYNC_WAIT_TIMEOUT_MS) != osOK)
+    {
+      error_count++;
+      TouchAdcTask_PrintError(seq, GLOVE_STATUS_TIMEOUT, error_count);
+      continue;
+    }
+
+    seq = sync.seq;
+    touch = DataManager_AllocTouchSensor();
+
     if (touch != NULL)
     {
       alloc_fail_count = 0U;
-      status = TouchAdcTask_CaptureFrame(touch, seq);
+      status = TouchAdcTask_CaptureFrame(touch, &sync);
       if (status == GLOVE_STATUS_OK)
       {
         error_count = 0U;
@@ -579,7 +587,6 @@ void TouchAdcTask(void *argument)
         {
           publish_fail_count = 0U;
         }
-        seq++;
       }
       else
       {
@@ -592,13 +599,6 @@ void TouchAdcTask(void *argument)
     {
       alloc_fail_count++;
       TouchAdcTask_PrintAllocError(alloc_fail_count);
-    }
-
-    next_wake_tick += period_ticks;
-    if (osDelayUntil(next_wake_tick) != osOK)
-    {
-      next_wake_tick = osKernelGetTickCount();
-      osDelay(period_ticks);
     }
   }
 }
