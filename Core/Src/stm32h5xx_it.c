@@ -110,7 +110,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+	
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -338,5 +338,9 @@ void FDCAN2_IT0_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void EXTI2_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(POWER_ON_OFF_Pin);
+}
 
 /* USER CODE END 1 */

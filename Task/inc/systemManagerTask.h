@@ -24,6 +24,8 @@ typedef struct
 
 void SystemManagerTask(void *argument);
 void SystemManagerTask_GetBatteryStatus(GloveBatteryStatus_t *status);
+void SystemManagerTask_OnPowerKeyEdgeFromIsr(void);
+uint8_t SystemManagerTask_IsPeripheralPowerEnabled(void);
 
 #ifdef __cplusplus
 }

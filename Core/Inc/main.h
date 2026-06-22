@@ -78,6 +78,7 @@ void Error_Handler(void);
 #define IMU_SYNC_GPIO_Port GPIOA
 #define POWER_ON_OFF_Pin GPIO_PIN_2
 #define POWER_ON_OFF_GPIO_Port GPIOA
+#define POWER_ON_OFF_EXTI_IRQn EXTI2_IRQn
 #define ADIN_CH15_Pin GPIO_PIN_3
 #define ADIN_CH15_GPIO_Port GPIOA
 #define ADIN_CH7_Pin GPIO_PIN_7

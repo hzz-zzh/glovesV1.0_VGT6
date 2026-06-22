@@ -25,6 +25,7 @@
 #include "data_manager.h"
 #include "glove_hand_config.h"
 #include "modbus_time_sync.h"
+#include "systemManagerTask.h"
 #include "uart_redirect.h"
 
 /* USER CODE END Includes */
@@ -1075,7 +1076,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : POWER_ON_OFF_Pin */
   GPIO_InitStruct.Pin = POWER_ON_OFF_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(POWER_ON_OFF_GPIO_Port, &GPIO_InitStruct);
 
@@ -1133,6 +1134,8 @@ static void MX_GPIO_Init(void)
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI15_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_IRQn);
+  HAL_NVIC_SetPriority(EXTI2_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -1142,7 +1145,22 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
-  ModbusTimeSync_OnPpsEdge(GPIO_Pin);
+  if (GPIO_Pin == POWER_ON_OFF_Pin)
+  {
+    SystemManagerTask_OnPowerKeyEdgeFromIsr();
+  }
+  else if (GPIO_Pin == PPS_IN_Pin)
+  {
+    ModbusTimeSync_OnPpsEdge(GPIO_Pin);
+  }
+}
+
+void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == POWER_ON_OFF_Pin)
+  {
+    SystemManagerTask_OnPowerKeyEdgeFromIsr();
+  }
 }
 
 /* USER CODE END 4 */
