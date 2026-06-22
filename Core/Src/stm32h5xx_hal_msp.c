@@ -26,6 +26,8 @@ extern DMA_HandleTypeDef handle_GPDMA1_Channel1;
 
 extern DMA_HandleTypeDef handle_GPDMA1_Channel0;
 
+extern DMA_HandleTypeDef handle_GPDMA2_Channel0;
+
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
 
@@ -136,6 +138,8 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+    __HAL_LINKDMA(hadc, DMA_Handle, handle_GPDMA2_Channel0);
+
     /* USER CODE BEGIN ADC1_MspInit 1 */
 
     /* USER CODE END ADC1_MspInit 1 */
@@ -175,6 +179,8 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
     HAL_GPIO_DeInit(GPIOA, ADIN_CH15_Pin|ADIN_CH7_Pin);
 
     HAL_GPIO_DeInit(GPIOB, ADIN_CH9_Pin|ADIN_CH5_Pin);
+
+    HAL_DMA_DeInit(hadc->DMA_Handle);
 
     /* USER CODE BEGIN ADC1_MspDeInit 1 */
 

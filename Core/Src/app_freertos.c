@@ -37,7 +37,8 @@
 /* USER CODE BEGIN PD */
 #define FREERTOS_ENABLE_UART_DEBUG_TASK            (0)
 #define FREERTOS_ENABLE_TEST_TASK                  (0)
-#define FREERTOS_ENABLE_SD_LOG_TEST_ONLY           (1)
+#define FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY        (1)
+#define FREERTOS_ENABLE_SD_LOG_TEST_ONLY           (0)
 
 /* USER CODE END PD */
 
@@ -166,7 +167,10 @@ void MX_FREERTOS_Init(void) {
 //  /* creation of uartDebugTask */
 //  uartDebugTaskHandle = osThreadNew(UartDebugTask, NULL, &uartDebugTask_attributes);
 
-#if FREERTOS_ENABLE_SD_LOG_TEST_ONLY == 0
+#if FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY
+  /* creation of touchAdcTask */
+  touchAdcTaskHandle = osThreadNew(TouchAdcTask, NULL, &touchAdcTask_attributes);
+#elif FREERTOS_ENABLE_SD_LOG_TEST_ONLY == 0
 #if FREERTOS_ENABLE_TEST_TASK
   /* creation of testTask */
   testTaskHandle = osThreadNew(StartTestTask, NULL, &testTask_attributes);
@@ -194,8 +198,10 @@ void MX_FREERTOS_Init(void) {
   rs485TaskHandle = osThreadNew(Rs485Task, NULL, &rs485Task_attributes);
 #endif
 
+#if FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY == 0
   /* creation of storageTask */
   storageTaskHandle = osThreadNew(StorageTask, NULL, &storageTask_attributes);
+#endif
 
   /* USER CODE BEGIN RTOS_THREADS */
   printf("[RTOS] handles default=0x%08lX test=0x%08lX frame=0x%08lX sys=0x%08lX time=0x%08lX imu=0x%08lX touch=0x%08lX data=0x%08lX rs485=0x%08lX storage=0x%08lX\r\n",
