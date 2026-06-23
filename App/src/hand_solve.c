@@ -8,14 +8,16 @@
 #error "hand_solve expects GLOVE_IMU_COUNT to be 16"
 #endif
 
-#if GLOVE_JOINT_DOF_COUNT != 21U
-#error "hand_solve expects GLOVE_JOINT_DOF_COUNT to be 21"
+#if GLOVE_JOINT_DOF_COUNT != 27U
+#error "hand_solve expects GLOVE_JOINT_DOF_COUNT to be 27"
 #endif
 
 #define HAND_SOLVE_EPSILON                      (1.0e-12f)
 #define HAND_SOLVE_PI_F                         (3.14159265358979323846f)
 #define HAND_SOLVE_RAD_TO_DEG_F                 (180.0f / HAND_SOLVE_PI_F)
 #define HAND_SOLVE_THUMB_INDEX                  (0U)
+#define HAND_SOLVE_OUTPUT_FINGER_FIRST          (1U)
+#define HAND_SOLVE_FINGER_OUTPUT_COUNT          (4U)
 
 typedef struct
 {
@@ -119,6 +121,29 @@ static HandSolveVec3_t HandSolve_Vec3Subtract(HandSolveVec3_t left,
     out.x = left.x - right.x;
     out.y = left.y - right.y;
     out.z = left.z - right.z;
+
+    return out;
+}
+
+static HandSolveVec3_t HandSolve_Vec3Add(HandSolveVec3_t left,
+                                         HandSolveVec3_t right)
+{
+    HandSolveVec3_t out;
+
+    out.x = left.x + right.x;
+    out.y = left.y + right.y;
+    out.z = left.z + right.z;
+
+    return out;
+}
+
+static HandSolveVec3_t HandSolve_Vec3Negate(HandSolveVec3_t vec)
+{
+    HandSolveVec3_t out;
+
+    out.x = -vec.x;
+    out.y = -vec.y;
+    out.z = -vec.z;
 
     return out;
 }
@@ -264,6 +289,23 @@ static HandSolveMat3_t HandSolve_QuatToRotationMatrix(GloveQuaternion_t quat)
     r.m[2][2] = 1.0f - (2.0f * (xx + yy));
 
     return r;
+}
+
+static HandSolveVec3_t HandSolve_Mat3Column(const HandSolveMat3_t *mat,
+                                            uint32_t column)
+{
+    HandSolveVec3_t out = {0.0f, 0.0f, 0.0f};
+
+    if ((mat == NULL) || (column >= 3U))
+    {
+        return out;
+    }
+
+    out.x = mat->m[0][column];
+    out.y = mat->m[1][column];
+    out.z = mat->m[2][column];
+
+    return out;
 }
 
 static GloveQuaternion_t HandSolve_CalibrationOf(const GloveQuaternion_t table[GLOVE_IMU_COUNT],
@@ -431,8 +473,16 @@ static HandSolveJointConfig_t HandSolve_MakeDefaultJointConfig(uint8_t is_thumb,
     config.swing_axis = s_unit_z;
     config.swing_sign = (hand_side == GLOVE_HAND_LEFT) ? -1.0f : 1.0f;
     config.swing_neutral_offset_deg = 0.0f;
-    config.swing_min_deg = -30.0f;
-    config.swing_max_deg = 30.0f;
+    if ((is_thumb != 0U) && (has_swing != 0U))
+    {
+        config.swing_min_deg = -90.0f;
+        config.swing_max_deg = 90.0f;
+    }
+    else
+    {
+        config.swing_min_deg = -30.0f;
+        config.swing_max_deg = 30.0f;
+    }
 
     return config;
 }
@@ -507,17 +557,30 @@ static HandSolveJointResult_t HandSolve_SolveJoint(const GloveQuaternion_t raw_q
     return out;
 }
 
-static uint8_t HandSolve_IsLayoutComplete(const HandSolveLayout_t *layout,
-                                          uint32_t imu_valid_mask)
+static void HandSolve_FillMissingOutput(float joint_angle_deg[GLOVE_JOINT_DOF_COUNT])
+{
+    if (joint_angle_deg == NULL)
+    {
+        return;
+    }
+
+    for (uint32_t i = 0U; i < GLOVE_JOINT_DOF_COUNT; i++)
+    {
+        joint_angle_deg[i] = HAND_SOLVE_MISSING_VALUE;
+    }
+}
+
+static uint8_t HandSolve_HasAnyValidImu(const HandSolveLayout_t *layout,
+                                        uint32_t imu_valid_mask)
 {
     if (layout == NULL)
     {
         return 0U;
     }
 
-    if (HandSolve_IsImuValid(imu_valid_mask, layout->palm_imu_id) == 0U)
+    if (HandSolve_IsImuValid(imu_valid_mask, layout->palm_imu_id) != 0U)
     {
-        return 0U;
+        return 1U;
     }
 
     for (uint32_t finger = 0U; finger < HAND_SOLVE_FINGER_COUNT; finger++)
@@ -527,50 +590,314 @@ static uint8_t HandSolve_IsLayoutComplete(const HandSolveLayout_t *layout,
              segment++)
         {
             if (HandSolve_IsImuValid(imu_valid_mask,
-                                     layout->finger_imu_id[finger][segment]) == 0U)
+                                     layout->finger_imu_id[finger][segment]) != 0U)
             {
-                return 0U;
+                return 1U;
             }
         }
     }
 
+    return 0U;
+}
+
+static uint8_t HandSolve_SolveJointIfPresent(const GloveQuaternion_t raw_quat[GLOVE_IMU_COUNT],
+                                             uint32_t imu_valid_mask,
+                                             const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
+                                             const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT],
+                                             uint8_t proximal_imu_id,
+                                             uint8_t distal_imu_id,
+                                             HandSolveJointConfig_t config,
+                                             HandSolveJointResult_t *result)
+{
+    HandSolveJoint_t joint;
+
+    if ((result == NULL) ||
+        (HandSolve_IsImuValid(imu_valid_mask, proximal_imu_id) == 0U) ||
+        (HandSolve_IsImuValid(imu_valid_mask, distal_imu_id) == 0U))
+    {
+        return 0U;
+    }
+
+    joint.proximal_imu_id = proximal_imu_id;
+    joint.distal_imu_id = distal_imu_id;
+    joint.config = config;
+    *result = HandSolve_SolveJoint(raw_quat, c_calib, m_calib, &joint);
+
     return 1U;
 }
 
-static GloveStatus_t HandSolve_AppendJointAngles(const GloveQuaternion_t raw_quat[GLOVE_IMU_COUNT],
-                                                 const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
-                                                 const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT],
-                                                 const HandSolveJoint_t *joint,
-                                                 float joint_angle_deg[GLOVE_JOINT_DOF_COUNT],
-                                                 uint32_t *out_index)
+static uint8_t HandSolve_FingerAbductionRawDeg(const GloveQuaternion_t raw_quat[GLOVE_IMU_COUNT],
+                                               uint32_t imu_valid_mask,
+                                               const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
+                                               const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT],
+                                               uint8_t palm_imu_id,
+                                               const uint8_t segment_imu_id[HAND_SOLVE_SEGMENT_COUNT_PER_FINGER],
+                                               float *raw_deg)
 {
-    HandSolveJointResult_t result;
+    GloveQuaternion_t palm_cal;
+    HandSolveVec3_t y_accum = {0.0f, 0.0f, 0.0f};
+    uint32_t used_count = 0U;
 
-    if ((joint == NULL) || (joint_angle_deg == NULL) || (out_index == NULL))
+    if ((raw_quat == NULL) || (segment_imu_id == NULL) || (raw_deg == NULL) ||
+        (HandSolve_IsImuValid(imu_valid_mask, palm_imu_id) == 0U))
     {
-        return GLOVE_STATUS_INVALID_PARAM;
+        return 0U;
     }
 
-    if (*out_index >= GLOVE_JOINT_DOF_COUNT)
-    {
-        return GLOVE_STATUS_ERROR;
-    }
+    palm_cal = HandSolve_ApplyCalibration(c_calib,
+                                          m_calib,
+                                          palm_imu_id,
+                                          raw_quat[(uint32_t)palm_imu_id - 1U]);
 
-    result = HandSolve_SolveJoint(raw_quat, c_calib, m_calib, joint);
-    joint_angle_deg[*out_index] = result.flex_deg;
-    (*out_index)++;
-
-    if (joint->config.has_swing != 0U)
+    for (uint32_t segment = 0U;
+         segment < HAND_SOLVE_SEGMENT_COUNT_PER_FINGER;
+         segment++)
     {
-        if (*out_index >= GLOVE_JOINT_DOF_COUNT)
+        uint8_t imu_id = segment_imu_id[segment];
+        GloveQuaternion_t seg_cal;
+        GloveQuaternion_t relative;
+        HandSolveMat3_t rotation;
+        HandSolveVec3_t y_axis;
+
+        if (HandSolve_IsImuValid(imu_valid_mask, imu_id) == 0U)
         {
-            return GLOVE_STATUS_ERROR;
+            continue;
         }
-        joint_angle_deg[*out_index] = result.swing_deg;
-        (*out_index)++;
+
+        seg_cal = HandSolve_ApplyCalibration(c_calib,
+                                             m_calib,
+                                             imu_id,
+                                             raw_quat[(uint32_t)imu_id - 1U]);
+        relative = HandSolve_QuatMultiply(HandSolve_QuatConjugate(palm_cal),
+                                          seg_cal);
+        relative = HandSolve_NormalizeQuat(&relative);
+        rotation = HandSolve_QuatToRotationMatrix(relative);
+        y_axis = HandSolve_Mat3Column(&rotation, 1U);
+
+        if ((used_count > 0U) && (HandSolve_Vec3Dot(y_axis, y_accum) < 0.0f))
+        {
+            y_axis = HandSolve_Vec3Negate(y_axis);
+        }
+
+        y_accum = HandSolve_Vec3Add(y_accum, y_axis);
+        used_count++;
     }
 
-    return GLOVE_STATUS_OK;
+    if (used_count == 0U)
+    {
+        return 0U;
+    }
+
+    y_accum = HandSolve_Vec3Normalize(y_accum);
+    if (HandSolve_IsVec3Valid(y_accum) == 0U)
+    {
+        return 0U;
+    }
+
+    *raw_deg = atan2f(-y_accum.x, y_accum.y) * HAND_SOLVE_RAD_TO_DEG_F;
+    return 1U;
+}
+
+static void HandSolve_SolveLongFingerState(const GloveQuaternion_t raw_quat[GLOVE_IMU_COUNT],
+                                           uint32_t imu_valid_mask,
+                                           const HandSolveLayout_t *layout,
+                                           const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
+                                           const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT],
+                                           uint32_t finger,
+                                           float joint_angle_deg[GLOVE_JOINT_DOF_COUNT])
+{
+    const uint8_t *segments;
+    uint32_t out_base;
+    HandSolveJointConfig_t config;
+    HandSolveJointResult_t result;
+    float raw_abduction_deg;
+
+    if ((raw_quat == NULL) || (layout == NULL) || (joint_angle_deg == NULL) ||
+        (finger >= HAND_SOLVE_FINGER_COUNT) || (finger == HAND_SOLVE_THUMB_INDEX))
+    {
+        return;
+    }
+
+    segments = layout->finger_imu_id[finger];
+    out_base = (finger - HAND_SOLVE_OUTPUT_FINGER_FIRST) * HAND_SOLVE_FINGER_OUTPUT_COUNT;
+
+    config = HandSolve_MakeDefaultJointConfig(0U, 1U, layout->hand_side);
+    if (HandSolve_SolveJointIfPresent(raw_quat,
+                                      imu_valid_mask,
+                                      c_calib,
+                                      m_calib,
+                                      layout->palm_imu_id,
+                                      segments[0],
+                                      config,
+                                      &result) != 0U)
+    {
+        joint_angle_deg[out_base] = result.flex_deg;
+        joint_angle_deg[out_base + 1U] = result.swing_deg;
+    }
+
+    if (HandSolve_FingerAbductionRawDeg(raw_quat,
+                                        imu_valid_mask,
+                                        c_calib,
+                                        m_calib,
+                                        layout->palm_imu_id,
+                                        segments,
+                                        &raw_abduction_deg) != 0U)
+    {
+        float swing_deg = HandSolve_WrapDeg(config.swing_sign *
+                                            HandSolve_WrapDeg(raw_abduction_deg -
+                                                              config.swing_neutral_offset_deg));
+        joint_angle_deg[out_base + 1U] = HandSolve_ClampFloat(swing_deg,
+                                                              config.swing_min_deg,
+                                                              config.swing_max_deg);
+    }
+
+    config = HandSolve_MakeDefaultJointConfig(0U, 0U, layout->hand_side);
+    if (HandSolve_SolveJointIfPresent(raw_quat,
+                                      imu_valid_mask,
+                                      c_calib,
+                                      m_calib,
+                                      segments[0],
+                                      segments[1],
+                                      config,
+                                      &result) != 0U)
+    {
+        joint_angle_deg[out_base + 2U] = result.flex_deg;
+    }
+
+    if (HandSolve_SolveJointIfPresent(raw_quat,
+                                      imu_valid_mask,
+                                      c_calib,
+                                      m_calib,
+                                      segments[1],
+                                      segments[2],
+                                      config,
+                                      &result) != 0U)
+    {
+        joint_angle_deg[out_base + 3U] = result.flex_deg;
+    }
+}
+
+static void HandSolve_SolveThumbState(const GloveQuaternion_t raw_quat[GLOVE_IMU_COUNT],
+                                      uint32_t imu_valid_mask,
+                                      const HandSolveLayout_t *layout,
+                                      const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
+                                      const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT],
+                                      float joint_angle_deg[GLOVE_JOINT_DOF_COUNT])
+{
+    const uint8_t *segments;
+    const uint8_t palm_imu_id = (layout != NULL) ? layout->palm_imu_id : HAND_SOLVE_INVALID_IMU_ID;
+    uint8_t meta_imu_id;
+    uint8_t prox_imu_id;
+    uint8_t dist_imu_id;
+    uint8_t has_palm;
+    uint8_t has_meta;
+    uint8_t has_prox;
+    uint8_t has_dist;
+    GloveQuaternion_t palm_cal = s_identity_quat;
+    GloveQuaternion_t meta_cal = s_identity_quat;
+    GloveQuaternion_t prox_cal = s_identity_quat;
+    GloveQuaternion_t dist_cal = s_identity_quat;
+
+    if ((raw_quat == NULL) || (layout == NULL) || (joint_angle_deg == NULL))
+    {
+        return;
+    }
+
+    segments = layout->finger_imu_id[HAND_SOLVE_THUMB_INDEX];
+    meta_imu_id = segments[0];
+    prox_imu_id = segments[1];
+    dist_imu_id = segments[2];
+
+    has_palm = HandSolve_IsImuValid(imu_valid_mask, palm_imu_id);
+    has_meta = HandSolve_IsImuValid(imu_valid_mask, meta_imu_id);
+    has_prox = HandSolve_IsImuValid(imu_valid_mask, prox_imu_id);
+    has_dist = HandSolve_IsImuValid(imu_valid_mask, dist_imu_id);
+
+    if (has_palm != 0U)
+    {
+        palm_cal = HandSolve_ApplyCalibration(c_calib,
+                                              m_calib,
+                                              palm_imu_id,
+                                              raw_quat[(uint32_t)palm_imu_id - 1U]);
+        joint_angle_deg[23] = palm_cal.w;
+        joint_angle_deg[24] = palm_cal.x;
+        joint_angle_deg[25] = palm_cal.y;
+        joint_angle_deg[26] = palm_cal.z;
+    }
+
+    if (has_meta != 0U)
+    {
+        meta_cal = HandSolve_ApplyCalibration(c_calib,
+                                              m_calib,
+                                              meta_imu_id,
+                                              raw_quat[(uint32_t)meta_imu_id - 1U]);
+    }
+    if (has_prox != 0U)
+    {
+        prox_cal = HandSolve_ApplyCalibration(c_calib,
+                                              m_calib,
+                                              prox_imu_id,
+                                              raw_quat[(uint32_t)prox_imu_id - 1U]);
+    }
+    if (has_dist != 0U)
+    {
+        dist_cal = HandSolve_ApplyCalibration(c_calib,
+                                              m_calib,
+                                              dist_imu_id,
+                                              raw_quat[(uint32_t)dist_imu_id - 1U]);
+    }
+
+    if ((has_meta != 0U) && (has_prox != 0U))
+    {
+        GloveQuaternion_t relative;
+        HandSolveMat3_t rotation;
+        HandSolveVec3_t direction;
+        float clamped_z;
+
+        relative = HandSolve_QuatMultiply(HandSolve_QuatConjugate(meta_cal),
+                                          prox_cal);
+        relative = HandSolve_NormalizeQuat(&relative);
+        rotation = HandSolve_QuatToRotationMatrix(relative);
+        direction = HandSolve_Mat3Column(&rotation, 0U);
+        clamped_z = HandSolve_ClampFloat(direction.z, -1.0f, 1.0f);
+
+        joint_angle_deg[16] = asinf(clamped_z) * HAND_SOLVE_RAD_TO_DEG_F;
+        joint_angle_deg[17] = -atan2f(direction.y, direction.x) *
+                              HAND_SOLVE_RAD_TO_DEG_F;
+        if (layout->hand_side == GLOVE_HAND_LEFT)
+        {
+            joint_angle_deg[17] = -joint_angle_deg[17];
+        }
+    }
+
+    if ((has_prox != 0U) && (has_dist != 0U))
+    {
+        GloveQuaternion_t relative;
+        HandSolveMat3_t rotation;
+        HandSolveVec3_t direction;
+
+        relative = HandSolve_QuatMultiply(HandSolve_QuatConjugate(prox_cal),
+                                          dist_cal);
+        relative = HandSolve_NormalizeQuat(&relative);
+        rotation = HandSolve_QuatToRotationMatrix(relative);
+        direction = HandSolve_Mat3Column(&rotation, 0U);
+
+        joint_angle_deg[18] = atan2f(direction.z, direction.x) *
+                              HAND_SOLVE_RAD_TO_DEG_F;
+    }
+
+    if ((has_meta != 0U) && (has_palm != 0U))
+    {
+        GloveQuaternion_t cmc;
+
+        cmc = HandSolve_QuatMultiply(HandSolve_QuatConjugate(palm_cal),
+                                     meta_cal);
+        cmc = HandSolve_NormalizeQuat(&cmc);
+        joint_angle_deg[19] = cmc.w;
+        joint_angle_deg[20] = cmc.x;
+        joint_angle_deg[21] = cmc.y;
+        joint_angle_deg[22] = cmc.z;
+    }
 }
 
 void HandSolve_FillIdentityCalibration(GloveQuaternion_t calibration[GLOVE_IMU_COUNT])
@@ -627,9 +954,6 @@ GloveStatus_t HandSolve_SolveAnglesDeg(const GloveQuaternion_t raw_quat[GLOVE_IM
                                        const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT],
                                        float joint_angle_deg[GLOVE_JOINT_DOF_COUNT])
 {
-    uint32_t out_index = 0U;
-    GloveStatus_t status;
-
     if ((raw_quat == NULL) || (layout == NULL) || (joint_angle_deg == NULL))
     {
         return GLOVE_STATUS_INVALID_PARAM;
@@ -641,58 +965,32 @@ GloveStatus_t HandSolve_SolveAnglesDeg(const GloveQuaternion_t raw_quat[GLOVE_IM
         return GLOVE_STATUS_INVALID_PARAM;
     }
 
-    (void)memset(joint_angle_deg, 0, sizeof(float) * GLOVE_JOINT_DOF_COUNT);
+    HandSolve_FillMissingOutput(joint_angle_deg);
 
-    if (HandSolve_IsLayoutComplete(layout, imu_valid_mask) == 0U)
+    if (HandSolve_HasAnyValidImu(layout, imu_valid_mask) == 0U)
     {
         return GLOVE_STATUS_NOT_READY;
     }
 
-    for (uint32_t finger = 0U; finger < HAND_SOLVE_FINGER_COUNT; finger++)
+    for (uint32_t finger = HAND_SOLVE_OUTPUT_FINGER_FIRST;
+         finger < HAND_SOLVE_FINGER_COUNT;
+         finger++)
     {
-        const uint8_t is_thumb = (finger == HAND_SOLVE_THUMB_INDEX) ? 1U : 0U;
-        HandSolveJoint_t joint;
-
-        joint.proximal_imu_id = layout->palm_imu_id;
-        joint.distal_imu_id = layout->finger_imu_id[finger][0];
-        joint.config = HandSolve_MakeDefaultJointConfig(is_thumb,
-                                                        1U,
-                                                        layout->hand_side);
-        status = HandSolve_AppendJointAngles(raw_quat,
-                                             c_calib,
-                                             m_calib,
-                                             &joint,
-                                             joint_angle_deg,
-                                             &out_index);
-        if (status != GLOVE_STATUS_OK)
-        {
-            return status;
-        }
-
-        for (uint32_t segment = 1U;
-             segment < HAND_SOLVE_SEGMENT_COUNT_PER_FINGER;
-             segment++)
-        {
-            const uint8_t has_swing =
-                ((is_thumb != 0U) && (segment == 1U)) ? 1U : 0U;
-
-            joint.proximal_imu_id = layout->finger_imu_id[finger][segment - 1U];
-            joint.distal_imu_id = layout->finger_imu_id[finger][segment];
-            joint.config = HandSolve_MakeDefaultJointConfig(is_thumb,
-                                                            has_swing,
-                                                            layout->hand_side);
-            status = HandSolve_AppendJointAngles(raw_quat,
-                                                 c_calib,
-                                                 m_calib,
-                                                 &joint,
-                                                 joint_angle_deg,
-                                                 &out_index);
-            if (status != GLOVE_STATUS_OK)
-            {
-                return status;
-            }
-        }
+        HandSolve_SolveLongFingerState(raw_quat,
+                                       imu_valid_mask,
+                                       layout,
+                                       c_calib,
+                                       m_calib,
+                                       finger,
+                                       joint_angle_deg);
     }
 
-    return (out_index == GLOVE_JOINT_DOF_COUNT) ? GLOVE_STATUS_OK : GLOVE_STATUS_ERROR;
+    HandSolve_SolveThumbState(raw_quat,
+                              imu_valid_mask,
+                              layout,
+                              c_calib,
+                              m_calib,
+                              joint_angle_deg);
+
+    return GLOVE_STATUS_OK;
 }

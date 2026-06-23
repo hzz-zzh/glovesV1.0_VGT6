@@ -118,7 +118,7 @@ const osThreadAttr_t dataProcessTask_attributes = {
 osThreadId_t rs485TaskHandle;
 const osThreadAttr_t rs485Task_attributes = {
   .name = "rs485Task",
-  .priority = (osPriority_t) osPriorityBelowNormal,
+  .priority = (osPriority_t) osPriorityNormal,
   .stack_size = 512 * 4
 };
 /* Definitions for storageTask */

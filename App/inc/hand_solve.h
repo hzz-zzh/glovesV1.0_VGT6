@@ -12,6 +12,7 @@ extern "C" {
 #define HAND_SOLVE_FINGER_COUNT                 (5U)
 #define HAND_SOLVE_SEGMENT_COUNT_PER_FINGER     (3U)
 #define HAND_SOLVE_INVALID_IMU_ID               (0U)
+#define HAND_SOLVE_MISSING_VALUE                (1.0e9f)
 
 typedef struct
 {
@@ -28,6 +29,14 @@ GloveStatus_t HandSolve_InitDefaultLayout(HandSolveLayout_t *layout,
 /*
  * imu_valid_mask uses bit 0 for IMU id 1, bit 1 for IMU id 2, ... bit 15 for
  * IMU id 16. raw_quat is the project native array: raw_quat[imu_id - 1].
+ *
+ * Output order follows hand_solve_src_6.22:
+ * [0..15]  index/middle/ring/little: MCP flex, MCP swing, PIP flex, DIP flex
+ * [16..18] thumb: MCP flex, MCP swing, IP flex
+ * [19..22] thumb CMC quaternion w,x,y,z
+ * [23..26] palm absolute quaternion w,x,y,z
+ * Values that cannot be solved because an IMU is missing are set to
+ * HAND_SOLVE_MISSING_VALUE.
  */
 GloveStatus_t HandSolve_SolveAnglesDeg(const GloveQuaternion_t raw_quat[GLOVE_IMU_COUNT],
                                        uint32_t imu_valid_mask,

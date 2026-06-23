@@ -118,6 +118,7 @@ void Rs485Task(void *argument)
 
       if ((flags & RS485_TASK_EVT_RX_FRAME) != 0U)
       {
+        RS485_TaskDrainFullFrames();
         RS485_ProcessRxFrame();
       }
     }

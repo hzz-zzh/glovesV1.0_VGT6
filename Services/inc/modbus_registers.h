@@ -125,6 +125,26 @@ extern "C" {
 #define REG_IMU_DATA_ADDR(index)       (REG_IMU_DATA_START + ((uint16_t)(index) * MODBUS_IMU_REGS_PER_UNIT))
 #define REG_IMU_OFFSET_ADDR(index)     (REG_IMU_OFFSET_START + ((uint16_t)(index) * MODBUS_IMU_REGS_PER_UNIT))
 
+/* Joint angle data, timestamp and status registers. */
+#define MODBUS_JOINT_COUNT             27U
+#define MODBUS_JOINT_REGS_PER_VALUE    MODBUS_REGS_FLOAT32
+#define MODBUS_JOINT_DATA_REG_COUNT    (MODBUS_JOINT_COUNT * MODBUS_JOINT_REGS_PER_VALUE)
+
+#define REG_JOINT_DATA_START           0x1300U
+#define REG_JOINT_DATA_END             (REG_JOINT_DATA_START + MODBUS_JOINT_DATA_REG_COUNT - 1U)
+#define REG_JOINT_TIMESTAMP_US         0x1340U
+#define REG_JOINT_STATUS_FLAGS         0x1344U
+#define REG_JOINT_VALID_BITS_LOW       0x1345U
+#define REG_JOINT_VALID_BITS_HIGH      0x1346U
+
+#define REG_JOINT_STATUS_START         REG_JOINT_STATUS_FLAGS
+#define REG_JOINT_STATUS_END           REG_JOINT_VALID_BITS_HIGH
+#define REG_JOINT_STATUS_COUNT         3U
+#define REG_JOINT_DATA_ADDR(index)     (REG_JOINT_DATA_START + ((uint16_t)(index) * MODBUS_JOINT_REGS_PER_VALUE))
+
+#define JOINT_STATUS_SNAPSHOT_VALID    0x0001U
+#define JOINT_STATUS_ALGORITHM_VALID   0x0002U
+
 /* Resistance matrix data, timestamp and status registers. */
 #define MODBUS_R_POINT_COUNT           64U
 #define MODBUS_R_STATUS_REG_COUNT      4U

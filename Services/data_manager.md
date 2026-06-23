@@ -181,7 +181,7 @@ AlgorithmTask
 - `frame_id`
 - `timestamp_us`
 - `imu_attitude[16]`
-- `joint_angle_deg[21]`
+- `joint_angle_deg[27]`
 
 生产者：
 

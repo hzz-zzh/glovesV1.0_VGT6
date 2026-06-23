@@ -599,4 +599,4 @@ rtos.0.tasks.5=allocationType,Dynamic;bufferName,NULL;codeGen,As weak;controlBlo
 rtos.0.tasks.6=allocationType,Dynamic;bufferName,NULL;codeGen,As weak;controlBlockName,NULL;entry,ImuCanTask;name,imuCanTask;parameter,NULL;priority,osPriorityAboveNormal;stackSize,1024
 rtos.0.tasks.7=allocationType,Dynamic;bufferName,NULL;codeGen,As weak;controlBlockName,NULL;entry,TouchAdcTask;name,touchAdcTask;parameter,NULL;priority,osPriorityAboveNormal;stackSize,1024
 rtos.0.tasks.8=allocationType,Dynamic;bufferName,NULL;codeGen,As weak;controlBlockName,NULL;entry,DataProcessTask;name,dataProcessTask;parameter,NULL;priority,osPriorityNormal;stackSize,1024
-rtos.0.tasks.9=allocationType,Dynamic;bufferName,NULL;codeGen,As weak;controlBlockName,NULL;entry,Rs485Task;name,rs485Task;parameter,NULL;priority,osPriorityBelowNormal;stackSize,512
+rtos.0.tasks.9=allocationType,Dynamic;bufferName,NULL;codeGen,As weak;controlBlockName,NULL;entry,Rs485Task;name,rs485Task;parameter,NULL;priority,osPriorityNormal;stackSize,512

@@ -9,7 +9,7 @@ extern "C" {
 
 #include "app_data.h"
 
-#define SD_LOG_BLOCK_SIZE             (1024U)
+#define SD_LOG_BLOCK_SIZE             (2048U)
 #define SD_LOG_FILENAME_BYTES         (32U)
 
 #define SD_LOG_ERROR_NONE             (0U)

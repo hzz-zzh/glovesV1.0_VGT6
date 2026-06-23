@@ -1004,19 +1004,7 @@ static void ImuCanTask_PublishSnapshot(void)
                 continue;
             }
 
-            if (block_sync_seq != 0U)
-            {
-                if ((bus->node_sync_valid[local_i] == 0U) ||
-                    (bus->node_sync_seq[local_i] != block_sync_seq))
-                {
-                    continue;
-                }
-                seen_mask = bus->node_sync_seen_mask[local_i];
-            }
-            else
-            {
-                seen_mask = bus->devices[local_i].seen_mask;
-            }
+            seen_mask = bus->devices[local_i].seen_mask;
 
             if ((seen_mask & IMU_CAN_TASK_FRAME_FLAGS_REQUIRED) ==
                 IMU_CAN_TASK_FRAME_FLAGS_REQUIRED)

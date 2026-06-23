@@ -1,6 +1,8 @@
 #include "dataProcessTask.h"
 
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "cmsis_os2.h"
@@ -14,6 +16,10 @@
 #define DATA_PROCESS_GET_RAW_TIMEOUT_MS         (10U)
 #define DATA_PROCESS_IDLE_DELAY_MS              (1U)
 #define DATA_PROCESS_FULL_PUBLISH_TIMEOUT_MS    (0U)
+#define DATA_PROCESS_FULL_DEBUG_PRINT_ENABLE    (1U)
+#define DATA_PROCESS_FULL_DEBUG_PRINT_PERIOD    (50U)
+#define DATA_PROCESS_FULL_DEBUG_IMU_PRINT_COUNT (2U)
+#define DATA_PROCESS_FULL_DEBUG_TOUCH_COUNT     (16U)
 
 typedef struct
 {
@@ -83,6 +89,7 @@ static uint32_t DataProcess_GetRawImuValidMask(const GloveRawFrame_t *raw)
 static uint8_t DataProcess_HasValidImuInput(const GloveRawFrame_t *raw)
 {
     const uint32_t required_flags = GLOVE_FRAME_FLAG_IMU_VALID | GLOVE_FRAME_FLAG_QUAT_VALID;
+    uint32_t imu_valid_mask;
 
     if (raw == NULL)
     {
@@ -94,7 +101,9 @@ static uint8_t DataProcess_HasValidImuInput(const GloveRawFrame_t *raw)
         return 0U;
     }
 
-    return (DataProcess_GetRawImuValidMask(raw) == GLOVE_IMU_VALID_ALL_MASK) ? 1U : 0U;
+    imu_valid_mask = DataProcess_GetRawImuValidMask(raw);
+
+    return (imu_valid_mask != 0UL) ? 1U : 0U;
 }
 
 static void DataProcess_CopyAlgorithmConfig(DataProcessAlgorithmConfig_t *config)
@@ -124,6 +133,150 @@ static GloveTimestampUs_t DataProcess_GetKernelTimeUs(void)
                                 (uint64_t)tick_freq);
 }
 
+#if (DATA_PROCESS_FULL_DEBUG_PRINT_ENABLE != 0U)
+static int32_t DataProcess_FloatToMilli(float value)
+{
+    return (int32_t)(value * 1000.0f);
+}
+
+static int32_t DataProcess_FloatTo1e4(float value)
+{
+    return (int32_t)(value * 10000.0f);
+}
+
+static uint32_t DataProcess_GetImuValidMask(uint32_t valid_flags)
+{
+    return (valid_flags & GLOVE_FRAME_VALID_IMU_ALL_MASK) >>
+           GLOVE_FRAME_VALID_IMU_BIT_SHIFT;
+}
+
+static uint32_t DataProcess_DebugImuCount(void)
+{
+    return (DATA_PROCESS_FULL_DEBUG_IMU_PRINT_COUNT > GLOVE_IMU_COUNT) ?
+           GLOVE_IMU_COUNT :
+           DATA_PROCESS_FULL_DEBUG_IMU_PRINT_COUNT;
+}
+
+static uint32_t DataProcess_DebugTouchCount(void)
+{
+    return (DATA_PROCESS_FULL_DEBUG_TOUCH_COUNT > GLOVE_TOUCH_COUNT) ?
+           GLOVE_TOUCH_COUNT :
+           DATA_PROCESS_FULL_DEBUG_TOUCH_COUNT;
+}
+
+static uint8_t DataProcess_IsMissingJoint(float value)
+{
+    return ((value >= (HAND_SOLVE_MISSING_VALUE * 0.5f)) ||
+            (value <= (-HAND_SOLVE_MISSING_VALUE * 0.5f))) ? 1U : 0U;
+}
+
+static uint8_t DataProcess_ShouldPrintFullFrame(void)
+{
+    static uint32_t s_debug_print_counter;
+
+    s_debug_print_counter++;
+    if (s_debug_print_counter == 1UL)
+    {
+        return 1U;
+    }
+
+    if (DATA_PROCESS_FULL_DEBUG_PRINT_PERIOD <= 1U)
+    {
+        return 1U;
+    }
+
+    return ((s_debug_print_counter % DATA_PROCESS_FULL_DEBUG_PRINT_PERIOD) == 0UL) ? 1U : 0U;
+}
+
+static void DataProcess_PrintFullFrame(const GloveFullFrame_t *full,
+                                       GloveStatus_t process_status)
+{
+    uint32_t ts_hi;
+    uint32_t ts_lo;
+    uint32_t imu_count;
+    uint32_t touch_count;
+    uint32_t imu_mask;
+
+    if (full == NULL)
+    {
+        return;
+    }
+
+    if (DataProcess_ShouldPrintFullFrame() == 0U)
+    {
+        return;
+    }
+
+    ts_hi = (uint32_t)(full->timestamp_us >> 32);
+    ts_lo = (uint32_t)(full->timestamp_us & 0xFFFFFFFFULL);
+    imu_count = DataProcess_DebugImuCount();
+    touch_count = DataProcess_DebugTouchCount();
+    imu_mask = DataProcess_GetImuValidMask(full->raw.valid_flags);
+
+    printf("[FULL] id=%lu ts=0x%08lX%08lX flags=0x%08lX raw_flags=0x%08lX proc_flags=0x%08lX process_status=%u imu_mask=0x%04lX joints=%lu\r\n",
+           (unsigned long)full->frame_id,
+           (unsigned long)ts_hi,
+           (unsigned long)ts_lo,
+           (unsigned long)full->valid_flags,
+           (unsigned long)full->raw.valid_flags,
+           (unsigned long)full->processed.valid_flags,
+           (unsigned int)process_status,
+           (unsigned long)imu_mask,
+           (unsigned long)GLOVE_JOINT_DOF_COUNT);
+
+    printf("[FULL_JOINT] count=%lu mdeg=", (unsigned long)GLOVE_JOINT_DOF_COUNT);
+    for (uint32_t i = 0U; i < GLOVE_JOINT_DOF_COUNT; i++)
+    {
+        if (DataProcess_IsMissingJoint(full->processed.joint_angle_deg[i]) != 0U)
+        {
+            printf("MISS");
+        }
+        else
+        {
+            printf("%ld", (long)DataProcess_FloatToMilli(full->processed.joint_angle_deg[i]));
+        }
+
+        if ((i + 1U) < GLOVE_JOINT_DOF_COUNT)
+        {
+            printf(",");
+        }
+    }
+    printf("\r\n");
+
+    for (uint32_t i = 0U; i < imu_count; i++)
+    {
+        if ((imu_mask & (1UL << i)) == 0UL)
+        {
+            continue;
+        }
+
+        printf("[FULL_IMU] i=%lu acc_mps2_1e3=(%ld,%ld,%ld) gyr_radps_1e3=(%ld,%ld,%ld) quat_1e4=(%ld,%ld,%ld,%ld)\r\n",
+               (unsigned long)i,
+               (long)DataProcess_FloatToMilli(full->raw.imu[i].accel_mps2.x),
+               (long)DataProcess_FloatToMilli(full->raw.imu[i].accel_mps2.y),
+               (long)DataProcess_FloatToMilli(full->raw.imu[i].accel_mps2.z),
+               (long)DataProcess_FloatToMilli(full->raw.imu[i].gyro_radps.x),
+               (long)DataProcess_FloatToMilli(full->raw.imu[i].gyro_radps.y),
+               (long)DataProcess_FloatToMilli(full->raw.imu[i].gyro_radps.z),
+               (long)DataProcess_FloatTo1e4(full->raw.quat[i].w),
+               (long)DataProcess_FloatTo1e4(full->raw.quat[i].x),
+               (long)DataProcess_FloatTo1e4(full->raw.quat[i].y),
+               (long)DataProcess_FloatTo1e4(full->raw.quat[i].z));
+    }
+
+    printf("[FULL_TOUCH] count=%lu values=", (unsigned long)touch_count);
+    for (uint32_t i = 0U; i < touch_count; i++)
+    {
+        printf("%u", (unsigned int)full->raw.touch[i].value);
+        if ((i + 1U) < touch_count)
+        {
+            printf(",");
+        }
+    }
+    printf("\r\n");
+}
+#endif
+
 static GloveStatus_t DataProcess_SolveJointAnglesDeg(const GloveRawFrame_t *raw,
                                                      float joint_angle_deg[GLOVE_JOINT_DOF_COUNT])
 {
@@ -136,7 +289,10 @@ static GloveStatus_t DataProcess_SolveJointAnglesDeg(const GloveRawFrame_t *raw,
 
     if (DataProcess_HasValidImuInput(raw) == 0U)
     {
-        (void)memset(joint_angle_deg, 0, sizeof(float) * GLOVE_JOINT_DOF_COUNT);
+        for (uint32_t i = 0U; i < GLOVE_JOINT_DOF_COUNT; i++)
+        {
+            joint_angle_deg[i] = HAND_SOLVE_MISSING_VALUE;
+        }
         return GLOVE_STATUS_NOT_READY;
     }
 
@@ -184,7 +340,8 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
 }
 
 static GloveStatus_t DataProcess_PublishFullFrame(const GloveRawFrame_t *raw,
-                                                  const GloveProcessedFrame_t *processed)
+                                                  const GloveProcessedFrame_t *processed,
+                                                  GloveStatus_t process_status)
 {
     GloveFullFrameBlock_t *full;
     GloveStatus_t status;
@@ -202,6 +359,12 @@ static GloveStatus_t DataProcess_PublishFullFrame(const GloveRawFrame_t *raw,
     }
 
     AppData_BuildFullFrame(&full->frame, raw, processed);
+
+#if (DATA_PROCESS_FULL_DEBUG_PRINT_ENABLE != 0U)
+    DataProcess_PrintFullFrame(&full->frame, process_status);
+#else
+    (void)process_status;
+#endif
 
     status = DataManager_PublishFullFrame(full, DATA_PROCESS_FULL_PUBLISH_TIMEOUT_MS);
     if (status != GLOVE_STATUS_OK)
@@ -348,7 +511,9 @@ void DataProcessTask(void *argument)
                 s_data_process_stats.joint_solve_failures++;
             }
 
-            publish_status = DataProcess_PublishFullFrame(&raw->frame, &processed);
+            publish_status = DataProcess_PublishFullFrame(&raw->frame,
+                                                          &processed,
+                                                          process_status);
 
             release_status = DataManager_ReleaseRawFrame(raw);
             raw = NULL;

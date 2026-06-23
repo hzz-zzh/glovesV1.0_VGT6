@@ -8,6 +8,10 @@
 #include "modbus_registers.h"
 #include "modbus_time_sync.h"
 
+#if MODBUS_JOINT_COUNT != GLOVE_JOINT_DOF_COUNT
+#error "MODBUS_JOINT_COUNT must match GLOVE_JOINT_DOF_COUNT"
+#endif
+
 typedef struct
 {
   uint8_t valid;
@@ -17,8 +21,17 @@ typedef struct
   GloveQuaternion_t quat[GLOVE_IMU_COUNT];
 } ModbusImuSnapshot_t;
 
+typedef struct
+{
+  uint8_t valid;
+  GloveTimestampUs_t timestamp_us;
+  uint32_t valid_flags;
+  float joint_angle_deg[GLOVE_JOINT_DOF_COUNT];
+} ModbusJointSnapshot_t;
+
 static uint8_t modbus_slave_address = MODBUS_SLAVE_ADDR_DEFAULT;
 static ModbusImuSnapshot_t modbus_imu_snapshot;
+static ModbusJointSnapshot_t modbus_joint_snapshot;
 
 static uint16_t Modbus_ReadU16(const uint8_t *data)
 {
@@ -99,6 +112,21 @@ static uint8_t Modbus_IsReadableRegister(uint16_t reg_addr)
     return 1U;
   }
 
+  if ((reg_addr >= REG_JOINT_DATA_START) && (reg_addr <= REG_JOINT_DATA_END))
+  {
+    return 1U;
+  }
+
+  if ((reg_addr >= REG_JOINT_TIMESTAMP_US) && (reg_addr < (REG_JOINT_TIMESTAMP_US + MODBUS_REGS_U64)))
+  {
+    return 1U;
+  }
+
+  if ((reg_addr >= REG_JOINT_STATUS_START) && (reg_addr <= REG_JOINT_STATUS_END))
+  {
+    return 1U;
+  }
+
   if ((reg_addr >= REG_R_TIMESTAMP_US) && (reg_addr < (REG_R_TIMESTAMP_US + MODBUS_REGS_U64)))
   {
     return 1U;
@@ -157,6 +185,57 @@ static GloveTimestampUs_t Modbus_GetImuTimestampUs(void)
   return timestamp_us;
 }
 
+static GloveTimestampUs_t Modbus_GetJointTimestampUs(void)
+{
+  GloveTimestampUs_t timestamp_us;
+
+  taskENTER_CRITICAL();
+  timestamp_us = (modbus_joint_snapshot.valid != 0U) ? modbus_joint_snapshot.timestamp_us : 0ULL;
+  taskEXIT_CRITICAL();
+
+  return timestamp_us;
+}
+
+static uint16_t Modbus_ReadJointStatusFlags(void)
+{
+  uint16_t status = 0U;
+
+  taskENTER_CRITICAL();
+  if (modbus_joint_snapshot.valid != 0U)
+  {
+    status |= JOINT_STATUS_SNAPSHOT_VALID;
+    if ((modbus_joint_snapshot.valid_flags & GLOVE_FRAME_FLAG_ALGORITHM_VALID) != 0U)
+    {
+      status |= JOINT_STATUS_ALGORITHM_VALID;
+    }
+  }
+  taskEXIT_CRITICAL();
+
+  return status;
+}
+
+static uint32_t Modbus_GetJointValidBits(void)
+{
+  uint32_t valid_bits = 0UL;
+
+  taskENTER_CRITICAL();
+  if (modbus_joint_snapshot.valid != 0U)
+  {
+    for (uint32_t index = 0U; index < GLOVE_JOINT_DOF_COUNT; index++)
+    {
+      float value = modbus_joint_snapshot.joint_angle_deg[index];
+
+      if ((value < 999999936.0f) && (value > -999999936.0f))
+      {
+        valid_bits |= (1UL << index);
+      }
+    }
+  }
+  taskEXIT_CRITICAL();
+
+  return valid_bits;
+}
+
 static float Modbus_GetImuFloat(uint16_t imu_index, uint16_t float_index)
 {
   float value = 0.0f;
@@ -211,6 +290,25 @@ static float Modbus_GetImuFloat(uint16_t imu_index, uint16_t float_index)
   return value;
 }
 
+static float Modbus_GetJointFloat(uint16_t joint_index)
+{
+  float value = 0.0f;
+
+  if (joint_index >= GLOVE_JOINT_DOF_COUNT)
+  {
+    return 0.0f;
+  }
+
+  taskENTER_CRITICAL();
+  if (modbus_joint_snapshot.valid != 0U)
+  {
+    value = modbus_joint_snapshot.joint_angle_deg[joint_index];
+  }
+  taskEXIT_CRITICAL();
+
+  return value;
+}
+
 static uint16_t Modbus_ReadImuDataReg(uint16_t reg_addr)
 {
   uint16_t reg_offset = (uint16_t)(reg_addr - REG_IMU_DATA_START);
@@ -220,6 +318,15 @@ static uint16_t Modbus_ReadImuDataReg(uint16_t reg_addr)
   uint16_t word_offset = (uint16_t)(word_in_imu % MODBUS_REGS_FLOAT32);
 
   return Modbus_ReadFloatReg(Modbus_GetImuFloat(imu_index, float_index), word_offset);
+}
+
+static uint16_t Modbus_ReadJointDataReg(uint16_t reg_addr)
+{
+  uint16_t reg_offset = (uint16_t)(reg_addr - REG_JOINT_DATA_START);
+  uint16_t joint_index = (uint16_t)(reg_offset / MODBUS_JOINT_REGS_PER_VALUE);
+  uint16_t word_offset = (uint16_t)(reg_offset % MODBUS_JOINT_REGS_PER_VALUE);
+
+  return Modbus_ReadFloatReg(Modbus_GetJointFloat(joint_index), word_offset);
 }
 
 static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
@@ -297,6 +404,15 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
     case REG_IMU_STATUS_BITS:
       return Modbus_ReadImuStatusBits();
 
+    case REG_JOINT_STATUS_FLAGS:
+      return Modbus_ReadJointStatusFlags();
+
+    case REG_JOINT_VALID_BITS_LOW:
+      return (uint16_t)(Modbus_GetJointValidBits() & 0xFFFFU);
+
+    case REG_JOINT_VALID_BITS_HIGH:
+      return (uint16_t)((Modbus_GetJointValidBits() >> 16) & 0xFFFFU);
+
     case REG_R_STATUS_START:
     case REG_R_STATUS_START + 1U:
     case REG_R_STATUS_START + 2U:
@@ -340,6 +456,16 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
   if ((reg_addr >= REG_IMU_TIMESTAMP_US) && (reg_addr < (REG_IMU_TIMESTAMP_US + MODBUS_REGS_U64)))
   {
     return Modbus_ReadU64Reg(Modbus_GetImuTimestampUs(), (uint16_t)(reg_addr - REG_IMU_TIMESTAMP_US));
+  }
+
+  if ((reg_addr >= REG_JOINT_DATA_START) && (reg_addr <= REG_JOINT_DATA_END))
+  {
+    return Modbus_ReadJointDataReg(reg_addr);
+  }
+
+  if ((reg_addr >= REG_JOINT_TIMESTAMP_US) && (reg_addr < (REG_JOINT_TIMESTAMP_US + MODBUS_REGS_U64)))
+  {
+    return Modbus_ReadU64Reg(Modbus_GetJointTimestampUs(), (uint16_t)(reg_addr - REG_JOINT_TIMESTAMP_US));
   }
 
   if ((reg_addr >= REG_R_TIMESTAMP_US) && (reg_addr < (REG_R_TIMESTAMP_US + MODBUS_REGS_U64)))
@@ -553,6 +679,13 @@ void Modbus_UpdateFullFrameSnapshot(const GloveFullFrame_t *frame)
                frame->raw.quat,
                sizeof(modbus_imu_snapshot.quat));
   modbus_imu_snapshot.valid = 1U;
+
+  modbus_joint_snapshot.timestamp_us = frame->processed.timestamp_us;
+  modbus_joint_snapshot.valid_flags = frame->processed.valid_flags;
+  (void)memcpy(modbus_joint_snapshot.joint_angle_deg,
+               frame->processed.joint_angle_deg,
+               sizeof(modbus_joint_snapshot.joint_angle_deg));
+  modbus_joint_snapshot.valid = 1U;
   taskEXIT_CRITICAL();
 }
 

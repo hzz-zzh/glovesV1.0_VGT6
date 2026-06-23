@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define SD_LOG_CONTENT_SIZE           (1021U)
+#define SD_LOG_CONTENT_SIZE           (SD_LOG_BLOCK_SIZE - 3U)
 #define SD_LOG_FRAME_HEAD             (0xA5U)
 #define SD_LOG_FRAME_TAIL             (0x5AU)
 #define SD_LOG_SEPARATOR              (0x00U)
@@ -22,6 +22,20 @@
 #define SD_LOG_MOUNT_RETRY_DELAY_MS   (100U)
 #define SD_LOG_SYNC_INTERVAL_BYTES    (64U * 1024U)
 #define SD_LOG_MAX_FILE_ID            (9999U)
+#define SD_LOG_SECTION_OVERHEAD_BYTES (2U + 8U + 1U)
+#define SD_LOG_FLOAT_BYTES            (4U)
+#define SD_LOG_U16_BYTES              (2U)
+#define SD_LOG_IMU_PAYLOAD_BYTES      (GLOVE_IMU_COUNT * 10U * SD_LOG_FLOAT_BYTES)
+#define SD_LOG_JOINT_PAYLOAD_BYTES    (GLOVE_JOINT_DOF_COUNT * SD_LOG_FLOAT_BYTES)
+#define SD_LOG_TOUCH_PAYLOAD_BYTES    (GLOVE_TOUCH_COUNT * SD_LOG_U16_BYTES)
+#define SD_LOG_MIN_CONTENT_SIZE       (SD_LOG_IMU_PAYLOAD_BYTES + \
+                                       SD_LOG_JOINT_PAYLOAD_BYTES + \
+                                       SD_LOG_TOUCH_PAYLOAD_BYTES + \
+                                       (3U * SD_LOG_SECTION_OVERHEAD_BYTES))
+
+#if SD_LOG_MIN_CONTENT_SIZE > SD_LOG_CONTENT_SIZE
+#error "SD_LOG_BLOCK_SIZE is too small for the configured payload sizes"
+#endif
 
 static FATFS sd_log_fs;
 static FIL sd_log_file;
@@ -153,6 +167,7 @@ static void SdLog_BuildFrameBlock(uint8_t block[SD_LOG_BLOCK_SIZE],
   offset = (uint16_t)(offset + 8U);
   block[offset++] = SD_LOG_FRAME_TAIL;
 
+  offset = SD_LOG_CONTENT_SIZE;
   crc = SdLog_Crc16(block, SD_LOG_CONTENT_SIZE);
   block[offset++] = (uint8_t)(crc & 0xFFU);
   block[offset++] = (uint8_t)(crc >> 8);
