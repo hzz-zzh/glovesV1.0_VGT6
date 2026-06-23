@@ -35,7 +35,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define FREERTOS_ENABLE_UART_DEBUG_TASK            (0)
+#define FREERTOS_ENABLE_UART_DEBUG_TASK            (1)
 #define FREERTOS_ENABLE_TEST_TASK                  (0)
 #define FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY        (0)
 #define FREERTOS_ENABLE_SD_LOG_TEST_ONLY           (0)
@@ -164,8 +164,10 @@ void MX_FREERTOS_Init(void) {
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
-//  /* creation of uartDebugTask */
-//  uartDebugTaskHandle = osThreadNew(UartDebugTask, NULL, &uartDebugTask_attributes);
+#if FREERTOS_ENABLE_UART_DEBUG_TASK
+  /* creation of uartDebugTask */
+  uartDebugTaskHandle = osThreadNew(UartDebugTask, NULL, &uartDebugTask_attributes);
+#endif
 
 #if FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY
   /* creation of touchAdcTask */

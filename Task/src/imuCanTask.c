@@ -66,6 +66,10 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define IMU_CAN_TASK_IRQ_PRIORITY               (configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY)
 #define IMU_CAN_TASK_IRQ_SUBPRIORITY            (0U)
 
+#if IMU_CAN_TASK_BUS_COUNT != IMU_CAN_TASK_DEBUG_BUS_COUNT
+#error "IMU CAN debug bus count must match runtime bus count"
+#endif
+
 typedef struct
 {
     FDCAN_HandleTypeDef *hfdcan;
@@ -1072,6 +1076,52 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     }
 }
 
+static void ImuCanTask_FillBusDebugSnapshot(ImuCanTaskDebugSnapshot_t *snapshot)
+{
+    if (snapshot == NULL)
+    {
+        return;
+    }
+
+    for (uint32_t i = 0U; i < IMU_CAN_TASK_BUS_COUNT; i++)
+    {
+        FDCAN_HandleTypeDef *hfdcan = s_buses[i].port.hfdcan;
+        FDCAN_ProtocolStatusTypeDef protocol_status;
+        FDCAN_ErrorCountersTypeDef error_counters;
+
+        if (s_buses[i].fdcan_started == true)
+        {
+            snapshot->bus_started_mask |= (1UL << i);
+        }
+
+        if (hfdcan == NULL)
+        {
+            continue;
+        }
+
+        snapshot->bus_state[i] = (uint32_t)HAL_FDCAN_GetState(hfdcan);
+
+        (void)memset(&protocol_status, 0, sizeof(protocol_status));
+        if (HAL_FDCAN_GetProtocolStatus(hfdcan, &protocol_status) == HAL_OK)
+        {
+            snapshot->bus_last_error_code[i] = protocol_status.LastErrorCode;
+            snapshot->bus_data_last_error_code[i] = protocol_status.DataLastErrorCode;
+            snapshot->bus_activity[i] = protocol_status.Activity;
+            snapshot->bus_error_passive[i] = protocol_status.ErrorPassive;
+            snapshot->bus_warning[i] = protocol_status.Warning;
+            snapshot->bus_off[i] = protocol_status.BusOff;
+        }
+
+        (void)memset(&error_counters, 0, sizeof(error_counters));
+        if (HAL_FDCAN_GetErrorCounters(hfdcan, &error_counters) == HAL_OK)
+        {
+            snapshot->bus_tx_error_count[i] = error_counters.TxErrorCnt;
+            snapshot->bus_rx_error_count[i] = error_counters.RxErrorCnt;
+            snapshot->bus_rx_error_passive[i] = error_counters.RxErrorPassive;
+        }
+    }
+}
+
 static void ImuCanTask_CopyStatsToSnapshot(ImuCanTaskDebugSnapshot_t *snapshot)
 {
     (void)memset(snapshot, 0, sizeof(*snapshot));
@@ -1117,6 +1167,8 @@ static void ImuCanTask_CopyStatsToSnapshot(ImuCanTaskDebugSnapshot_t *snapshot)
                      s_imu_can_stats.cfg_step_tx_data[i],
                      sizeof(snapshot->cfg_step_tx_data[i]));
     }
+
+    ImuCanTask_FillBusDebugSnapshot(snapshot);
 }
 
 static void ImuCanTask_FillDebugFromDevice(ImuCanTaskDebugSnapshot_t *snapshot,

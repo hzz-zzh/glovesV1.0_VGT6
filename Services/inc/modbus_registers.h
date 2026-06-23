@@ -5,6 +5,8 @@
 extern "C" {
 #endif
 
+#include "app_config.h"
+
 #define MODBUS_SLAVE_ADDR_DEFAULT      0x01U
 
 /* Register width helpers. */
@@ -105,12 +107,15 @@ extern "C" {
 /* Work status register. */
 #define REG_WORK_STATE                 0x0500U
 
-/* IMU data, timestamp, status and offset registers. */
+/* IMU data, timestamp, status and calibration registers. */
 #define MODBUS_IMU_COUNT               16U
 #define MODBUS_IMU_FLOATS_PER_UNIT     10U
 #define MODBUS_IMU_REGS_PER_UNIT       20U
 #define MODBUS_IMU_DATA_FLOAT_COUNT    160U
 #define MODBUS_IMU_DATA_REG_COUNT      320U
+#define MODBUS_IMU_CALIB_FLOATS_PER_UNIT 4U
+#define MODBUS_IMU_CALIB_REGS_PER_UNIT   (MODBUS_IMU_CALIB_FLOATS_PER_UNIT * MODBUS_REGS_FLOAT32)
+#define MODBUS_IMU_CALIB_TABLE_REG_COUNT (MODBUS_IMU_COUNT * MODBUS_IMU_CALIB_REGS_PER_UNIT)
 
 #define REG_IMU_DATA_START             0x1000U
 #define REG_IMU_DATA_END               0x113FU
@@ -119,11 +124,50 @@ extern "C" {
 #define REG_IMU_OFFSET_START           0x1154U
 #define REG_IMU_OFFSET_END             0x1293U
 
+#define REG_IMU_CALIB_START            REG_IMU_OFFSET_START
+#define REG_IMU_CALIB_END              REG_IMU_OFFSET_END
+#define REG_IMU_CALIB_C_START          REG_IMU_CALIB_START
+#define REG_IMU_CALIB_C_END            (REG_IMU_CALIB_C_START + MODBUS_IMU_CALIB_TABLE_REG_COUNT - 1U)
+#define REG_IMU_CALIB_M_START          (REG_IMU_CALIB_C_END + 1U)
+#define REG_IMU_CALIB_M_END            (REG_IMU_CALIB_M_START + MODBUS_IMU_CALIB_TABLE_REG_COUNT - 1U)
+#define REG_IMU_CALIB_CTRL_START       (REG_IMU_CALIB_M_END + 1U)
+#define REG_IMU_CALIB_CTRL_END         REG_IMU_CALIB_END
+
+#define REG_IMU_CALIB_MAGIC            REG_IMU_CALIB_CTRL_START
+#define REG_IMU_CALIB_COMMAND          (REG_IMU_CALIB_CTRL_START + 1U)
+#define REG_IMU_CALIB_SEQ              (REG_IMU_CALIB_CTRL_START + 2U)
+#define REG_IMU_CALIB_STATUS           (REG_IMU_CALIB_CTRL_START + 3U)
+#define REG_IMU_CALIB_ERROR_INDEX      (REG_IMU_CALIB_CTRL_START + 4U)
+#define REG_IMU_CALIB_LAST_APPLIED_SEQ (REG_IMU_CALIB_CTRL_START + 5U)
+
+#define IMU_CALIB_MAGIC_VALUE          0xCA1BU
+#define IMU_CALIB_CMD_NONE             0x0000U
+#define IMU_CALIB_CMD_APPLY            0x0001U
+#define IMU_CALIB_CMD_RESET_IDENTITY   0x0002U
+
+#define IMU_CALIB_STATUS_IDLE          0x0000U
+#define IMU_CALIB_STATUS_APPLIED       0x0001U
+#define IMU_CALIB_STATUS_RESET_DONE    0x0002U
+#define IMU_CALIB_STATUS_BAD_MAGIC     0x8001U
+#define IMU_CALIB_STATUS_BAD_CMD       0x8002U
+#define IMU_CALIB_STATUS_BAD_QUAT      0x8003U
+#define IMU_CALIB_ERROR_NONE           0xFFFFU
+
 #define REG_IMU_STATUS_START           REG_IMU_STATUS_BITS
 #define REG_IMU_STATUS_COUNT           1U
 
 #define REG_IMU_DATA_ADDR(index)       (REG_IMU_DATA_START + ((uint16_t)(index) * MODBUS_IMU_REGS_PER_UNIT))
 #define REG_IMU_OFFSET_ADDR(index)     (REG_IMU_OFFSET_START + ((uint16_t)(index) * MODBUS_IMU_REGS_PER_UNIT))
+#define REG_IMU_CALIB_C_ADDR(index)    (REG_IMU_CALIB_C_START + ((uint16_t)(index) * MODBUS_IMU_CALIB_REGS_PER_UNIT))
+#define REG_IMU_CALIB_M_ADDR(index)    (REG_IMU_CALIB_M_START + ((uint16_t)(index) * MODBUS_IMU_CALIB_REGS_PER_UNIT))
+
+#if REG_IMU_CALIB_M_END >= REG_IMU_CALIB_CTRL_START
+#error "IMU calibration table overlaps calibration control registers"
+#endif
+
+#if REG_IMU_CALIB_CTRL_START > REG_IMU_CALIB_CTRL_END
+#error "IMU calibration control registers exceed reserved IMU calibration range"
+#endif
 
 /* Joint angle data, timestamp and status registers. */
 #define MODBUS_JOINT_COUNT             27U
@@ -145,18 +189,31 @@ extern "C" {
 #define JOINT_STATUS_SNAPSHOT_VALID    0x0001U
 #define JOINT_STATUS_ALGORITHM_VALID   0x0002U
 
-/* Resistance matrix data, timestamp and status registers. */
-#define MODBUS_R_POINT_COUNT           64U
+/* Touch/resistance matrix data, timestamp and status registers. */
+#define MODBUS_R_POINT_COUNT           GLOVE_TOUCH_COUNT
 #define MODBUS_R_STATUS_REG_COUNT      4U
 #define MODBUS_R_DATA_REG_COUNT        128U
 
 #define REG_R_DATA_START               0x2000U
 #define REG_R_DATA_END                 0x207FU
+#define REG_R_DATA_VALID_END           (REG_R_DATA_START + MODBUS_R_POINT_COUNT - 1U)
 #define REG_R_TIMESTAMP_US             0x2080U
 #define REG_R_STATUS_START             0x2084U
 #define REG_R_STATUS_END               0x2087U
 #define REG_R_STATUS_RESERVED_START    0x2088U
 #define REG_R_STATUS_RESERVED_END      0x20C3U
+
+#define REG_R_STATUS_FLAGS             REG_R_STATUS_START
+#define REG_R_POINT_COUNT_REG          (REG_R_STATUS_START + 1U)
+#define REG_R_DATA_REG_COUNT_REG       (REG_R_STATUS_START + 2U)
+#define REG_R_STATUS_RESERVED          (REG_R_STATUS_START + 3U)
+
+#define R_STATUS_SNAPSHOT_VALID        0x0001U
+#define R_STATUS_TOUCH_VALID           0x0002U
+
+#if MODBUS_R_POINT_COUNT > MODBUS_R_DATA_REG_COUNT
+#error "MODBUS_R_DATA_REG_COUNT must cover all touch points"
+#endif
 
 /* Command values written to REG_CMD. */
 #define CMD_NONE                       0x0000U

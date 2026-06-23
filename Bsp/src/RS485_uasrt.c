@@ -29,6 +29,25 @@ static volatile uint32_t rs485_modbus_frame_error = 0U;
 static volatile uint32_t rs485_tx_send_fail = 0U;
 static volatile uint32_t rs485_tx_done = 0U;
 static volatile uint32_t rs485_errors = 0U;
+static volatile uint16_t rs485_last_rx_size = 0U;
+static volatile uint16_t rs485_last_tx_size = 0U;
+static uint8_t rs485_last_rx_head[RS485_DEBUG_HEAD_SIZE];
+static uint8_t rs485_last_tx_head[RS485_DEBUG_HEAD_SIZE];
+
+static void RS485_SaveHead(uint8_t *head, const uint8_t *data, uint16_t size)
+{
+  uint16_t copy_size = size;
+
+  if (copy_size > RS485_DEBUG_HEAD_SIZE)
+  {
+    copy_size = RS485_DEBUG_HEAD_SIZE;
+  }
+
+  for (uint16_t i = 0U; i < RS485_DEBUG_HEAD_SIZE; i++)
+  {
+    head[i] = (i < copy_size) ? data[i] : 0U;
+  }
+}
 
 static void RS485_SetReceiveMode(void)
 {
@@ -97,6 +116,8 @@ HAL_StatusTypeDef RS485_SendDMA(const uint8_t *data, uint16_t size)
   __enable_irq();
 
   memcpy(rs485_tx_buffer, data, size);
+  RS485_SaveHead(rs485_last_tx_head, data, size);
+  rs485_last_tx_size = size;
 
   /* Half-duplex RS485: stop RX, enable DE, then launch TX DMA. */
   (void)HAL_UART_AbortReceive(&huart1);
@@ -259,6 +280,13 @@ void RS485_GetStatus(RS485_StatusTypeDef *status)
   status->tx_send_fail = rs485_tx_send_fail;
   status->tx_done = rs485_tx_done;
   status->errors = rs485_errors;
+  status->last_rx_size = rs485_last_rx_size;
+  status->last_tx_size = rs485_last_tx_size;
+  for (uint16_t i = 0U; i < RS485_DEBUG_HEAD_SIZE; i++)
+  {
+    status->last_rx_head[i] = rs485_last_rx_head[i];
+    status->last_tx_head[i] = rs485_last_tx_head[i];
+  }
   status->tx_busy = rs485_tx_busy;
   __enable_irq();
 }
@@ -283,6 +311,8 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
       }
 
       /* Callback only records frame metadata; the RS485 task copies bytes. */
+      RS485_SaveHead(rs485_last_rx_head, rs485_rx_dma_buffer, frame_size);
+      rs485_last_rx_size = frame_size;
       rs485_rx_frame_size = frame_size;
       rs485_rx_frame_ready = 1U;
       rs485_rx_events++;

@@ -13,6 +13,7 @@ extern "C" {
 #define MODBUS_MIN_RTU_FRAME_LEN       4U
 #define MODBUS_READ_REQ_LEN            8U
 #define MODBUS_MAX_READ_REG_COUNT      125U
+#define MODBUS_MAX_WRITE_REG_COUNT     123U
 
 #define MB_FC_READ_HOLDING_REGS        0x03U
 #define MB_FC_WRITE_SINGLE_REG         0x06U

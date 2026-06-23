@@ -15,6 +15,7 @@
 #define SYSTEM_MANAGER_LOOP_PERIOD_MS              (10U)
 #define SYSTEM_MANAGER_BATTERY_READ_PERIOD_MS      (1000U)
 #define SYSTEM_MANAGER_BATTERY_STARTUP_DELAY_MS    (600U)
+#define SYSTEM_MANAGER_POWER_DEBUG_ENABLE          (0U)
 #define SYSTEM_MANAGER_POWER_DEBUG_PERIOD_MS       (5000U)
 #define SYSTEM_MANAGER_BQ25622_TIMEOUT_MS          (20U)
 #define SYSTEM_MANAGER_BQ25622_INPUT_CURRENT_MA    (2500U)
@@ -269,6 +270,7 @@ static void SystemManager_UpdateBatteryFailure(GloveStatus_t status)
     taskEXIT_CRITICAL();
 }
 
+#if (SYSTEM_MANAGER_POWER_DEBUG_ENABLE != 0U)
 static void SystemManager_PrintBatteryDebug(GloveStatus_t status,
                                             const Max17043BatteryData_t *data)
 {
@@ -291,6 +293,7 @@ static void SystemManager_PrintBatteryDebug(GloveStatus_t status,
            (unsigned int)data->raw_vcell,
            (unsigned int)data->raw_soc);
 }
+#endif
 
 void SystemManagerTask_GetBatteryStatus(GloveBatteryStatus_t *status)
 {
@@ -310,7 +313,9 @@ void SystemManagerTask(void *argument)
     uint32_t next_wake_tick;
     uint32_t battery_startup_elapsed_ms = 0U;
     uint32_t battery_read_elapsed_ms = 0U;
+#if (SYSTEM_MANAGER_POWER_DEBUG_ENABLE != 0U)
     uint32_t power_debug_elapsed_ms = 0U;
+#endif
     uint8_t battery_startup_done = 0U;
 
     (void)argument;
@@ -343,13 +348,17 @@ void SystemManagerTask(void *argument)
     }
     if (status == GLOVE_STATUS_OK)
     {
+#if (SYSTEM_MANAGER_POWER_DEBUG_ENABLE != 0U)
         (void)Bq25622_DumpDebugRegisters(&s_bq25622);
+#endif
     }
+#if (SYSTEM_MANAGER_POWER_DEBUG_ENABLE != 0U)
     printf("[System] BQ25622 charge config status=%u iindpm=%u mA vreg=%u mV ichg=%u mA\r\n",
            (unsigned int)status,
            (unsigned int)SYSTEM_MANAGER_BQ25622_INPUT_CURRENT_MA,
            (unsigned int)SYSTEM_MANAGER_BQ25622_CHARGE_VOLTAGE_MV,
            (unsigned int)SYSTEM_MANAGER_BQ25622_CHARGE_CURRENT_MA);
+#endif
     if (status != GLOVE_STATUS_OK)
     {
         SystemManager_UpdateBatteryFailure(status);
@@ -393,6 +402,7 @@ void SystemManagerTask(void *argument)
                     SystemManager_UpdateBatteryFailure(status);
                 }
 
+#if (SYSTEM_MANAGER_POWER_DEBUG_ENABLE != 0U)
                 power_debug_elapsed_ms += SYSTEM_MANAGER_BATTERY_READ_PERIOD_MS;
                 if (power_debug_elapsed_ms >= SYSTEM_MANAGER_POWER_DEBUG_PERIOD_MS)
                 {
@@ -401,6 +411,7 @@ void SystemManagerTask(void *argument)
                                                     (status == GLOVE_STATUS_OK) ? &battery_data : NULL);
                     (void)Bq25622_DumpDebugRegisters(&s_bq25622);
                 }
+#endif
             }
         }
 

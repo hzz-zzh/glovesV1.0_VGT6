@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#define IMU_CAN_TASK_DEBUG_BUS_COUNT (2U)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -40,6 +42,17 @@ typedef struct
     uint8_t cfg_step_ack_data[6][8];
     uint32_t cfg_step_tx_id[6];
     uint8_t cfg_step_tx_data[6][8];
+    uint32_t bus_started_mask;
+    uint32_t bus_state[IMU_CAN_TASK_DEBUG_BUS_COUNT];
+    uint32_t bus_tx_error_count[IMU_CAN_TASK_DEBUG_BUS_COUNT];
+    uint32_t bus_rx_error_count[IMU_CAN_TASK_DEBUG_BUS_COUNT];
+    uint32_t bus_rx_error_passive[IMU_CAN_TASK_DEBUG_BUS_COUNT];
+    uint32_t bus_last_error_code[IMU_CAN_TASK_DEBUG_BUS_COUNT];
+    uint32_t bus_data_last_error_code[IMU_CAN_TASK_DEBUG_BUS_COUNT];
+    uint32_t bus_activity[IMU_CAN_TASK_DEBUG_BUS_COUNT];
+    uint32_t bus_error_passive[IMU_CAN_TASK_DEBUG_BUS_COUNT];
+    uint32_t bus_warning[IMU_CAN_TASK_DEBUG_BUS_COUNT];
+    uint32_t bus_off[IMU_CAN_TASK_DEBUG_BUS_COUNT];
     uint32_t first_valid_node_id;
     uint32_t first_valid_seen_mask;
     int32_t accel_x_mg;

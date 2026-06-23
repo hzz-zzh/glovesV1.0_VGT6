@@ -55,6 +55,18 @@ void RS485_TaskGetEventCounts(uint32_t *rx_event_count, uint32_t *tx_event_count
   }
 }
 
+void RS485_TaskGetStats(Rs485TaskStats_t *stats)
+{
+  if (stats == NULL)
+  {
+    return;
+  }
+
+  stats->rx_event_count = rs485_task_rx_events;
+  stats->tx_event_count = rs485_task_tx_events;
+  stats->full_frame_count = rs485_task_full_frames;
+}
+
 static uint32_t RS485_TaskMsToTicks(uint32_t timeout_ms)
 {
   uint64_t ticks = ((uint64_t)timeout_ms * (uint64_t)osKernelGetTickFreq() + 999ULL) / 1000ULL;

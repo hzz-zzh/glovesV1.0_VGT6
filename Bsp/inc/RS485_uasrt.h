@@ -9,6 +9,7 @@ extern "C" {
 
 #define RS485_RX_BUFFER_SIZE 1024U
 #define RS485_TX_BUFFER_SIZE 1024U
+#define RS485_DEBUG_HEAD_SIZE 8U
 #define RS485_RX_GPIO_LEVEL GPIO_PIN_RESET
 #define RS485_TX_GPIO_LEVEL GPIO_PIN_SET
 
@@ -31,6 +32,10 @@ typedef struct
   uint32_t tx_send_fail;
   uint32_t tx_done;
   uint32_t errors;
+  uint16_t last_rx_size;
+  uint16_t last_tx_size;
+  uint8_t last_rx_head[RS485_DEBUG_HEAD_SIZE];
+  uint8_t last_tx_head[RS485_DEBUG_HEAD_SIZE];
   uint8_t tx_busy;
 } RS485_StatusTypeDef;
 
