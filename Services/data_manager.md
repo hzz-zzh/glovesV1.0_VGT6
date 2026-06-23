@@ -69,7 +69,7 @@ FullFrame   是原始数据 + 算法结果
 手套系统中 IMU 和触觉数据来自不同任务：
 
 - `IMU_CAN_Task` 负责采集 16 路 IMU 数据
-- `Touch_ADC_Task` 负责采集 132 点触觉阵列数据
+- `Touch_ADC_Task` 负责采集 68 点触觉阵列数据
 
 这两个任务的采样时刻、采样耗时和执行周期可能不同，因此不建议让它们直接写同一个 `RawFrame`。
 
@@ -127,7 +127,7 @@ FrameAssemblerTask
 - `sensor_seq`：触觉采集序号
 - `timestamp_us`：触觉数据时间戳
 - `valid_flags`：有效数据标志
-- `touch[132]`：132 点触觉数据
+- `touch[68]`：68 点触觉数据
 
 生产者：
 
@@ -156,7 +156,7 @@ FrameAssemblerTask
 - `valid_flags`：原始数据有效标志
 - `imu[16]`
 - `quat[16]`
-- `touch[132]`
+- `touch[68]`
 
 生产者：
 

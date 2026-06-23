@@ -12,7 +12,7 @@ extern "C" {
  */
 
 #define GLOVE_IMU_COUNT                         (16U)
-#define GLOVE_TOUCH_COUNT                       (132U)
+#define GLOVE_TOUCH_COUNT                       (68U)
 #define GLOVE_JOINT_DOF_COUNT                   (27U)
 
 #define GLOVE_IMU_SENSOR_POOL_SIZE              (6U)

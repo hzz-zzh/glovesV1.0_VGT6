@@ -75,7 +75,7 @@ typedef struct
     GloveQuaternion_t quat[GLOVE_IMU_COUNT];
 } GloveImuSensorData_t;
 
-/*由 Touch_ADC_Task 产生，包含一次 132 点触觉阵列采集结果 */
+/*由 Touch_ADC_Task 产生，包含一次 68 点触觉阵列采集结果 */
 typedef struct
 {
     uint32_t sensor_seq;              /* 触觉采集序号 */

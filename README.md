@@ -124,7 +124,7 @@ uint32_t AppTime_GetMs(void);
 
 ```text
 触发 ADC 或 DMA 采集
-读取 132 点触觉阵列数据
+读取 68 点触觉阵列数据
 填充 GloveTouchSensorData_t
 调用 DataManager_PublishTouchSensor
 ```
