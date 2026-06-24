@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Touch Matrix Viewer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #607080;
+      --line: #d7dee6;
+      --accent: #0b6f8f;
+      --accent-strong: #064d66;
+      --warn: #b54708;
+      --cell-size: minmax(30px, 1fr);
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 6px;
+      padding: 8px 12px;
+      cursor: pointer;
+      min-height: 36px;
+    }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      font-size: 18px;
+      font-weight: 700;
+      margin-right: 10px;
+    }
+
+    .control {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .control input,
+    .control select {
+      width: 92px;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    .control input[type="checkbox"] {
+      width: 18px;
+      min-height: 18px;
+      accent-color: var(--accent);
+    }
+
+    .status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #aab5bf;
+    }
+
+    .dot.on {
+      background: #16803c;
+    }
+
+    .main {
+      display: grid;
+      grid-template-columns: minmax(560px, 1fr) 330px;
+      gap: 16px;
+      padding: 16px;
+      min-height: 0;
+    }
+
+    .matrix-wrap,
+    .side {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      min-height: 0;
+    }
+
+    .matrix-wrap {
+      padding: 14px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 12px;
+    }
+
+    .matrix-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .metric {
+      display: inline-flex;
+      gap: 6px;
+      align-items: baseline;
+      white-space: nowrap;
+    }
+
+    .metric strong {
+      color: var(--ink);
+      font-size: 18px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .matrix-area {
+      display: grid;
+      grid-template-columns: 42px repeat(16, var(--cell-size));
+      grid-template-rows: 28px repeat(16, var(--cell-size));
+      gap: 3px;
+      align-content: center;
+      justify-content: center;
+      min-width: 0;
+    }
+
+    .axis,
+    .cell {
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0;
+    }
+
+    .axis {
+      color: var(--muted);
+      font-size: 11px;
+      background: #eef2f5;
+      border: 1px solid #e2e8ee;
+    }
+
+    .corner {
+      background: transparent;
+      border-color: transparent;
+    }
+
+    .cell {
+      min-width: 30px;
+      min-height: 30px;
+      aspect-ratio: 1 / 1;
+      border: 1px solid rgba(0, 0, 0, 0.1);
+      color: #07151c;
+      font-size: clamp(9px, 0.72vw, 12px);
+      line-height: 1;
+      transition: background-color 80ms linear, color 80ms linear;
+      overflow: hidden;
+    }
+
+    .cell.hot {
+      color: #fff;
+      font-weight: 700;
+    }
+
+    .cell.selected {
+      outline: 3px solid #111827;
+      outline-offset: -2px;
+    }
+
+    .side {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 0;
+      overflow: hidden;
+    }
+
+    .panel {
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel:last-child {
+      border-bottom: 0;
+    }
+
+    .panel-title {
+      margin: 0 0 10px;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      background: #fbfcfd;
+      min-width: 0;
+    }
+
+    .stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
+    .stat strong {
+      font-size: 20px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .selected-readout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .selected-readout strong {
+      color: var(--ink);
+      font-size: 18px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 180px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      color: var(--ink);
+      background: #fff;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .paste-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .log {
+      min-height: 0;
+      overflow: auto;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+
+    .warning {
+      color: var(--warn);
+    }
+
+    @media (max-width: 980px) {
+      .main {
+        grid-template-columns: 1fr;
+      }
+
+      .status {
+        margin-left: 0;
+      }
+
+      .matrix-area {
+        grid-template-columns: 34px repeat(16, minmax(24px, 1fr));
+        grid-template-rows: 24px repeat(16, minmax(24px, 1fr));
+        gap: 2px;
+      }
+
+      .cell {
+        min-width: 24px;
+        min-height: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">Touch Matrix Viewer</div>
+      <button id="connectBtn" class="primary" type="button">连接串口</button>
+      <button id="disconnectBtn" type="button" disabled>断开</button>
+      <label class="control">
+        波特率
+        <input id="baudInput" type="number" min="1200" step="1200" value="115200">
+      </label>
+      <label class="control">
+        色阶
+        <select id="scaleMode">
+          <option value="auto">自动</option>
+          <option value="fixed" selected>固定</option>
+        </select>
+      </label>
+      <label class="control">
+        最小
+        <input id="minInput" type="number" value="50">
+      </label>
+      <label class="control">
+        最大
+        <input id="maxInput" type="number" value="2000">
+      </label>
+      <label class="control">
+        显示数值
+        <input id="showValues" type="checkbox" checked>
+      </label>
+      <div class="status">
+        <span id="statusDot" class="dot"></span>
+        <span id="statusText">未连接</span>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="matrix-wrap">
+        <div class="matrix-head">
+          <div class="metric">帧 <strong id="seqValue">-</strong></div>
+          <div class="metric">范围 <strong id="rangeValue">0..0</strong></div>
+          <div class="metric">更新 <strong id="fpsValue">0.0/s</strong></div>
+        </div>
+        <div id="matrix" class="matrix-area" aria-label="16 by 16 touch matrix"></div>
+      </section>
+
+      <aside class="side">
+        <section class="panel">
+          <h2 class="panel-title">当前点</h2>
+          <div class="selected-readout">
+            <div>行<br><strong id="selectedRow">-</strong></div>
+            <div>列<br><strong id="selectedCol">-</strong></div>
+            <div>数值<br><strong id="selectedValue">-</strong></div>
+            <div>占比<br><strong id="selectedPct">-</strong></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">统计</h2>
+          <div class="stats">
+            <div class="stat"><span>最小值</span><strong id="minValue">0</strong></div>
+            <div class="stat"><span>最大值</span><strong id="maxValue">0</strong></div>
+            <div class="stat"><span>平均值</span><strong id="avgValue">0</strong></div>
+            <div class="stat"><span>峰值位置</span><strong id="peakValue">-</strong></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">日志输入</h2>
+          <textarea id="pasteBox" spellcheck="false"></textarea>
+          <div class="paste-actions">
+            <button id="parsePasteBtn" type="button">解析</button>
+            <button id="demoBtn" type="button">示例</button>
+            <button id="clearBtn" type="button">清空</button>
+          </div>
+          <div id="log" class="log"></div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    const ROWS = 16;
+    const COLS = 16;
+    const matrixEl = document.getElementById("matrix");
+    const connectBtn = document.getElementById("connectBtn");
+    const disconnectBtn = document.getElementById("disconnectBtn");
+    const baudInput = document.getElementById("baudInput");
+    const scaleMode = document.getElementById("scaleMode");
+    const minInput = document.getElementById("minInput");
+    const maxInput = document.getElementById("maxInput");
+    const showValues = document.getElementById("showValues");
+    const statusDot = document.getElementById("statusDot");
+    const statusText = document.getElementById("statusText");
+    const seqValue = document.getElementById("seqValue");
+    const rangeValue = document.getElementById("rangeValue");
+    const fpsValue = document.getElementById("fpsValue");
+    const minValue = document.getElementById("minValue");
+    const maxValue = document.getElementById("maxValue");
+    const avgValue = document.getElementById("avgValue");
+    const peakValue = document.getElementById("peakValue");
+    const selectedRow = document.getElementById("selectedRow");
+    const selectedCol = document.getElementById("selectedCol");
+    const selectedValue = document.getElementById("selectedValue");
+    const selectedPct = document.getElementById("selectedPct");
+    const pasteBox = document.getElementById("pasteBox");
+    const parsePasteBtn = document.getElementById("parsePasteBtn");
+    const demoBtn = document.getElementById("demoBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const logEl = document.getElementById("log");
+
+    const state = {
+      values: Array.from({ length: ROWS }, () => Array(COLS).fill(0)),
+      cells: [],
+      selected: null,
+      seq: null,
+      frames: 0,
+      fpsStart: performance.now(),
+      port: null,
+      reader: null,
+      readAbort: false,
+      buffer: "",
+    };
+
+    function buildGrid() {
+      matrixEl.innerHTML = "";
+      state.cells = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+
+      const corner = document.createElement("div");
+      corner.className = "axis corner";
+      matrixEl.appendChild(corner);
+
+      for (let col = 0; col < COLS; col += 1) {
+        const axis = document.createElement("div");
+        axis.className = "axis";
+        axis.textContent = `C${String(col).padStart(2, "0")}`;
+        matrixEl.appendChild(axis);
+      }
+
+      for (let displayRow = ROWS - 1; displayRow >= 0; displayRow -= 1) {
+        const axis = document.createElement("div");
+        axis.className = "axis";
+        axis.textContent = `R${String(displayRow).padStart(2, "0")}`;
+        matrixEl.appendChild(axis);
+
+        for (let col = 0; col < COLS; col += 1) {
+          const cell = document.createElement("button");
+          cell.className = "cell";
+          cell.type = "button";
+          cell.dataset.row = String(displayRow);
+          cell.dataset.col = String(col);
+          cell.addEventListener("click", () => selectCell(displayRow, col));
+          matrixEl.appendChild(cell);
+          state.cells[displayRow][col] = cell;
+        }
+      }
+    }
+
+    function setStatus(text, connected, warning = false) {
+      statusText.textContent = text;
+      statusText.className = warning ? "warning" : "";
+      statusDot.classList.toggle("on", connected);
+    }
+
+    function log(text, warning = false) {
+      const time = new Date().toLocaleTimeString();
+      const line = `[${time}] ${text}`;
+      logEl.textContent = `${line}\n${logEl.textContent}`.slice(0, 6000);
+      logEl.classList.toggle("warning", warning);
+    }
+
+    function flatten(values) {
+      return values.flat();
+    }
+
+    function getScale(values) {
+      if (scaleMode.value === "fixed") {
+        const fixedMin = Number(minInput.value);
+        const fixedMax = Number(maxInput.value);
+        return fixedMax > fixedMin ? [fixedMin, fixedMax] : [0, 4095];
+      }
+
+      const data = flatten(values);
+      const min = Math.min(...data);
+      const max = Math.max(...data);
+      return max > min ? [min, max] : [min, min + 1];
+    }
+
+    function colorFor(value, min, max) {
+      const t = Math.max(0, Math.min(1, (value - min) / (max - min || 1)));
+      const hue = 205 - (205 * t);
+      const sat = 72 + (18 * t);
+      const light = 92 - (44 * t);
+      return `hsl(${hue} ${sat}% ${light}%)`;
+    }
+
+    function selectCell(row, col) {
+      if (state.selected) {
+        state.cells[state.selected.row][state.selected.col].classList.remove("selected");
+      }
+      state.selected = { row, col };
+      state.cells[row][col].classList.add("selected");
+      updateSelectedReadout();
+    }
+
+    function updateSelectedReadout() {
+      if (!state.selected) {
+        selectedRow.textContent = "-";
+        selectedCol.textContent = "-";
+        selectedValue.textContent = "-";
+        selectedPct.textContent = "-";
+        return;
+      }
+
+      const { row, col } = state.selected;
+      const value = state.values[row][col];
+      const [min, max] = getScale(state.values);
+      const pct = Math.round(Math.max(0, Math.min(1, (value - min) / (max - min || 1))) * 100);
+      selectedRow.textContent = `R${String(row).padStart(2, "0")}`;
+      selectedCol.textContent = `C${String(col).padStart(2, "0")}`;
+      selectedValue.textContent = String(value);
+      selectedPct.textContent = `${pct}%`;
+    }
+
+    function render(values, seq = null) {
+      state.values = values.map(row => row.slice());
+      state.seq = seq;
+
+      const data = flatten(values);
+      const min = Math.min(...data);
+      const max = Math.max(...data);
+      const avg = data.reduce((sum, value) => sum + value, 0) / data.length;
+      let peakRow = 0;
+      let peakCol = 0;
+      let peak = values[0][0];
+
+      for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+          if (values[row][col] > peak) {
+            peak = values[row][col];
+            peakRow = row;
+            peakCol = col;
+          }
+        }
+      }
+
+      const [scaleMin, scaleMax] = getScale(values);
+      for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+          const value = values[row][col];
+          const cell = state.cells[row][col];
+          const t = Math.max(0, Math.min(1, (value - scaleMin) / (scaleMax - scaleMin || 1)));
+          cell.style.backgroundColor = colorFor(value, scaleMin, scaleMax);
+          cell.classList.toggle("hot", t > 0.66);
+          cell.textContent = showValues.checked ? String(value) : "";
+          cell.title = `R${String(row).padStart(2, "0")} C${String(col).padStart(2, "0")} = ${value}`;
+        }
+      }
+
+      seqValue.textContent = seq == null ? "-" : String(seq);
+      rangeValue.textContent = `${min}..${max}`;
+      minValue.textContent = String(min);
+      maxValue.textContent = String(max);
+      avgValue.textContent = avg.toFixed(1);
+      peakValue.textContent = `R${String(peakRow).padStart(2, "0")} C${String(peakCol).padStart(2, "0")}`;
+      updateSelectedReadout();
+
+      state.frames += 1;
+      const now = performance.now();
+      const elapsed = (now - state.fpsStart) / 1000;
+      if (elapsed >= 1) {
+        fpsValue.textContent = `${(state.frames / elapsed).toFixed(1)}/s`;
+        state.frames = 0;
+        state.fpsStart = now;
+      }
+    }
+
+    function parseMatrixBlock(block) {
+      const seqMatch = block.match(/\[TOUCH_MATRIX\]\s+seq=(\d+)/);
+      const seq = seqMatch ? Number(seqMatch[1]) : null;
+      const values = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+      const lines = block.split(/\r?\n/);
+      let count = 0;
+
+      for (const line of lines) {
+        const match = line.match(/^\s*R(\d{1,2})\s*:\s*(.+)$/);
+        if (!match) continue;
+        const row = Number(match[1]);
+        if (row < 0 || row >= ROWS) continue;
+        const nums = match[2].match(/-?\d+/g);
+        if (!nums || nums.length < COLS) continue;
+        for (let col = 0; col < COLS; col += 1) {
+          values[row][col] = Number(nums[col]);
+        }
+        count += 1;
+      }
+
+      return count === ROWS ? { values, seq } : null;
+    }
+
+    function parseLatestMatrix(text) {
+      const header = "[TOUCH_MATRIX]";
+      const start = text.lastIndexOf(header);
+      if (start < 0) return null;
+      return parseMatrixBlock(text.slice(start));
+    }
+
+    function consumeSerialText(text) {
+      state.buffer = `${state.buffer}${text}`;
+      const maxBuffer = 32000;
+      if (state.buffer.length > maxBuffer) {
+        state.buffer = state.buffer.slice(state.buffer.length - maxBuffer);
+      }
+
+      const parsed = parseLatestMatrix(state.buffer);
+      if (parsed) {
+        render(parsed.values, parsed.seq);
+      }
+    }
+
+    async function connectSerial() {
+      if (!("serial" in navigator)) {
+        setStatus("浏览器不支持 Web Serial", false, true);
+        log("请用 Chrome 或 Edge 打开 http://127.0.0.1 页面", true);
+        return;
+      }
+
+      try {
+        state.port = await navigator.serial.requestPort();
+        await state.port.open({ baudRate: Number(baudInput.value) || 115200 });
+        state.readAbort = false;
+        connectBtn.disabled = true;
+        disconnectBtn.disabled = false;
+        setStatus("已连接", true);
+        log("串口已连接");
+        readLoop();
+      } catch (error) {
+        setStatus("连接失败", false, true);
+        log(error.message || String(error), true);
+      }
+    }
+
+    async function readLoop() {
+      const decoder = new TextDecoder();
+      try {
+        while (state.port && state.port.readable && !state.readAbort) {
+          state.reader = state.port.readable.getReader();
+          try {
+            for (;;) {
+              const { value, done } = await state.reader.read();
+              if (done || state.readAbort) break;
+              if (value) consumeSerialText(decoder.decode(value, { stream: true }));
+            }
+          } finally {
+            state.reader.releaseLock();
+            state.reader = null;
+          }
+        }
+      } catch (error) {
+        if (!state.readAbort) {
+          setStatus("读取中断", false, true);
+          log(error.message || String(error), true);
+        }
+      }
+    }
+
+    async function disconnectSerial() {
+      state.readAbort = true;
+      try {
+        if (state.reader) await state.reader.cancel();
+        if (state.port) await state.port.close();
+      } catch (error) {
+        log(error.message || String(error), true);
+      } finally {
+        state.port = null;
+        connectBtn.disabled = false;
+        disconnectBtn.disabled = true;
+        setStatus("未连接", false);
+      }
+    }
+
+    function demoText() {
+      const values = Array.from({ length: ROWS }, (_, row) =>
+        Array.from({ length: COLS }, (_, col) => {
+          const centerA = Math.max(0, 900 - ((row - 11) ** 2 + (col - 8) ** 2) * 90);
+          const centerB = Math.max(0, 700 - ((row - 5) ** 2 + (col - 13) ** 2) * 120);
+          return Math.round(1600 + centerA + centerB + row * 7 + col * 3);
+        })
+      );
+      let text = "[TOUCH_MATRIX] seq=1 rows=R15..R00 cols=C00..C15\n";
+      text += "      C00 C01 C02 C03 C04 C05 C06 C07 C08 C09 C10 C11 C12 C13 C14 C15\n";
+      for (let row = ROWS - 1; row >= 0; row -= 1) {
+        text += `R${String(row).padStart(2, "0")}:`;
+        for (let col = 0; col < COLS; col += 1) {
+          text += ` ${String(values[row][col]).padStart(4, " ")}`;
+        }
+        text += "\n";
+      }
+      return text;
+    }
+
+    connectBtn.addEventListener("click", connectSerial);
+    disconnectBtn.addEventListener("click", disconnectSerial);
+    parsePasteBtn.addEventListener("click", () => {
+      const parsed = parseLatestMatrix(pasteBox.value);
+      if (parsed) {
+        render(parsed.values, parsed.seq);
+        log("已解析粘贴内容");
+      } else {
+        log("没有找到完整 16x16 矩阵", true);
+      }
+    });
+    demoBtn.addEventListener("click", () => {
+      pasteBox.value = demoText();
+      parsePasteBtn.click();
+    });
+    clearBtn.addEventListener("click", () => {
+      pasteBox.value = "";
+      logEl.textContent = "";
+    });
+    scaleMode.addEventListener("change", () => render(state.values, state.seq));
+    minInput.addEventListener("input", () => render(state.values, state.seq));
+    maxInput.addEventListener("input", () => render(state.values, state.seq));
+    showValues.addEventListener("change", () => render(state.values, state.seq));
+
+    buildGrid();
+    selectCell(15, 0);
+    render(state.values);
+  </script>
+</body>
+</html>

@@ -35,10 +35,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define FREERTOS_ENABLE_UART_DEBUG_TASK            (1)
+#define FREERTOS_ENABLE_UART_DEBUG_TASK            (0)
 #define FREERTOS_ENABLE_TEST_TASK                  (0)
 #define FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY        (0)
 #define FREERTOS_ENABLE_SD_LOG_TEST_ONLY           (0)
+#define FREERTOS_BOOT_PRINT_ENABLE                 (0)
 
 /* USER CODE END PD */
 
@@ -142,7 +143,11 @@ const osThreadAttr_t storageTask_attributes = {
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
   GloveStatus_t dm_status = DataManager_Init();
+#if FREERTOS_BOOT_PRINT_ENABLE
   printf("[RTOS] DataManager_Init status=%u\r\n", (unsigned int)dm_status);
+#else
+  (void)dm_status;
+#endif
 
   /* USER CODE END Init */
 
@@ -206,6 +211,7 @@ void MX_FREERTOS_Init(void) {
 #endif
 
   /* USER CODE BEGIN RTOS_THREADS */
+#if FREERTOS_BOOT_PRINT_ENABLE
   printf("[RTOS] handles default=0x%08lX test=0x%08lX frame=0x%08lX sys=0x%08lX time=0x%08lX imu=0x%08lX touch=0x%08lX data=0x%08lX rs485=0x%08lX storage=0x%08lX\r\n",
          (unsigned long)(uintptr_t)defaultTaskHandle,
          (unsigned long)(uintptr_t)testTaskHandle,
@@ -217,6 +223,7 @@ void MX_FREERTOS_Init(void) {
          (unsigned long)(uintptr_t)dataProcessTaskHandle,
          (unsigned long)(uintptr_t)rs485TaskHandle,
          (unsigned long)(uintptr_t)storageTaskHandle);
+#endif
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 

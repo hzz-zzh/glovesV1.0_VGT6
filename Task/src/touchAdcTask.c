@@ -18,12 +18,20 @@
 #define TOUCH_ADC_DEBUG_TRACE_FIRST_FRAME (0U)
 #define TOUCH_ADC_MUX_HOLD_TEST_ENABLE (0U)
 #define TOUCH_ADC_MUX_HOLD_COL         (14U)
+#define TOUCH_ADC_RAW_MATRIX_DEBUG_ENABLE       (1U)
+#define TOUCH_ADC_RAW_MATRIX_DEBUG_PRINT_PERIOD (20U)
+#define TOUCH_ADC_COLUMN_ADDR_REVERSE           (1U)
+#define TOUCH_ADC_COLUMN_BANK_SWAP              (0U)
+#define TOUCH_ADC_COLUMN_DIAG_PRINT_ENABLE      (1U)
+#define TOUCH_ADC_EXTERNAL_INJECT_TEST_ENABLE   (0U)
+#define TOUCH_ADC_EXTERNAL_INJECT_DISPLAY_COLUMN (7U)
 #define TOUCH_ADC_SYNC_WAIT_TIMEOUT_MS  (osWaitForever)
 #define TOUCH_ADC_QUEUE_TIMEOUT_MS      (0U)
 #define TOUCH_ADC_DMA_TIMEOUT_MS        (5U)
 #define TOUCH_ADC_DMA_DONE_FLAG         (1UL << 0)
 #define TOUCH_ADC_DMA_ERROR_FLAG        (1UL << 1)
 #define TOUCH_ADC_CHANNEL_COUNT         (8U)
+#define TOUCH_ADC_ROW_COUNT             (16U)
 #define TOUCH_ADC_COLUMN_COUNT          (16U)
 #define TOUCH_ADC_SCAN_FIRST_COLUMN     (7U)
 #define TOUCH_ADC_SCAN_LAST_COLUMN      (14U)
@@ -41,12 +49,48 @@
 #define TOUCH_ADC_FINGER_COUNT          (5U)
 #define TOUCH_ADC_FINGER_BASE_COUNT     (TOUCH_ADC_FINGER_COUNT * TOUCH_ADC_POINTS_PER_FINGER)
 #define TOUCH_ADC_INVALID_INDEX         (0xFFFFU)
-#define TOUCH_ADC_MUX_SETTLE_NOP_COUNT  (64U)
+#define TOUCH_ADC_MUX_SETTLE_US         (80U)
+#define TOUCH_ADC_DELAY_LOOP_CYCLES_PER_ITERATION (4U)
 
 #if GLOVE_TOUCH_COUNT != (TOUCH_ADC_FINGER_BASE_COUNT + \
     ((TOUCH_ADC_PALM_LAST_COLUMN - TOUCH_ADC_PALM_FIRST_COLUMN + 1U) * TOUCH_ADC_PALM_ROWS))
 #error "GLOVE_TOUCH_COUNT must match the 68-point touch layout"
 #endif
+
+typedef struct
+{
+  uint8_t row;
+  uint8_t col;
+  const char *label;
+} TouchAdcPointMap_t;
+
+/* index -> Row/Col/label follows the 68-point touch layout drawing. */
+static const TouchAdcPointMap_t s_touch_point_map[] =
+{
+  {14U, 7U, "A0"}, {13U, 7U, "A1"}, {14U, 8U, "A2"}, {13U, 8U, "A3"},
+  {12U, 7U, "B0"}, {11U, 7U, "B1"}, {12U, 8U, "B2"}, {11U, 8U, "B3"},
+  {10U, 7U, "C0"}, { 9U, 7U, "C1"}, {10U, 8U, "C2"}, { 9U, 8U, "C3"},
+  { 8U, 7U, "D0"}, { 7U, 7U, "D1"}, { 8U, 8U, "D2"}, { 7U, 8U, "D3"},
+  { 6U, 7U, "E0"}, { 5U, 7U, "E1"}, { 6U, 8U, "E2"}, { 5U, 8U, "E3"},
+  {12U, 9U, "F0"}, {11U, 9U, "F1"}, {10U, 9U, "F2"}, { 9U, 9U, "F3"},
+  { 8U, 9U, "F4"}, { 7U, 9U, "F5"}, { 6U, 9U, "F6"}, { 5U, 9U, "F7"},
+  {12U, 10U, "F8"}, {11U, 10U, "F9"}, {10U, 10U, "F10"}, { 9U, 10U, "F11"},
+  { 8U, 10U, "F12"}, { 7U, 10U, "F13"}, { 6U, 10U, "F14"}, { 5U, 10U, "F15"},
+  {12U, 11U, "F16"}, {11U, 11U, "F17"}, {10U, 11U, "F18"}, { 9U, 11U, "F19"},
+  { 8U, 11U, "F20"}, { 7U, 11U, "F21"}, { 6U, 11U, "F22"}, { 5U, 11U, "F23"},
+  {12U, 12U, "F24"}, {11U, 12U, "F25"}, {10U, 12U, "F26"}, { 9U, 12U, "F27"},
+  { 8U, 12U, "F28"}, { 7U, 12U, "F29"}, { 6U, 12U, "F30"}, { 5U, 12U, "F31"},
+  {12U, 13U, "F32"}, {11U, 13U, "F33"}, {10U, 13U, "F34"}, { 9U, 13U, "F35"},
+  { 8U, 13U, "F36"}, { 7U, 13U, "F37"}, { 6U, 13U, "F38"}, { 5U, 13U, "F39"},
+  {12U, 14U, "F40"}, {11U, 14U, "F41"}, {10U, 14U, "F42"}, { 9U, 14U, "F43"},
+  { 8U, 14U, "F44"}, { 7U, 14U, "F45"}, { 6U, 14U, "F46"}, { 5U, 14U, "F47"}
+};
+
+#define TOUCH_ADC_POINT_MAP_COUNT \
+  ((uint32_t)(sizeof(s_touch_point_map) / sizeof(s_touch_point_map[0])))
+
+typedef char TouchAdcPointMapSizeCheck_t[
+  (TOUCH_ADC_POINT_MAP_COUNT == GLOVE_TOUCH_COUNT) ? 1 : -1];
 
 /* ROW_SEL0 high selects the first row in each analog switch pair. */
 static const uint8_t s_touch_rows_sel_high[TOUCH_ADC_CHANNEL_COUNT] =
@@ -65,6 +109,81 @@ static osThreadId_t s_touch_adc_task_id = NULL;
 static uint8_t s_touch_adc_trace_frame = 0U;
 static uint8_t s_touch_adc_trace_dma_once = 0U;
 static uint8_t s_touch_adc_debug_print_once = 1U;
+#if (TOUCH_ADC_RAW_MATRIX_DEBUG_ENABLE != 0U)
+static uint8_t s_touch_adc_raw_matrix_print_once = 1U;
+static uint16_t s_touch_adc_raw_matrix[TOUCH_ADC_ROW_COUNT][TOUCH_ADC_COLUMN_COUNT];
+#endif
+
+static uint8_t s_touch_adc_cycle_counter_ready = 0U;
+
+static void TouchAdcTask_InitCycleCounter(void)
+{
+  uint32_t start_cycles;
+  uint32_t end_cycles;
+
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0U;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+  start_cycles = DWT->CYCCNT;
+  __NOP();
+  __NOP();
+  __NOP();
+  end_cycles = DWT->CYCCNT;
+  s_touch_adc_cycle_counter_ready =
+      (((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U) &&
+       (end_cycles != start_cycles)) ? 1U : 0U;
+}
+
+static void TouchAdcTask_DelayLoopCycles(uint32_t cycles)
+{
+  volatile uint32_t count;
+
+  count = (cycles + TOUCH_ADC_DELAY_LOOP_CYCLES_PER_ITERATION - 1U) /
+          TOUCH_ADC_DELAY_LOOP_CYCLES_PER_ITERATION;
+  while (count > 0U)
+  {
+    __NOP();
+    count--;
+  }
+}
+
+static void TouchAdcTask_DelayUs(uint32_t delay_us)
+{
+  uint64_t target_cycles_64;
+  uint32_t cycles_per_us;
+  uint32_t target_cycles;
+  uint32_t start_cycles;
+
+  if (delay_us == 0U)
+  {
+    return;
+  }
+
+  cycles_per_us = SystemCoreClock / 1000000U;
+  if (cycles_per_us == 0U)
+  {
+    cycles_per_us = 1U;
+  }
+
+  target_cycles_64 = (uint64_t)delay_us * (uint64_t)cycles_per_us;
+  target_cycles = (target_cycles_64 > 0xFFFFFFFFULL) ?
+                  0xFFFFFFFFUL :
+                  (uint32_t)target_cycles_64;
+  if ((s_touch_adc_cycle_counter_ready != 0U) &&
+      ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U))
+  {
+    start_cycles = DWT->CYCCNT;
+    while ((uint32_t)(DWT->CYCCNT - start_cycles) < target_cycles)
+    {
+      __NOP();
+    }
+  }
+  else
+  {
+    TouchAdcTask_DelayLoopCycles(target_cycles);
+  }
+}
 
 static uint32_t TouchAdcTask_MsToTicks(uint32_t timeout_ms)
 {
@@ -295,12 +414,7 @@ static void TouchAdcTask_PrintPublishError(uint32_t seq,
 
 static void TouchAdcTask_MuxSettle(void)
 {
-  volatile uint32_t delay;
-
-  for (delay = 0U; delay < TOUCH_ADC_MUX_SETTLE_NOP_COUNT; delay++)
-  {
-    __NOP();
-  }
+  TouchAdcTask_DelayUs(TOUCH_ADC_MUX_SETTLE_US);
 }
 
 static void TouchAdcTask_DisableColumns(void)
@@ -309,10 +423,31 @@ static void TouchAdcTask_DisableColumns(void)
   HAL_GPIO_WritePin(TOUCH_COL_SEL4_GPIO_Port, TOUCH_COL_SEL4_Pin, GPIO_PIN_RESET);
 }
 
+static uint8_t TouchAdcTask_GetColumnAddress(uint8_t col)
+{
+#if (TOUCH_ADC_COLUMN_ADDR_REVERSE != 0U)
+  return (uint8_t)(7U - (col & 0x07U));
+#else
+  return (uint8_t)(col & 0x07U);
+#endif
+}
+
+static uint8_t TouchAdcTask_UseHighColumnBank(uint8_t col)
+{
+  uint8_t use_high_bank = (col >= 8U) ? 1U : 0U;
+
+#if (TOUCH_ADC_COLUMN_BANK_SWAP != 0U)
+  use_high_bank = (use_high_bank == 0U) ? 1U : 0U;
+#endif
+
+  return use_high_bank;
+}
+
 static void TouchAdcTask_SelectColumn(uint8_t col)
 {
   /* The 74AC238 outputs are wired Y7..Y0 to SENSOR_COL base..base+7. */
-  uint8_t decoded_addr = (uint8_t)(7U - (col & 0x07U));
+  uint8_t decoded_addr = TouchAdcTask_GetColumnAddress(col);
+  uint8_t use_high_bank = TouchAdcTask_UseHighColumnBank(col);
 
   TouchAdcTask_DisableColumns();
 
@@ -326,7 +461,7 @@ static void TouchAdcTask_SelectColumn(uint8_t col)
                     TOUCH_COL_SEL2_Pin,
                     ((decoded_addr & 0x04U) != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 
-  if (col < 8U)
+  if (use_high_bank == 0U)
   {
     HAL_GPIO_WritePin(TOUCH_COL_SEL4_GPIO_Port, TOUCH_COL_SEL4_Pin, GPIO_PIN_SET);
   }
@@ -369,14 +504,16 @@ static void TouchAdcTask_ForceMuxGpioOutput(void)
 
 static void TouchAdcTask_PrintMuxHoldReadback(uint8_t col, uint8_t decoded_addr)
 {
+  uint8_t use_high_bank = TouchAdcTask_UseHighColumnBank(col);
+
   printf("[TOUCH_MUX_TEST] hold_col=%u addr=%u exp=%u%u%u%u%u read=%u%u%u%u%u row=%u\r\n",
          (unsigned int)col,
          (unsigned int)decoded_addr,
          (unsigned int)((decoded_addr & 0x01U) != 0U),
          (unsigned int)((decoded_addr & 0x02U) != 0U),
          (unsigned int)((decoded_addr & 0x04U) != 0U),
-         (unsigned int)(col >= 8U),
-         (unsigned int)(col < 8U),
+         (unsigned int)(use_high_bank != 0U),
+         (unsigned int)(use_high_bank == 0U),
          (unsigned int)(HAL_GPIO_ReadPin(TOUCH_COL_SEL0_GPIO_Port, TOUCH_COL_SEL0_Pin) == GPIO_PIN_SET),
          (unsigned int)(HAL_GPIO_ReadPin(TOUCH_COL_SEL1_GPIO_Port, TOUCH_COL_SEL1_Pin) == GPIO_PIN_SET),
          (unsigned int)(HAL_GPIO_ReadPin(TOUCH_COL_SEL2_GPIO_Port, TOUCH_COL_SEL2_Pin) == GPIO_PIN_SET),
@@ -388,7 +525,7 @@ static void TouchAdcTask_PrintMuxHoldReadback(uint8_t col, uint8_t decoded_addr)
 static void TouchAdcTask_RunMuxHoldTest(void)
 {
   uint8_t col = (uint8_t)(TOUCH_ADC_MUX_HOLD_COL % TOUCH_ADC_COLUMN_COUNT);
-  uint8_t decoded_addr = (uint8_t)(7U - (col & 0x07U));
+  uint8_t decoded_addr = TouchAdcTask_GetColumnAddress(col);
 
   TouchAdcTask_ForceMuxGpioOutput();
   TouchAdcTask_SelectColumn(col);
@@ -407,36 +544,117 @@ static void TouchAdcTask_RunMuxHoldTest(void)
 /* touch[] follows layout labels: A0..E3, then F0..F47. */
 static uint16_t TouchAdcTask_MapTouchIndex(uint8_t row, uint8_t col)
 {
-  uint8_t row_from_top;
-  uint8_t finger_index;
-  uint8_t point_in_finger;
-  uint16_t palm_index;
+  uint16_t index;
 
-  if ((col >= TOUCH_ADC_FINGER_FIRST_COLUMN) &&
-      (col <= TOUCH_ADC_FINGER_LAST_COLUMN) &&
-      (row >= TOUCH_ADC_FINGER_FIRST_ROW) &&
-      (row <= TOUCH_ADC_FINGER_LAST_ROW))
+  for (index = 0U; index < TOUCH_ADC_POINT_MAP_COUNT; index++)
   {
-    row_from_top = (uint8_t)(TOUCH_ADC_FINGER_LAST_ROW - row);
-    finger_index = (uint8_t)(row_from_top / TOUCH_ADC_ROWS_PER_FINGER);
-    point_in_finger = (uint8_t)(((col - TOUCH_ADC_FINGER_FIRST_COLUMN) * TOUCH_ADC_ROWS_PER_FINGER) +
-                                (row_from_top % TOUCH_ADC_ROWS_PER_FINGER));
-    return (uint16_t)((finger_index * TOUCH_ADC_POINTS_PER_FINGER) + point_in_finger);
-  }
-
-  if ((col >= TOUCH_ADC_PALM_FIRST_COLUMN) &&
-      (col <= TOUCH_ADC_PALM_LAST_COLUMN) &&
-      (row >= TOUCH_ADC_PALM_FIRST_ROW) &&
-      (row <= TOUCH_ADC_PALM_LAST_ROW))
-  {
-    palm_index = (uint16_t)(((uint16_t)(col - TOUCH_ADC_PALM_FIRST_COLUMN) *
-                             TOUCH_ADC_PALM_ROWS) +
-                            (uint16_t)(TOUCH_ADC_PALM_LAST_ROW - row));
-    return (uint16_t)(TOUCH_ADC_FINGER_BASE_COUNT + palm_index);
+    if ((s_touch_point_map[index].row == row) &&
+        (s_touch_point_map[index].col == col))
+    {
+      return index;
+    }
   }
 
   return TOUCH_ADC_INVALID_INDEX;
 }
+
+static uint8_t TouchAdcTask_GetExternalInjectDisplayColumn(void)
+{
+  return (uint8_t)(TOUCH_ADC_EXTERNAL_INJECT_DISPLAY_COLUMN % TOUCH_ADC_COLUMN_COUNT);
+}
+
+#if (TOUCH_ADC_RAW_MATRIX_DEBUG_ENABLE != 0U)
+static uint8_t TouchAdcTask_ShouldPrintRawMatrix(uint32_t seq)
+{
+  if (s_touch_adc_raw_matrix_print_once != 0U)
+  {
+    s_touch_adc_raw_matrix_print_once = 0U;
+    return 1U;
+  }
+
+#if (TOUCH_ADC_RAW_MATRIX_DEBUG_PRINT_PERIOD == 0U)
+  (void)seq;
+  return 1U;
+#else
+  return ((seq == 0U) ||
+          ((seq % TOUCH_ADC_RAW_MATRIX_DEBUG_PRINT_PERIOD) == 0U)) ? 1U : 0U;
+#endif
+}
+
+static void TouchAdcTask_PrintExternalInjectInfo(uint32_t seq)
+{
+#if (TOUCH_ADC_EXTERNAL_INJECT_TEST_ENABLE != 0U)
+  printf("[TOUCH_INJECT] seq=%lu column_scan=off column_outputs=disabled display_col=C%02u\r\n",
+         (unsigned long)seq,
+         (unsigned int)TouchAdcTask_GetExternalInjectDisplayColumn());
+#else
+  (void)seq;
+#endif
+}
+
+static void TouchAdcTask_ClearRawMatrix(void)
+{
+  uint32_t row;
+  uint32_t col;
+
+  for (row = 0U; row < TOUCH_ADC_ROW_COUNT; row++)
+  {
+    for (col = 0U; col < TOUCH_ADC_COLUMN_COUNT; col++)
+    {
+      s_touch_adc_raw_matrix[row][col] = 0U;
+    }
+  }
+}
+
+static void TouchAdcTask_RecordRawMatrixSample(uint8_t row,
+                                               uint8_t col,
+                                               uint16_t adc_value)
+{
+  if ((row < TOUCH_ADC_ROW_COUNT) && (col < TOUCH_ADC_COLUMN_COUNT))
+  {
+    s_touch_adc_raw_matrix[row][col] = adc_value;
+  }
+}
+
+static void TouchAdcTask_PrintRawMatrix(uint32_t seq)
+{
+  uint32_t col;
+  int32_t row;
+
+  printf("\r\n[TOUCH_MATRIX] seq=%lu rows=R15..R00 cols=C00..C15\r\n",
+         (unsigned long)seq);
+#if ((TOUCH_ADC_COLUMN_DIAG_PRINT_ENABLE != 0U) && \
+     (TOUCH_ADC_EXTERNAL_INJECT_TEST_ENABLE == 0U))
+  printf("[TOUCH_COL_DIAG] addr_reverse=%u bank_swap=%u cols:",
+         (unsigned int)(TOUCH_ADC_COLUMN_ADDR_REVERSE != 0U),
+         (unsigned int)(TOUCH_ADC_COLUMN_BANK_SWAP != 0U));
+  for (col = 0U; col < TOUCH_ADC_COLUMN_COUNT; col++)
+  {
+    printf(" C%02lu=A%u/%s",
+           (unsigned long)col,
+           (unsigned int)TouchAdcTask_GetColumnAddress((uint8_t)col),
+           (TouchAdcTask_UseHighColumnBank((uint8_t)col) != 0U) ? "SEL3" : "SEL4");
+  }
+  printf("\r\n");
+#endif
+  printf("     ");
+  for (col = 0U; col < TOUCH_ADC_COLUMN_COUNT; col++)
+  {
+    printf(" C%02lu", (unsigned long)col);
+  }
+  printf("\r\n");
+
+  for (row = (int32_t)TOUCH_ADC_ROW_COUNT - 1; row >= 0; row--)
+  {
+    printf("R%02ld:", (long)row);
+    for (col = 0U; col < TOUCH_ADC_COLUMN_COUNT; col++)
+    {
+      printf(" %4u", (unsigned int)s_touch_adc_raw_matrix[row][col]);
+    }
+    printf("\r\n");
+  }
+}
+#endif
 
 static void TouchAdcTask_StoreSample(GloveTouchSensorBlock_t *block,
                                      uint8_t row,
@@ -536,11 +754,16 @@ static GloveStatus_t TouchAdcTask_ReadAdcDma(const uint16_t **samples)
 static GloveStatus_t TouchAdcTask_CaptureRowGroup(GloveTouchSensorBlock_t *block,
                                                   uint8_t col,
                                                   GPIO_PinState row_sel,
-                                                  const uint8_t *rows)
+                                                  const uint8_t *rows,
+                                                  uint8_t raw_matrix_debug)
 {
   const uint16_t *samples;
   GloveStatus_t status;
   uint32_t lane;
+
+#if (TOUCH_ADC_RAW_MATRIX_DEBUG_ENABLE == 0U)
+  (void)raw_matrix_debug;
+#endif
 
   if ((block == NULL) || (rows == NULL))
   {
@@ -559,6 +782,12 @@ static GloveStatus_t TouchAdcTask_CaptureRowGroup(GloveTouchSensorBlock_t *block
 
   for (lane = 0U; lane < TOUCH_ADC_CHANNEL_COUNT; lane++)
   {
+#if (TOUCH_ADC_RAW_MATRIX_DEBUG_ENABLE != 0U)
+    if (raw_matrix_debug != 0U)
+    {
+      TouchAdcTask_RecordRawMatrixSample(rows[lane], col, samples[lane]);
+    }
+#endif
     TouchAdcTask_StoreSample(block, rows[lane], col, samples[lane]);
   }
 
@@ -571,6 +800,9 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
   uint32_t index;
   uint32_t seq;
   uint8_t col;
+  uint8_t scan_first_col = TOUCH_ADC_SCAN_FIRST_COLUMN;
+  uint8_t scan_last_col = TOUCH_ADC_SCAN_LAST_COLUMN;
+  uint8_t raw_matrix_debug = 0U;
   GloveStatus_t status;
 
   if ((block == NULL) || (sync == NULL) || (sync->valid == 0U))
@@ -597,7 +829,57 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
   }
   TouchAdcTask_Trace("frame_clear_done", seq, 0U);
 
-  for (col = TOUCH_ADC_SCAN_FIRST_COLUMN; col <= TOUCH_ADC_SCAN_LAST_COLUMN; col++)
+#if (TOUCH_ADC_RAW_MATRIX_DEBUG_ENABLE != 0U)
+  raw_matrix_debug = TouchAdcTask_ShouldPrintRawMatrix(seq);
+  if (raw_matrix_debug != 0U)
+  {
+    scan_first_col = 0U;
+    scan_last_col = (uint8_t)(TOUCH_ADC_COLUMN_COUNT - 1U);
+    TouchAdcTask_ClearRawMatrix();
+  }
+#endif
+
+#if (TOUCH_ADC_EXTERNAL_INJECT_TEST_ENABLE != 0U)
+  (void)scan_first_col;
+  (void)scan_last_col;
+
+  col = TouchAdcTask_GetExternalInjectDisplayColumn();
+  TouchAdcTask_DisableColumns();
+  TouchAdcTask_MuxSettle();
+#if (TOUCH_ADC_RAW_MATRIX_DEBUG_ENABLE != 0U)
+  if (raw_matrix_debug != 0U)
+  {
+    TouchAdcTask_PrintExternalInjectInfo(seq);
+  }
+#endif
+
+  TouchAdcTask_Trace("external_inject_row_high_begin", col, 0U);
+  status = TouchAdcTask_CaptureRowGroup(block,
+                                        col,
+                                        GPIO_PIN_SET,
+                                        s_touch_rows_sel_high,
+                                        raw_matrix_debug);
+  TouchAdcTask_Trace("external_inject_row_high_done", col, (uint32_t)status);
+  if (status != GLOVE_STATUS_OK)
+  {
+    TouchAdcTask_DisableColumns();
+    return status;
+  }
+
+  TouchAdcTask_Trace("external_inject_row_low_begin", col, 0U);
+  status = TouchAdcTask_CaptureRowGroup(block,
+                                        col,
+                                        GPIO_PIN_RESET,
+                                        s_touch_rows_sel_low,
+                                        raw_matrix_debug);
+  TouchAdcTask_Trace("external_inject_row_low_done", col, (uint32_t)status);
+  if (status != GLOVE_STATUS_OK)
+  {
+    TouchAdcTask_DisableColumns();
+    return status;
+  }
+#else
+  for (col = scan_first_col; col <= scan_last_col; col++)
   {
     TouchAdcTask_Trace("col_begin", col, 0U);
     TouchAdcTask_SelectColumn(col);
@@ -607,7 +889,8 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
     status = TouchAdcTask_CaptureRowGroup(block,
                                           col,
                                           GPIO_PIN_SET,
-                                          s_touch_rows_sel_high);
+                                          s_touch_rows_sel_high,
+                                          raw_matrix_debug);
     TouchAdcTask_Trace("row_high_done", col, (uint32_t)status);
     if (status != GLOVE_STATUS_OK)
     {
@@ -619,7 +902,8 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
     status = TouchAdcTask_CaptureRowGroup(block,
                                           col,
                                           GPIO_PIN_RESET,
-                                          s_touch_rows_sel_low);
+                                          s_touch_rows_sel_low,
+                                          raw_matrix_debug);
     TouchAdcTask_Trace("row_low_done", col, (uint32_t)status);
     if (status != GLOVE_STATUS_OK)
     {
@@ -627,8 +911,15 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
       return status;
     }
   }
+#endif
 
   TouchAdcTask_DisableColumns();
+#if (TOUCH_ADC_RAW_MATRIX_DEBUG_ENABLE != 0U)
+  if (raw_matrix_debug != 0U)
+  {
+    TouchAdcTask_PrintRawMatrix(seq);
+  }
+#endif
   block->data.valid_flags = GLOVE_FRAME_FLAG_TOUCH_VALID;
   TouchAdcTask_Trace("frame_done", seq, 0U);
   s_touch_adc_trace_frame = 0U;
@@ -648,6 +939,7 @@ void TouchAdcTask(void *argument)
   (void)argument;
 
   s_touch_adc_task_id = osThreadGetId();
+  TouchAdcTask_InitCycleCounter();
   AcqSync_RegisterTouchTask(s_touch_adc_task_id);
   TouchAdcTask_PrintStartup();
 #if (TOUCH_ADC_MUX_HOLD_TEST_ENABLE != 0U)

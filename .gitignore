@@ -24,6 +24,12 @@ parsed_log/
 
 #工具目录
 tools/
+!tools/
+tools/*
+!tools/touch_matrix_viewer/
+!tools/touch_matrix_viewer/**
+tools/touch_matrix_viewer/*.log
+!tools/run_touch_matrix_viewer.bat
 
 # 多工程工作区文件
 *.uvmpw
