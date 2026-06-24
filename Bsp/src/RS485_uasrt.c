@@ -233,6 +233,10 @@ void RS485_ProcessRxFrame(void)
     {
       rs485_tx_from_echo_task++;
       rs485_modbus_response_ready++;
+
+      //与头部主机通讯时，延时1ms，才能和Linux主机通讯
+      HAL_Delay(1U);
+		
       if (RS485_Send(rs485_response_buffer, tx_size) != HAL_OK)
       {
         rs485_tx_send_fail++;

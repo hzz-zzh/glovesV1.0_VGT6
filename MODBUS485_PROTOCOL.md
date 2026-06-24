@@ -4,11 +4,11 @@
 
 ## 1. 通讯基础
 
-- 物理层：RS485，UART1
+- 物理层：RS485
 - 协议：Modbus RTU
 - 从站地址：默认 `0x01`
 - 串口格式：`8N1`
-- 当前源码波特率：`2000000`，最终以烧录固件配置为准
+- 当前源码波特率：`3000000`
 - 支持功能码：
   - `0x03`：Read Holding Registers
   - `0x10`：Write Multiple Registers
