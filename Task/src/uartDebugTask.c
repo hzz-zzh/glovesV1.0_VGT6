@@ -15,6 +15,25 @@
 #define UART_DEBUG_PRINT_PERIOD_MS    (1000U)
 #define UART_DEBUG_PRINT_IMU_DUMP     (0U)
 
+static uint32_t UartDebugTask_RateHzX10(uint32_t delta_count,
+                                        uint32_t elapsed_ticks)
+{
+    uint32_t tick_freq = osKernelGetTickFreq();
+
+    if ((elapsed_ticks == 0U) || (tick_freq == 0U))
+    {
+        return 0U;
+    }
+
+    return (uint32_t)(((uint64_t)delta_count * (uint64_t)tick_freq * 10ULL) /
+                      (uint64_t)elapsed_ticks);
+}
+
+static void UartDebugTask_PrintHz10(uint32_t hz_x10)
+{
+    printf("%lu.%lu", (unsigned long)(hz_x10 / 10U), (unsigned long)(hz_x10 % 10U));
+}
+
 #if (UART_DEBUG_PRINT_IMU_DUMP != 0U)
 static void UartDebugTask_PrintImuNode(uint32_t node_id)
 {
@@ -79,39 +98,85 @@ static void UartDebugTask_PrintImuDump(void)
 }
 #endif
 
-static void UartDebugTask_PrintChainStatus(uint32_t tick_count)
+static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
 {
     DataManagerStats_t dm_stats;
     FrameAssemblerStats_t frame_stats;
     DataProcessStats_t process_stats;
     ImuCanTaskDebugSnapshot_t imu_stats;
-    RS485_StatusTypeDef rs485_status;
-    Rs485TaskStats_t rs485_task_stats;
+    static uint8_t initialized = 0U;
+    static uint32_t last_tick = 0U;
+    static uint32_t last_imu_pub = 0U;
+    static uint32_t last_touch_pub = 0U;
+    static uint32_t last_raw_pub = 0U;
+    static uint32_t last_full_pub = 0U;
+    static uint32_t last_processed = 0U;
+    static uint32_t last_imu_rx = 0U;
+    uint32_t now_tick;
+    uint32_t elapsed_ticks;
+    uint32_t imu_delta;
+    uint32_t touch_delta;
+    uint32_t raw_delta;
+    uint32_t full_delta;
+    uint32_t processed_delta;
+    uint32_t imu_rx_delta;
 
     DataManager_GetStats(&dm_stats);
     FrameAssemblerTask_GetStats(&frame_stats);
     DataProcessTask_GetStats(&process_stats);
     ImuCanTask_GetDebugSnapshot(&imu_stats);
-    RS485_GetStatus(&rs485_status);
-    RS485_TaskGetStats(&rs485_task_stats);
 
-    printf("[CHAIN] tick=%lu imu_pub=%lu touch_pub=%lu raw_pub=%lu full_pub=%lu processed=%lu raw_recv=%lu alg_fail=%lu drops(i=%lu,t=%lu,r=%lu,f=%lu) alloc_fail=%lu queue_fail=%lu last_status(frame=%u,proc=%u)\r\n",
-           (unsigned long)tick_count,
+    now_tick = osKernelGetTickCount();
+    if (initialized == 0U)
+    {
+        initialized = 1U;
+        last_tick = now_tick;
+        last_imu_pub = dm_stats.data.imu_sensor_published;
+        last_touch_pub = dm_stats.data.touch_sensor_published;
+        last_raw_pub = dm_stats.data.raw_frames_published;
+        last_full_pub = dm_stats.data.full_frames_published;
+        last_processed = process_stats.processed_frames;
+        last_imu_rx = imu_stats.rx_frame_count;
+        return;
+    }
+
+    elapsed_ticks = now_tick - last_tick;
+    imu_delta = dm_stats.data.imu_sensor_published - last_imu_pub;
+    touch_delta = dm_stats.data.touch_sensor_published - last_touch_pub;
+    raw_delta = dm_stats.data.raw_frames_published - last_raw_pub;
+    full_delta = dm_stats.data.full_frames_published - last_full_pub;
+    processed_delta = process_stats.processed_frames - last_processed;
+    imu_rx_delta = imu_stats.rx_frame_count - last_imu_rx;
+
+    printf("[RATE] sample=%lu imu_pub=%lu hz=",
+           (unsigned long)sample_count,
+           (unsigned long)imu_delta);
+    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(imu_delta, elapsed_ticks));
+    printf(" touch_pub=%lu hz=", (unsigned long)touch_delta);
+    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(touch_delta, elapsed_ticks));
+    printf(" raw_pub=%lu hz=", (unsigned long)raw_delta);
+    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(raw_delta, elapsed_ticks));
+    printf(" full_pub=%lu hz=", (unsigned long)full_delta);
+    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(full_delta, elapsed_ticks));
+    printf(" processed=%lu hz=", (unsigned long)processed_delta);
+    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(processed_delta, elapsed_ticks));
+    printf(" imu_rx=%lu hz=", (unsigned long)imu_rx_delta);
+    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(imu_rx_delta, elapsed_ticks));
+    printf("\r\n");
+
+    printf("[COUNT] imu=%lu touch=%lu raw=%lu full=%lu processed=%lu raw_recv=%lu drops(i=%lu,t=%lu,r=%lu,f=%lu) alloc_fail=%lu queue_fail=%lu\r\n",
            (unsigned long)dm_stats.data.imu_sensor_published,
            (unsigned long)dm_stats.data.touch_sensor_published,
            (unsigned long)dm_stats.data.raw_frames_published,
            (unsigned long)dm_stats.data.full_frames_published,
            (unsigned long)process_stats.processed_frames,
            (unsigned long)process_stats.raw_frames_received,
-           (unsigned long)process_stats.joint_solve_failures,
            (unsigned long)dm_stats.data.imu_sensor_dropped,
            (unsigned long)dm_stats.data.touch_sensor_dropped,
            (unsigned long)dm_stats.data.raw_frames_dropped,
            (unsigned long)dm_stats.data.full_frames_dropped,
            (unsigned long)dm_stats.data.pool_alloc_failures,
-           (unsigned long)dm_stats.data.queue_send_failures,
-           (unsigned int)frame_stats.last_status,
-           (unsigned int)process_stats.last_status);
+           (unsigned long)dm_stats.data.queue_send_failures);
 
     printf("[FRAME] assembled=%lu imu_wait=%lu touch_wait=%lu imu_stale=%lu touch_stale=%lu mismatch=%lu raw_alloc_fail=%lu raw_pub_fail=%lu dt_us=%lu last_id=%lu\r\n",
            (unsigned long)frame_stats.assembled_frames,
@@ -125,7 +190,7 @@ static void UartDebugTask_PrintChainStatus(uint32_t tick_count)
            (unsigned long)frame_stats.last_time_diff_us,
            (unsigned long)frame_stats.last_frame_id);
 
-    printf("[IMU_CAN] irq=%lu rx=%lu parsed=%lu unparsed=%lu rejected=%lu pub=%lu drop=%lu init_err=%lu err=%lu last=0x%08lx ext=%lu dlc=%lu cfg_tx=%lu cfg_reply=%lu first_node=%lu seen=0x%08lx qsrc=%lu q1e4=(%ld,%ld,%ld,%ld)\r\n",
+    printf("[IMU_CAN] irq=%lu rx=%lu parsed=%lu unparsed=%lu rejected=%lu pub=%lu drop=%lu init_err=%lu err=%lu last=0x%08lx ext=%lu dlc=%lu cfg_tx=%lu cfg_reply=%lu first_node=%lu seen=0x%08lx\r\n",
            (unsigned long)imu_stats.rx_irq_count,
            (unsigned long)imu_stats.rx_frame_count,
            (unsigned long)imu_stats.parsed_frame_count,
@@ -141,12 +206,7 @@ static void UartDebugTask_PrintChainStatus(uint32_t tick_count)
            (unsigned long)imu_stats.cfg_tx_count,
            (unsigned long)imu_stats.cfg_reply_count,
            (unsigned long)imu_stats.first_valid_node_id,
-           (unsigned long)imu_stats.first_valid_seen_mask,
-           (unsigned long)imu_stats.quat_source,
-           (long)imu_stats.quat_w_1e4,
-           (long)imu_stats.quat_x_1e4,
-           (long)imu_stats.quat_y_1e4,
-           (long)imu_stats.quat_z_1e4);
+           (unsigned long)imu_stats.first_valid_seen_mask);
 
     printf("[IMU_BUS] started=0x%lx state=(%lu,%lu) act=(%lu,%lu) lec=(%lu,%lu) dlec=(%lu,%lu) txerr=(%lu,%lu) rxerr=(%lu,%lu) warn=(%lu,%lu) ep=(%lu,%lu) bo=(%lu,%lu)\r\n",
            (unsigned long)imu_stats.bus_started_mask,
@@ -169,39 +229,13 @@ static void UartDebugTask_PrintChainStatus(uint32_t tick_count)
            (unsigned long)imu_stats.bus_off[0],
            (unsigned long)imu_stats.bus_off[1]);
 
-    printf("[RS485] rx_events=%lu rx_taken=%lu resp=%lu no_resp=%lu frame_err=%lu tx_done=%lu tx_fail=%lu full_snap=%lu tx_busy=%u err=%lu task_rx=%lu task_tx=%lu\r\n",
-           (unsigned long)rs485_status.rx_events,
-           (unsigned long)rs485_status.rx_taken,
-           (unsigned long)rs485_status.modbus_response_ready,
-           (unsigned long)rs485_status.modbus_no_response,
-           (unsigned long)rs485_status.modbus_frame_error,
-           (unsigned long)rs485_status.tx_done,
-           (unsigned long)rs485_status.tx_send_fail,
-           (unsigned long)rs485_task_stats.full_frame_count,
-           (unsigned int)rs485_status.tx_busy,
-           (unsigned long)rs485_status.errors,
-           (unsigned long)rs485_task_stats.rx_event_count,
-           (unsigned long)rs485_task_stats.tx_event_count);
-
-    printf("[RS485_IO] rx_len=%u rx=%02x %02x %02x %02x %02x %02x %02x %02x tx_len=%u tx=%02x %02x %02x %02x %02x %02x %02x %02x\r\n",
-           (unsigned int)rs485_status.last_rx_size,
-           (unsigned int)rs485_status.last_rx_head[0],
-           (unsigned int)rs485_status.last_rx_head[1],
-           (unsigned int)rs485_status.last_rx_head[2],
-           (unsigned int)rs485_status.last_rx_head[3],
-           (unsigned int)rs485_status.last_rx_head[4],
-           (unsigned int)rs485_status.last_rx_head[5],
-           (unsigned int)rs485_status.last_rx_head[6],
-           (unsigned int)rs485_status.last_rx_head[7],
-           (unsigned int)rs485_status.last_tx_size,
-           (unsigned int)rs485_status.last_tx_head[0],
-           (unsigned int)rs485_status.last_tx_head[1],
-           (unsigned int)rs485_status.last_tx_head[2],
-           (unsigned int)rs485_status.last_tx_head[3],
-           (unsigned int)rs485_status.last_tx_head[4],
-           (unsigned int)rs485_status.last_tx_head[5],
-           (unsigned int)rs485_status.last_tx_head[6],
-           (unsigned int)rs485_status.last_tx_head[7]);
+    last_tick = now_tick;
+    last_imu_pub = dm_stats.data.imu_sensor_published;
+    last_touch_pub = dm_stats.data.touch_sensor_published;
+    last_raw_pub = dm_stats.data.raw_frames_published;
+    last_full_pub = dm_stats.data.full_frames_published;
+    last_processed = process_stats.processed_frames;
+    last_imu_rx = imu_stats.rx_frame_count;
 }
 
 /**
