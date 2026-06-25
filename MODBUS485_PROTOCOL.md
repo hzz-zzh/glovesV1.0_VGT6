@@ -1,5 +1,24 @@
 # Glove Modbus485 Register Map
 
+## Time Encoding Update
+
+All 4-register time fields now use ROS Time layout instead of a single
+`uint64` microsecond counter.
+
+Register order is little-endian by 16-bit Modbus word:
+
+| offset | field |
+|---:|---|
+| `+0` | `sec` bit15..0 |
+| `+1` | `sec` bit31..16 |
+| `+2` | `nanosec` bit15..0 |
+| `+3` | `nanosec` bit31..16 |
+
+`sec` is the number of seconds since `1970-01-01 00:00:00 UTC`.
+`nanosec` is the nanosecond offset within that second and must be
+`0..999999999`. When the master writes `0x000A..0x000D`, invalid
+`nanosec >= 1000000000` is rejected with Modbus exception `0x03`.
+
 本文档描述当前固件开放给主站的 Modbus RTU 寄存器。寄存器地址均为 16 位 Holding Register 地址。
 
 ## 1. 通讯基础
@@ -23,16 +42,18 @@
 
 单个 Modbus register，寄存器内按 Modbus 标准高字节在前。
 
-### U64
+### ROS Time
 
 占 4 个寄存器，低 16 位寄存器在前：
 
 | offset | 含义 |
 |---:|---|
-| `+0` | bit15..0 |
-| `+1` | bit31..16 |
-| `+2` | bit47..32 |
-| `+3` | bit63..48 |
+| `+0` | sec bit15..0 |
+| `+1` | sec bit31..16 |
+| `+2` | nanosec bit15..0 |
+| `+3` | nanosec bit31..16 |
+
+`nanosec` 必须小于 `1000000000`。
 
 ### float32
 
@@ -53,9 +74,9 @@
 |---:|---:|---|---|
 | `0x0000` | 1 | U16 | 从站地址，默认 `1` |
 | `0x0001` | 1 | U16 | 波特率代码，当前返回 `0` |
-| `0x0002` | 4 | U64 | UTC 时间戳，单位 us |
-| `0x0006` | 4 | U64 | 本地运行时间，单位 us |
-| `0x000A` | 4 | U64 | 最近一次主站同步的 UTC 时间，单位 us |
+| `0x0002` | 4 | ROS Time | 当前 UTC 时间 |
+| `0x0006` | 4 | ROS Time | 本地运行时间，按 sec/nanosec 表示 |
+| `0x000A` | 4 | ROS Time | 最近一次主站同步的 UTC 时间 |
 
 ### 3.2 命令状态区
 
@@ -128,8 +149,10 @@ IMU 状态：
 
 | 地址 | 数量 | 类型 | 含义 |
 |---:|---:|---|---|
-| `0x1140` | 4 | U64 | IMU 数据时间戳，单位 us |
+| `0x1140` | 4 | ROS Time | IMU 数据时间戳 |
 | `0x1144` | 1 | U16 | IMU 有效位，bit0 对应 IMU0，bit15 对应 IMU15 |
+
+说明：`0x1140`、`0x1340`、`0x2080` 三个数据区时间戳均表示同一帧数据的同步采集时刻 UTC，因此三个值应保持一致。关节区时间戳不是解算完成时刻，而是该帧输入数据的采集时刻。UTC 未同步时读数为 `0.000000000`。
 
 ### 3.7 关节解算数据区
 
@@ -152,7 +175,7 @@ joint_addr = 0x1300 + j * 2, j = 0..26
 
 | 地址 | 数量 | 类型 | 含义 |
 |---:|---:|---|---|
-| `0x1340` | 4 | U64 | 关节数据时间戳，单位 us |
+| `0x1340` | 4 | ROS Time | 关节数据时间戳 |
 | `0x1344` | 1 | U16 | status_flags，bit0=snapshot_valid，bit1=algorithm_valid，bit2=joint_calib_applied |
 | `0x1345` | 1 | U16 | joint_valid_bits low，bit0 对应 joint0 |
 | `0x1346` | 1 | U16 | joint_valid_bits high |
@@ -171,7 +194,7 @@ touch_addr = 0x2000 + k, k = 0..67
 |---:|---:|---|---|
 | `0x2000..0x2043` | 68 | U16 | touch[0..67] 原始采样值 |
 | `0x2044..0x207F` | 60 | U16 | reserved，当前读 `0` |
-| `0x2080` | 4 | U64 | 触觉数据时间戳，单位 us |
+| `0x2080` | 4 | ROS Time | 触觉数据时间戳 |
 | `0x2084` | 1 | U16 | status_flags，bit0=snapshot_valid，bit1=touch_valid |
 | `0x2085` | 1 | U16 | 当前有效触觉点数，固定 `68` |
 | `0x2086` | 1 | U16 | 触觉区容量，固定 `128` |
@@ -190,7 +213,7 @@ touch_addr = 0x2000 + k, k = 0..67
 
 | 起始地址 | 数量 | 类型 | 含义 |
 |---:|---:|---|---|
-| `0x000A` | 4 | U64 | 主站写入当前 UTC 时间，单位 us |
+| `0x000A` | 4 | ROS Time | 主站写入当前 UTC 时间 |
 
 写入后，可通过 `0x0002..0x0005` 读取当前 UTC 时间，通过 `0x000A..0x000D` 读取最近一次同步值。
 

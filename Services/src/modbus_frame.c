@@ -14,6 +14,10 @@
 #error "MODBUS_JOINT_COUNT must match GLOVE_JOINT_DOF_COUNT"
 #endif
 
+#define MODBUS_TIME_US_PER_SEC          1000000ULL
+#define MODBUS_TIME_NS_PER_US           1000ULL
+#define MODBUS_TIME_NS_PER_SEC          1000000000UL
+
 typedef struct
 {
   uint8_t valid;
@@ -60,17 +64,33 @@ static uint16_t Modbus_ReadU16(const uint8_t *data)
   return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
 }
 
-static uint64_t Modbus_ReadU64FromRegs(const uint8_t *data)
+static uint32_t Modbus_ReadU32LeWords(const uint8_t *data)
 {
-  uint64_t value = 0U;
-  uint8_t index;
+  return ((uint32_t)Modbus_ReadU16(data)) |
+         (((uint32_t)Modbus_ReadU16(&data[2])) << 16U);
+}
 
-  for (index = 0U; index < 4U; index++)
+static uint8_t Modbus_ReadRosTimeUsFromRegs(const uint8_t *data,
+                                            uint64_t *timestamp_us)
+{
+  uint32_t sec;
+  uint32_t nsec;
+
+  if ((data == 0) || (timestamp_us == 0))
   {
-    value |= ((uint64_t)Modbus_ReadU16(&data[index * 2U])) << (index * 16U);
+    return 0U;
   }
 
-  return value;
+  sec = Modbus_ReadU32LeWords(data);
+  nsec = Modbus_ReadU32LeWords(&data[4]);
+  if (nsec >= MODBUS_TIME_NS_PER_SEC)
+  {
+    return 0U;
+  }
+
+  *timestamp_us = ((uint64_t)sec * MODBUS_TIME_US_PER_SEC) +
+                  ((uint64_t)nsec / MODBUS_TIME_NS_PER_US);
+  return 1U;
 }
 
 static void Modbus_WriteU16(uint8_t *data, uint16_t value)
@@ -124,7 +144,7 @@ static uint8_t Modbus_IsReadableRegister(uint16_t reg_addr)
     return 1U;
   }
 
-  if ((reg_addr >= REG_IMU_TIMESTAMP_US) && (reg_addr < (REG_IMU_TIMESTAMP_US + MODBUS_REGS_U64)))
+  if ((reg_addr >= REG_IMU_TIMESTAMP_US) && (reg_addr < (REG_IMU_TIMESTAMP_US + MODBUS_REGS_ROS_TIME)))
   {
     return 1U;
   }
@@ -144,7 +164,7 @@ static uint8_t Modbus_IsReadableRegister(uint16_t reg_addr)
     return 1U;
   }
 
-  if ((reg_addr >= REG_JOINT_TIMESTAMP_US) && (reg_addr < (REG_JOINT_TIMESTAMP_US + MODBUS_REGS_U64)))
+  if ((reg_addr >= REG_JOINT_TIMESTAMP_US) && (reg_addr < (REG_JOINT_TIMESTAMP_US + MODBUS_REGS_ROS_TIME)))
   {
     return 1U;
   }
@@ -159,7 +179,7 @@ static uint8_t Modbus_IsReadableRegister(uint16_t reg_addr)
     return 1U;
   }
 
-  if ((reg_addr >= REG_R_TIMESTAMP_US) && (reg_addr < (REG_R_TIMESTAMP_US + MODBUS_REGS_U64)))
+  if ((reg_addr >= REG_R_TIMESTAMP_US) && (reg_addr < (REG_R_TIMESTAMP_US + MODBUS_REGS_ROS_TIME)))
   {
     return 1U;
   }
@@ -189,9 +209,40 @@ static uint16_t Modbus_ReadFloatReg(float value, uint16_t word_offset)
   return (uint16_t)(raw.u32 >> 16);
 }
 
-static uint16_t Modbus_ReadU64Reg(uint64_t value, uint16_t word_offset)
+static uint16_t Modbus_ReadRosTimeRegFromUs(uint64_t timestamp_us,
+                                            uint16_t word_offset)
 {
-  return (uint16_t)((value >> (word_offset * 16U)) & 0xFFFFU);
+  uint64_t sec64 = timestamp_us / MODBUS_TIME_US_PER_SEC;
+  uint32_t sec;
+  uint32_t nsec;
+
+  if (sec64 > 0xFFFFFFFFULL)
+  {
+    sec = 0xFFFFFFFFUL;
+    nsec = MODBUS_TIME_NS_PER_SEC - 1UL;
+  }
+  else
+  {
+    sec = (uint32_t)sec64;
+    nsec = (uint32_t)((timestamp_us % MODBUS_TIME_US_PER_SEC) *
+                      MODBUS_TIME_NS_PER_US);
+  }
+
+  switch (word_offset)
+  {
+    case 0U:
+      return (uint16_t)(sec & 0xFFFFU);
+    case 1U:
+      return (uint16_t)(sec >> 16U);
+    case 2U:
+      return (uint16_t)(nsec & 0xFFFFU);
+    case 3U:
+      return (uint16_t)(nsec >> 16U);
+    default:
+      break;
+  }
+
+  return 0U;
 }
 
 static void Modbus_SetCalibrationIdentity(GloveQuaternion_t table[GLOVE_IMU_COUNT])
@@ -830,19 +881,22 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
     return 0U;
   }
 
-  if ((reg_addr >= REG_UTC_TIMESTAMP_US) && (reg_addr < (REG_UTC_TIMESTAMP_US + MODBUS_REGS_U64)))
+  if ((reg_addr >= REG_UTC_TIMESTAMP_US) && (reg_addr < (REG_UTC_TIMESTAMP_US + MODBUS_REGS_ROS_TIME)))
   {
-    return Modbus_ReadU64Reg(ModbusTimeSync_GetUtcTimestampUs(), (uint16_t)(reg_addr - REG_UTC_TIMESTAMP_US));
+    return Modbus_ReadRosTimeRegFromUs(ModbusTimeSync_GetUtcTimestampUs(),
+                                       (uint16_t)(reg_addr - REG_UTC_TIMESTAMP_US));
   }
 
-  if ((reg_addr >= REG_LOCAL_UPTIME_US) && (reg_addr < (REG_LOCAL_UPTIME_US + MODBUS_REGS_U64)))
+  if ((reg_addr >= REG_LOCAL_UPTIME_US) && (reg_addr < (REG_LOCAL_UPTIME_US + MODBUS_REGS_ROS_TIME)))
   {
-    return Modbus_ReadU64Reg(ModbusTimeSync_GetLocalUptimeUs(), (uint16_t)(reg_addr - REG_LOCAL_UPTIME_US));
+    return Modbus_ReadRosTimeRegFromUs(ModbusTimeSync_GetLocalUptimeUs(),
+                                       (uint16_t)(reg_addr - REG_LOCAL_UPTIME_US));
   }
 
-  if ((reg_addr >= REG_TIME_SYNC_UTC_US) && (reg_addr < (REG_TIME_SYNC_UTC_US + MODBUS_REGS_U64)))
+  if ((reg_addr >= REG_TIME_SYNC_UTC_US) && (reg_addr < (REG_TIME_SYNC_UTC_US + MODBUS_REGS_ROS_TIME)))
   {
-    return Modbus_ReadU64Reg(ModbusTimeSync_GetLastSyncUtcUs(), (uint16_t)(reg_addr - REG_TIME_SYNC_UTC_US));
+    return Modbus_ReadRosTimeRegFromUs(ModbusTimeSync_GetLastSyncUtcUs(),
+                                       (uint16_t)(reg_addr - REG_TIME_SYNC_UTC_US));
   }
 
   switch (reg_addr)
@@ -948,9 +1002,10 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
     return Modbus_ReadImuDataReg(reg_addr);
   }
 
-  if ((reg_addr >= REG_IMU_TIMESTAMP_US) && (reg_addr < (REG_IMU_TIMESTAMP_US + MODBUS_REGS_U64)))
+  if ((reg_addr >= REG_IMU_TIMESTAMP_US) && (reg_addr < (REG_IMU_TIMESTAMP_US + MODBUS_REGS_ROS_TIME)))
   {
-    return Modbus_ReadU64Reg(Modbus_GetImuTimestampUs(), (uint16_t)(reg_addr - REG_IMU_TIMESTAMP_US));
+    return Modbus_ReadRosTimeRegFromUs(Modbus_GetImuTimestampUs(),
+                                       (uint16_t)(reg_addr - REG_IMU_TIMESTAMP_US));
   }
 
   if ((reg_addr >= REG_IMU_CALIB_START) && (reg_addr <= REG_IMU_CALIB_END))
@@ -963,9 +1018,10 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
     return Modbus_ReadJointDataReg(reg_addr);
   }
 
-  if ((reg_addr >= REG_JOINT_TIMESTAMP_US) && (reg_addr < (REG_JOINT_TIMESTAMP_US + MODBUS_REGS_U64)))
+  if ((reg_addr >= REG_JOINT_TIMESTAMP_US) && (reg_addr < (REG_JOINT_TIMESTAMP_US + MODBUS_REGS_ROS_TIME)))
   {
-    return Modbus_ReadU64Reg(Modbus_GetJointTimestampUs(), (uint16_t)(reg_addr - REG_JOINT_TIMESTAMP_US));
+    return Modbus_ReadRosTimeRegFromUs(Modbus_GetJointTimestampUs(),
+                                       (uint16_t)(reg_addr - REG_JOINT_TIMESTAMP_US));
   }
 
   if ((reg_addr >= REG_R_DATA_START) && (reg_addr <= REG_R_DATA_END))
@@ -973,9 +1029,10 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
     return Modbus_ReadTouchDataReg(reg_addr);
   }
 
-  if ((reg_addr >= REG_R_TIMESTAMP_US) && (reg_addr < (REG_R_TIMESTAMP_US + MODBUS_REGS_U64)))
+  if ((reg_addr >= REG_R_TIMESTAMP_US) && (reg_addr < (REG_R_TIMESTAMP_US + MODBUS_REGS_ROS_TIME)))
   {
-    return Modbus_ReadU64Reg(Modbus_GetTouchTimestampUs(), (uint16_t)(reg_addr - REG_R_TIMESTAMP_US));
+    return Modbus_ReadRosTimeRegFromUs(Modbus_GetTouchTimestampUs(),
+                                       (uint16_t)(reg_addr - REG_R_TIMESTAMP_US));
   }
 
   return 0U;
@@ -1253,9 +1310,20 @@ static ModbusResult_t Modbus_HandleWriteMultipleRegs(uint8_t response_addr,
                                  tx_len);
   }
 
-  if ((start_reg == REG_TIME_SYNC_UTC_US) && (reg_count == MODBUS_REGS_U64))
+  if ((start_reg == REG_TIME_SYNC_UTC_US) && (reg_count == MODBUS_REGS_ROS_TIME))
   {
-    uint64_t utc_us = Modbus_ReadU64FromRegs(data_buf);
+    uint64_t utc_us;
+
+    if (Modbus_ReadRosTimeUsFromRegs(data_buf, &utc_us) == 0U)
+    {
+      return Modbus_BuildException(response_addr,
+                                   MB_FC_WRITE_MULTIPLE_REGS,
+                                   MB_EX_ILLEGAL_DATA_VALUE,
+                                   tx_buf,
+                                   tx_buf_size,
+                                   tx_len);
+    }
+
     ModbusTimeSync_SetUtcFromMaster(utc_us);
 
     return Modbus_BuildWriteMultipleAck(response_addr,
@@ -1333,13 +1401,17 @@ uint16_t Modbus_Crc16(const uint8_t *data, uint16_t len)
 
 void Modbus_UpdateFullFrameSnapshot(const GloveFullFrame_t *frame)
 {
+  GloveTimestampUs_t frame_timestamp_us;
+
   if (frame == 0)
   {
     return;
   }
 
+  frame_timestamp_us = frame->raw.timestamp_us;
+
   taskENTER_CRITICAL();
-  modbus_imu_snapshot.timestamp_us = frame->raw.timestamp_us;
+  modbus_imu_snapshot.timestamp_us = frame_timestamp_us;
   modbus_imu_snapshot.valid_flags = frame->raw.valid_flags;
   (void)memcpy(modbus_imu_snapshot.imu,
                frame->raw.imu,
@@ -1349,14 +1421,14 @@ void Modbus_UpdateFullFrameSnapshot(const GloveFullFrame_t *frame)
                sizeof(modbus_imu_snapshot.quat));
   modbus_imu_snapshot.valid = 1U;
 
-  modbus_joint_snapshot.timestamp_us = frame->processed.timestamp_us;
+  modbus_joint_snapshot.timestamp_us = frame_timestamp_us;
   modbus_joint_snapshot.valid_flags = frame->processed.valid_flags;
   (void)memcpy(modbus_joint_snapshot.joint_angle_deg,
                frame->processed.joint_angle_deg,
                sizeof(modbus_joint_snapshot.joint_angle_deg));
   modbus_joint_snapshot.valid = 1U;
 
-  modbus_touch_snapshot.timestamp_us = frame->raw.timestamp_us;
+  modbus_touch_snapshot.timestamp_us = frame_timestamp_us;
   modbus_touch_snapshot.valid_flags = frame->raw.valid_flags;
   (void)memcpy(modbus_touch_snapshot.touch,
                frame->raw.touch,

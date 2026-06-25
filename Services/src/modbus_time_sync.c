@@ -47,6 +47,23 @@ static uint64_t ModbusTimeSync_ApplyFreqCorr(uint64_t elapsed_us)
   return (uint64_t)((int64_t)elapsed_us + corr_us);
 }
 
+static uint64_t ModbusTimeSync_GetUtcTimestampUsIrqUnsafe(void)
+{
+  uint64_t utc_us = 0U;
+  uint64_t local_now_us;
+  uint64_t corrected_elapsed_us;
+
+  local_now_us = ModbusTimeSync_GetLocalUptimeUsIrqUnsafe();
+  corrected_elapsed_us = ModbusTimeSync_ApplyFreqCorr(local_now_us);
+
+  if (time_sync_synced != 0U)
+  {
+    utc_us = time_sync_utc_base_us + corrected_elapsed_us;
+  }
+
+  return utc_us;
+}
+
 static int32_t ModbusTimeSync_ClampCorrPpb(int64_t corr_ppb)
 {
   if (corr_ppb > TIME_SYNC_MAX_CORR_PPB)
@@ -157,25 +174,18 @@ uint64_t ModbusTimeSync_GetLocalUptimeUs(void)
 
 uint64_t ModbusTimeSync_GetUtcTimestampUs(void)
 {
-  uint64_t utc_us = 0U;
-  uint64_t local_now_us;
-  uint64_t utc_base_us;
-  uint64_t corrected_elapsed_us;
-  uint8_t synced;
+  uint64_t utc_us;
 
   __disable_irq();
-  synced = time_sync_synced;
-  local_now_us = ModbusTimeSync_GetLocalUptimeUsIrqUnsafe();
-  utc_base_us = time_sync_utc_base_us;
-  corrected_elapsed_us = ModbusTimeSync_ApplyFreqCorr(local_now_us);
+  utc_us = ModbusTimeSync_GetUtcTimestampUsIrqUnsafe();
   __enable_irq();
 
-  if (synced != 0U)
-  {
-    utc_us = utc_base_us + corrected_elapsed_us;
-  }
-
   return utc_us;
+}
+
+uint64_t ModbusTimeSync_GetUtcTimestampUsFromIsr(void)
+{
+  return ModbusTimeSync_GetUtcTimestampUsIrqUnsafe();
 }
 
 uint64_t ModbusTimeSync_GetLastSyncUtcUs(void)

@@ -14,6 +14,7 @@ void ModbusTimeSync_OnPpsEdge(uint16_t gpio_pin);
 
 uint64_t ModbusTimeSync_GetLocalUptimeUs(void);
 uint64_t ModbusTimeSync_GetUtcTimestampUs(void);
+uint64_t ModbusTimeSync_GetUtcTimestampUsFromIsr(void);
 uint64_t ModbusTimeSync_GetLastSyncUtcUs(void);
 uint64_t ModbusTimeSync_GetLastSyncEdgeLocalUs(void);
 uint64_t ModbusTimeSync_GetLastLocalIntervalUs(void);

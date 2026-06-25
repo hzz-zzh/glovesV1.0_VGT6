@@ -3,9 +3,9 @@
 #include <string.h>
 
 #include "main.h"
+#include "modbus_time_sync.h"
 
 #define ACQ_SYNC_TOUCH_THREAD_FLAG      (1UL << 8)
-#define ACQ_SYNC_TIM2_PERIOD_US         (10000ULL)
 
 static volatile AcqSyncSnapshot_t s_acq_sync_latest;
 static osThreadId_t s_acq_sync_touch_task_id;
@@ -41,15 +41,8 @@ void AcqSync_OnTim2PeriodElapsedFromIsr(void)
 {
     uint32_t next_seq = s_acq_sync_latest.seq + 1U;
 
-    if (s_acq_sync_latest.valid == 0U)
-    {
-        s_acq_sync_latest.timestamp_us = (GloveTimestampUs_t)HAL_GetTick() * 1000ULL;
-    }
-    else
-    {
-        s_acq_sync_latest.timestamp_us += ACQ_SYNC_TIM2_PERIOD_US;
-    }
-
+    s_acq_sync_latest.timestamp_us =
+        (GloveTimestampUs_t)ModbusTimeSync_GetUtcTimestampUsFromIsr();
     s_acq_sync_latest.seq = next_seq;
     s_acq_sync_latest.valid = 1U;
 

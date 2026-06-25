@@ -14,6 +14,7 @@ extern "C" {
 #define MODBUS_REGS_U32                2U
 #define MODBUS_REGS_FLOAT32            2U
 #define MODBUS_REGS_U64                4U
+#define MODBUS_REGS_ROS_TIME           4U
 
 /* Basic communication and time registers: 0x0000 ~ 0x000D. */
 #define REG_SLAVE_ADDR                 0x0000U
