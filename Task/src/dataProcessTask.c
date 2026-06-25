@@ -26,6 +26,8 @@ typedef struct
     HandSolveLayout_t layout;
     GloveQuaternion_t c_calib[GLOVE_IMU_COUNT];
     GloveQuaternion_t m_calib[GLOVE_IMU_COUNT];
+    uint8_t calibration_applied;
+    uint16_t calibration_seq;
 } DataProcessAlgorithmConfig_t;
 
 static const GloveQuaternion_t s_identity_quat = {1.0f, 0.0f, 0.0f, 0.0f};
@@ -62,7 +64,9 @@ static DataProcessAlgorithmConfig_t s_algorithm_config = {
         {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
         {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
         {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f}
-    }
+    },
+    0U,
+    0U
 };
 
 static uint8_t DataProcess_IsValidHandSide(GloveHandSide_t hand_side)
@@ -278,13 +282,19 @@ static void DataProcess_PrintFullFrame(const GloveFullFrame_t *full,
 #endif
 
 static GloveStatus_t DataProcess_SolveJointAnglesDeg(const GloveRawFrame_t *raw,
-                                                     float joint_angle_deg[GLOVE_JOINT_DOF_COUNT])
+                                                     float joint_angle_deg[GLOVE_JOINT_DOF_COUNT],
+                                                     uint8_t *calibration_applied)
 {
     DataProcessAlgorithmConfig_t config;
 
     if ((raw == NULL) || (joint_angle_deg == NULL))
     {
         return GLOVE_STATUS_INVALID_PARAM;
+    }
+
+    if (calibration_applied != NULL)
+    {
+        *calibration_applied = 0U;
     }
 
     if (DataProcess_HasValidImuInput(raw) == 0U)
@@ -297,6 +307,10 @@ static GloveStatus_t DataProcess_SolveJointAnglesDeg(const GloveRawFrame_t *raw,
     }
 
     DataProcess_CopyAlgorithmConfig(&config);
+    if (calibration_applied != NULL)
+    {
+        *calibration_applied = config.calibration_applied;
+    }
 
     return HandSolve_SolveAnglesDeg(raw->quat,
                                     DataProcess_GetRawImuValidMask(raw),
@@ -310,6 +324,7 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
                                                      GloveProcessedFrame_t *processed)
 {
     GloveStatus_t status;
+    uint8_t calibration_applied = 0U;
 
     if ((raw == NULL) || (processed == NULL))
     {
@@ -327,7 +342,9 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
                      sizeof(processed->imu_attitude));
     }
 
-    status = DataProcess_SolveJointAnglesDeg(raw, processed->joint_angle_deg);
+    status = DataProcess_SolveJointAnglesDeg(raw,
+                                             processed->joint_angle_deg,
+                                             &calibration_applied);
     if (status != GLOVE_STATUS_OK)
     {
         s_data_process_stats.invalid_input_frames++;
@@ -335,6 +352,10 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
     }
 
     processed->valid_flags = GLOVE_FRAME_FLAG_ALGORITHM_VALID;
+    if (calibration_applied != 0U)
+    {
+        processed->valid_flags |= GLOVE_FRAME_FLAG_IMU_CALIB_APPLIED;
+    }
 
     return GLOVE_STATUS_OK;
 }
@@ -427,6 +448,8 @@ GloveStatus_t DataProcessTask_SetCalibration(uint8_t imu_id,
     {
         s_algorithm_config.m_calib[index] = *m_calib;
     }
+    s_algorithm_config.calibration_applied = 1U;
+    s_algorithm_config.calibration_seq = 0U;
     taskEXIT_CRITICAL();
 
     return GLOVE_STATUS_OK;
@@ -434,6 +457,13 @@ GloveStatus_t DataProcessTask_SetCalibration(uint8_t imu_id,
 
 GloveStatus_t DataProcessTask_SetCalibrationTable(const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
                                                   const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT])
+{
+    return DataProcessTask_SetCalibrationTableWithSeq(c_calib, m_calib, 0U);
+}
+
+GloveStatus_t DataProcessTask_SetCalibrationTableWithSeq(const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
+                                                         const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT],
+                                                         uint16_t calibration_seq)
 {
     if ((c_calib == NULL) || (m_calib == NULL))
     {
@@ -447,6 +477,8 @@ GloveStatus_t DataProcessTask_SetCalibrationTable(const GloveQuaternion_t c_cali
     (void)memcpy(s_algorithm_config.m_calib,
                  m_calib,
                  sizeof(s_algorithm_config.m_calib));
+    s_algorithm_config.calibration_applied = 1U;
+    s_algorithm_config.calibration_seq = calibration_seq;
     taskEXIT_CRITICAL();
 
     return GLOVE_STATUS_OK;
@@ -460,6 +492,8 @@ GloveStatus_t DataProcessTask_ResetCalibration(void)
         s_algorithm_config.c_calib[i] = s_identity_quat;
         s_algorithm_config.m_calib[i] = s_identity_quat;
     }
+    s_algorithm_config.calibration_applied = 0U;
+    s_algorithm_config.calibration_seq = 0U;
     taskEXIT_CRITICAL();
 
     return GLOVE_STATUS_OK;

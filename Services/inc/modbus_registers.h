@@ -188,6 +188,7 @@ extern "C" {
 
 #define JOINT_STATUS_SNAPSHOT_VALID    0x0001U
 #define JOINT_STATUS_ALGORITHM_VALID   0x0002U
+#define JOINT_STATUS_IMU_CALIB_APPLIED 0x0004U
 
 /* Touch/resistance matrix data, timestamp and status registers. */
 #define MODBUS_R_POINT_COUNT           GLOVE_TOUCH_COUNT

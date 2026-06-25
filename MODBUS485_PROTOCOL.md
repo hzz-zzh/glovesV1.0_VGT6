@@ -11,11 +11,11 @@
 - 当前源码波特率：`3000000`
 - 支持功能码：
   - `0x03`：Read Holding Registers
-  - `0x10`：Write Multiple Registers
-- 暂不支持：
   - `0x06`：Write Single Register
+  - `0x10`：Write Multiple Registers
 - 单次读寄存器数量：`1..125`
-- 单次写寄存器数量：`1..123`
+- `0x10` 单次写寄存器数量：`1..123`
+- `0x06` 单次写寄存器数量：固定 `1`
 
 ## 2. 数据格式
 
@@ -122,6 +122,8 @@ imu_base = 0x1000 + i * 20, i = 0..15
 | `+16` | 2 | float32 | quat_y | - |
 | `+18` | 2 | float32 | quat_z | - |
 
+说明：`0x1000..0x113F` 始终返回 IMU 采集后的 raw 数据，校准表不会改写这里的加速度、角速度或四元数。校准只影响后续关节角解算结果。
+
 IMU 状态：
 
 | 地址 | 数量 | 类型 | 含义 |
@@ -151,7 +153,7 @@ joint_addr = 0x1300 + j * 2, j = 0..26
 | 地址 | 数量 | 类型 | 含义 |
 |---:|---:|---|---|
 | `0x1340` | 4 | U64 | 关节数据时间戳，单位 us |
-| `0x1344` | 1 | U16 | status_flags，bit0=snapshot_valid，bit1=algorithm_valid |
+| `0x1344` | 1 | U16 | status_flags，bit0=snapshot_valid，bit1=algorithm_valid，bit2=joint_calib_applied |
 | `0x1345` | 1 | U16 | joint_valid_bits low，bit0 对应 joint0 |
 | `0x1346` | 1 | U16 | joint_valid_bits high |
 
@@ -182,7 +184,7 @@ touch_addr = 0x2000 + k, k = 0..67
 
 ## 4. 可写寄存器
 
-当前仅开放 `0x10 Write Multiple Registers` 写入以下区域。
+当前开放 `0x10 Write Multiple Registers` 和 `0x06 Write Single Register` 写入以下区域。`0x10` 用于批量写表和推荐的 apply/reset；`0x06` 用于兼容通用 Modbus 工具的单寄存器写。
 
 ### 4.1 时间同步
 
@@ -233,6 +235,8 @@ m_addr = 0x11D4 + i * 8, i = 0..15
 
 写表时只进入 staging 缓冲区，不立即影响解算。写完整表后需要执行 apply。
 
+使用 `0x06 Write Single Register` 写校准控制区时，主站应先写 `magic` 和 `seq`，最后写 `command`；写入 `command` 的那一帧会触发 apply/reset。
+
 #### 校准控制区
 
 | 地址 | 类型 | 读写 | 含义 |
@@ -280,7 +284,23 @@ count = 3
 data  = 0xCA1B, 0x0002, seq
 ```
 
-校验规则：每个四元数范数平方必须在 `0.25..2.25` 内。apply 成功后固件会归一化四元数，并更新算法当前校准表。
+`0x06` 执行 apply 示例：
+
+```text
+Write Single Register 0x1254 = 0xCA1B
+Write Single Register 0x1256 = seq
+Write Single Register 0x1255 = 0x0001
+```
+
+`0x06` 执行 reset_identity 示例：
+
+```text
+Write Single Register 0x1254 = 0xCA1B
+Write Single Register 0x1256 = seq
+Write Single Register 0x1255 = 0x0002
+```
+
+校验规则：每个四元数分量必须为 finite float，且范数平方必须在 `0.25..2.25` 内。apply 成功后固件会归一化四元数，并更新算法当前校准表。命令处理完成后，`command` 和 `magic` 会自动清零；主站通过 `status/error_index/last_applied_seq` 判断结果。
 
 ## 5. 推荐读取方式
 

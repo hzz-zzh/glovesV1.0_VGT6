@@ -12,6 +12,7 @@ extern "C" {
 #define MODBUS_BROADCAST_ADDR          0x00U
 #define MODBUS_MIN_RTU_FRAME_LEN       4U
 #define MODBUS_READ_REQ_LEN            8U
+#define MODBUS_WRITE_SINGLE_REQ_LEN    8U
 #define MODBUS_MAX_READ_REG_COUNT      125U
 #define MODBUS_MAX_WRITE_REG_COUNT     123U
 

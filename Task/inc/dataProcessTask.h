@@ -34,6 +34,9 @@ GloveStatus_t DataProcessTask_SetCalibration(uint8_t imu_id,
                                              const GloveQuaternion_t *m_calib);
 GloveStatus_t DataProcessTask_SetCalibrationTable(const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
                                                   const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT]);
+GloveStatus_t DataProcessTask_SetCalibrationTableWithSeq(const GloveQuaternion_t c_calib[GLOVE_IMU_COUNT],
+                                                         const GloveQuaternion_t m_calib[GLOVE_IMU_COUNT],
+                                                         uint16_t calibration_seq);
 GloveStatus_t DataProcessTask_ResetCalibration(void);
 
 #ifdef __cplusplus

@@ -210,6 +210,27 @@ static void Modbus_SetCalibrationIdentity(GloveQuaternion_t table[GLOVE_IMU_COUN
   }
 }
 
+static uint8_t Modbus_IsWritableCalibrationReg(uint16_t reg_addr)
+{
+  if (((reg_addr >= REG_IMU_CALIB_C_START) && (reg_addr <= REG_IMU_CALIB_C_END)) ||
+      ((reg_addr >= REG_IMU_CALIB_M_START) && (reg_addr <= REG_IMU_CALIB_M_END)))
+  {
+    return 1U;
+  }
+
+  switch (reg_addr)
+  {
+    case REG_IMU_CALIB_MAGIC:
+    case REG_IMU_CALIB_COMMAND:
+    case REG_IMU_CALIB_SEQ:
+      return 1U;
+    default:
+      break;
+  }
+
+  return 0U;
+}
+
 static void Modbus_CalibrationEnsureInitialized(void)
 {
   if (modbus_calib_initialized != 0U)
@@ -374,6 +395,19 @@ static void Modbus_WriteCalibrationFloatWord(GloveQuaternion_t *quat,
   Modbus_SetQuaternionComponent(quat, component, raw.f32);
 }
 
+static uint8_t Modbus_IsFiniteCalibrationQuat(const GloveQuaternion_t *input)
+{
+  if (input == 0)
+  {
+    return 0U;
+  }
+
+  return (isfinite(input->w) &&
+          isfinite(input->x) &&
+          isfinite(input->y) &&
+          isfinite(input->z)) ? 1U : 0U;
+}
+
 static uint8_t Modbus_NormalizeCalibrationQuat(const GloveQuaternion_t *input,
                                                GloveQuaternion_t *output)
 {
@@ -381,6 +415,11 @@ static uint8_t Modbus_NormalizeCalibrationQuat(const GloveQuaternion_t *input,
   float inv_norm;
 
   if ((input == 0) || (output == 0))
+  {
+    return 0U;
+  }
+
+  if (Modbus_IsFiniteCalibrationQuat(input) == 0U)
   {
     return 0U;
   }
@@ -401,6 +440,12 @@ static uint8_t Modbus_NormalizeCalibrationQuat(const GloveQuaternion_t *input,
   output->z = input->z * inv_norm;
 
   return 1U;
+}
+
+static void Modbus_ClearCalibrationCommandLatch(void)
+{
+  modbus_calib_magic = 0U;
+  modbus_calib_command = IMU_CALIB_CMD_NONE;
 }
 
 static uint8_t Modbus_BuildNormalizedCalibrationTables(
@@ -454,6 +499,7 @@ static void Modbus_ProcessCalibrationCommand(void)
   {
     modbus_calib_status = IMU_CALIB_STATUS_BAD_MAGIC;
     modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
+    Modbus_ClearCalibrationCommandLatch();
     return;
   }
 
@@ -465,14 +511,17 @@ static void Modbus_ProcessCalibrationCommand(void)
     {
       modbus_calib_status = IMU_CALIB_STATUS_BAD_QUAT;
       modbus_calib_error_index = error_index;
+      Modbus_ClearCalibrationCommandLatch();
       return;
     }
 
-    if (DataProcessTask_SetCalibrationTable(modbus_calib_c_apply,
-                                            modbus_calib_m_apply) != GLOVE_STATUS_OK)
+    if (DataProcessTask_SetCalibrationTableWithSeq(modbus_calib_c_apply,
+                                                   modbus_calib_m_apply,
+                                                   modbus_calib_seq) != GLOVE_STATUS_OK)
     {
       modbus_calib_status = IMU_CALIB_STATUS_BAD_QUAT;
       modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
+      Modbus_ClearCalibrationCommandLatch();
       return;
     }
 
@@ -485,6 +534,7 @@ static void Modbus_ProcessCalibrationCommand(void)
     modbus_calib_status = IMU_CALIB_STATUS_APPLIED;
     modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
     modbus_calib_last_applied_seq = modbus_calib_seq;
+    Modbus_ClearCalibrationCommandLatch();
     return;
   }
 
@@ -496,11 +546,13 @@ static void Modbus_ProcessCalibrationCommand(void)
     modbus_calib_status = IMU_CALIB_STATUS_RESET_DONE;
     modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
     modbus_calib_last_applied_seq = modbus_calib_seq;
+    Modbus_ClearCalibrationCommandLatch();
     return;
   }
 
   modbus_calib_status = IMU_CALIB_STATUS_BAD_CMD;
   modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
+  Modbus_ClearCalibrationCommandLatch();
 }
 
 static uint8_t Modbus_WriteCalibrationReg(uint16_t reg_addr, uint16_t value)
@@ -580,6 +632,10 @@ static uint16_t Modbus_ReadJointStatusFlags(void)
     if ((modbus_joint_snapshot.valid_flags & GLOVE_FRAME_FLAG_ALGORITHM_VALID) != 0U)
     {
       status |= JOINT_STATUS_ALGORITHM_VALID;
+    }
+    if ((modbus_joint_snapshot.valid_flags & GLOVE_FRAME_FLAG_IMU_CALIB_APPLIED) != 0U)
+    {
+      status |= JOINT_STATUS_IMU_CALIB_APPLIED;
     }
   }
   taskEXIT_CRITICAL();
@@ -1058,6 +1114,28 @@ static ModbusResult_t Modbus_BuildWriteMultipleAck(uint8_t response_addr,
   return MODBUS_RESULT_RESPONSE_READY;
 }
 
+static ModbusResult_t Modbus_BuildWriteSingleAck(uint8_t response_addr,
+                                                 uint16_t reg_addr,
+                                                 uint16_t value,
+                                                 uint8_t *tx_buf,
+                                                 uint16_t tx_buf_size,
+                                                 uint16_t *tx_len)
+{
+  if ((tx_buf == 0) || (tx_len == 0) || (tx_buf_size < 8U))
+  {
+    return MODBUS_RESULT_FRAME_ERROR;
+  }
+
+  tx_buf[0] = response_addr;
+  tx_buf[1] = MB_FC_WRITE_SINGLE_REG;
+  Modbus_WriteU16(&tx_buf[2], reg_addr);
+  Modbus_WriteU16(&tx_buf[4], value);
+  Modbus_AppendCrc(tx_buf, 6U);
+  *tx_len = 8U;
+
+  return MODBUS_RESULT_RESPONSE_READY;
+}
+
 static ModbusResult_t Modbus_HandleCalibrationWrite(uint8_t response_addr,
                                                     uint16_t start_reg,
                                                     uint16_t reg_count,
@@ -1071,6 +1149,21 @@ static ModbusResult_t Modbus_HandleCalibrationWrite(uint8_t response_addr,
   if (data_buf == 0)
   {
     return MODBUS_RESULT_FRAME_ERROR;
+  }
+
+  for (uint16_t index = 0U; index < reg_count; index++)
+  {
+    uint16_t reg_addr = (uint16_t)(start_reg + index);
+
+    if (Modbus_IsWritableCalibrationReg(reg_addr) == 0U)
+    {
+      return Modbus_BuildException(response_addr,
+                                   MB_FC_WRITE_MULTIPLE_REGS,
+                                   MB_EX_ILLEGAL_DATA_ADDRESS,
+                                   tx_buf,
+                                   tx_buf_size,
+                                   tx_len);
+    }
   }
 
   for (uint16_t index = 0U; index < reg_count; index++)
@@ -1095,6 +1188,43 @@ static ModbusResult_t Modbus_HandleCalibrationWrite(uint8_t response_addr,
                                       tx_buf,
                                       tx_buf_size,
                                       tx_len);
+}
+
+static ModbusResult_t Modbus_HandleWriteSingleReg(uint8_t response_addr,
+                                                  uint16_t reg_addr,
+                                                  uint16_t value,
+                                                  uint8_t *tx_buf,
+                                                  uint16_t tx_buf_size,
+                                                  uint16_t *tx_len)
+{
+  if ((tx_buf == 0) || (tx_len == 0) || (tx_buf_size < 8U))
+  {
+    return MODBUS_RESULT_FRAME_ERROR;
+  }
+
+  if ((reg_addr < REG_IMU_CALIB_START) ||
+      (reg_addr > REG_IMU_CALIB_END) ||
+      (Modbus_IsWritableCalibrationReg(reg_addr) == 0U))
+  {
+    return Modbus_BuildException(response_addr,
+                                 MB_FC_WRITE_SINGLE_REG,
+                                 MB_EX_ILLEGAL_DATA_ADDRESS,
+                                 tx_buf,
+                                 tx_buf_size,
+                                 tx_len);
+  }
+
+  if (Modbus_WriteCalibrationReg(reg_addr, value) != 0U)
+  {
+    Modbus_ProcessCalibrationCommand();
+  }
+
+  return Modbus_BuildWriteSingleAck(response_addr,
+                                    reg_addr,
+                                    value,
+                                    tx_buf,
+                                    tx_buf_size,
+                                    tx_len);
 }
 
 static ModbusResult_t Modbus_HandleWriteMultipleRegs(uint8_t response_addr,
@@ -1247,6 +1377,7 @@ ModbusResult_t Modbus_ProcessRequest(const uint8_t *rx_buf,
   uint8_t byte_count;
   uint16_t start_reg;
   uint16_t reg_count;
+  uint16_t reg_value;
   uint16_t expected_len;
   uint16_t frame_crc;
   uint16_t calc_crc;
@@ -1276,7 +1407,9 @@ ModbusResult_t Modbus_ProcessRequest(const uint8_t *rx_buf,
     return MODBUS_RESULT_NO_RESPONSE;
   }
 
-  if ((func != MB_FC_READ_HOLDING_REGS) && (func != MB_FC_WRITE_MULTIPLE_REGS))
+  if ((func != MB_FC_READ_HOLDING_REGS) &&
+      (func != MB_FC_WRITE_SINGLE_REG) &&
+      (func != MB_FC_WRITE_MULTIPLE_REGS))
   {
     if (request_addr == MODBUS_BROADCAST_ADDR)
     {
@@ -1329,6 +1462,29 @@ ModbusResult_t Modbus_ProcessRequest(const uint8_t *rx_buf,
   if (request_addr == MODBUS_BROADCAST_ADDR)
   {
     return MODBUS_RESULT_NO_RESPONSE;
+  }
+
+  if (func == MB_FC_WRITE_SINGLE_REG)
+  {
+    if (rx_len != MODBUS_WRITE_SINGLE_REQ_LEN)
+    {
+      return Modbus_BuildException(modbus_slave_address,
+                                   func,
+                                   MB_EX_ILLEGAL_DATA_VALUE,
+                                   tx_buf,
+                                   tx_buf_size,
+                                   tx_len);
+    }
+
+    start_reg = Modbus_ReadU16(&rx_buf[2]);
+    reg_value = Modbus_ReadU16(&rx_buf[4]);
+
+    return Modbus_HandleWriteSingleReg(request_addr,
+                                       start_reg,
+                                       reg_value,
+                                       tx_buf,
+                                       tx_buf_size,
+                                       tx_len);
   }
 
   if (rx_len < 9U)
