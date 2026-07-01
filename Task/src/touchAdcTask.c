@@ -7,8 +7,16 @@
 #include "cmsis_os2.h"
 #include "data_manager.h"
 #include "main.h"
+#include "uart_redirect.h"
 
 #define TOUCH_ADC_DEBUG_ENABLE         (0U)
+#define TOUCH_ADC_STREAM_ENABLE        (1U)
+#define TOUCH_ADC_STREAM_HEADER_0      (0xAAU)
+#define TOUCH_ADC_STREAM_HEADER_1      (0x55U)
+#define TOUCH_ADC_STREAM_TAIL_0        (0x55U)
+#define TOUCH_ADC_STREAM_TAIL_1        (0xAAU)
+#define TOUCH_ADC_STREAM_DATA_BYTES    (GLOVE_TOUCH_COUNT * 2U)
+#define TOUCH_ADC_STREAM_FRAME_SIZE    (2U + 4U + 1U + TOUCH_ADC_STREAM_DATA_BYTES + 2U + 2U)
 #define TOUCH_ADC_DEBUG_PRINT_PERIOD   (1U)
 #define TOUCH_ADC_DEBUG_PRINT_DETAILS  (1U)
 #define TOUCH_ADC_DEBUG_PRINT_STATUS   (1U)
@@ -65,6 +73,81 @@ static osThreadId_t s_touch_adc_task_id = NULL;
 static uint8_t s_touch_adc_trace_frame = 0U;
 static uint8_t s_touch_adc_trace_dma_once = 0U;
 static uint8_t s_touch_adc_debug_print_once = 1U;
+
+#if (TOUCH_ADC_STREAM_ENABLE != 0U)
+static uint16_t TouchAdcTask_Crc16Modbus(const uint8_t *data, uint32_t length)
+{
+  uint16_t crc = 0xFFFFU;
+  uint32_t byte_index;
+
+  if (data == NULL)
+  {
+    return 0U;
+  }
+
+  for (byte_index = 0U; byte_index < length; byte_index++)
+  {
+    uint32_t bit_index;
+
+    crc ^= data[byte_index];
+    for (bit_index = 0U; bit_index < 8U; bit_index++)
+    {
+      if ((crc & 0x0001U) != 0U)
+      {
+        crc = (uint16_t)((crc >> 1U) ^ 0xA001U);
+      }
+      else
+      {
+        crc >>= 1U;
+      }
+    }
+  }
+
+  return crc;
+}
+
+static void TouchAdcTask_StreamSamples(uint32_t seq,
+                                       const GloveTouchSensorBlock_t *block)
+{
+  uint8_t frame[TOUCH_ADC_STREAM_FRAME_SIZE];
+  uint32_t offset = 0U;
+  uint32_t index;
+  uint16_t crc;
+
+  if (block == NULL)
+  {
+    return;
+  }
+
+  frame[offset++] = TOUCH_ADC_STREAM_HEADER_0;
+  frame[offset++] = TOUCH_ADC_STREAM_HEADER_1;
+
+  /* Sequence number, little-endian. */
+  frame[offset++] = (uint8_t)(seq & 0xFFU);
+  frame[offset++] = (uint8_t)((seq >> 8U) & 0xFFU);
+  frame[offset++] = (uint8_t)((seq >> 16U) & 0xFFU);
+  frame[offset++] = (uint8_t)((seq >> 24U) & 0xFFU);
+  frame[offset++] = (uint8_t)GLOVE_TOUCH_COUNT;
+
+  /* A0..E3, then F0..F47; each value is uint16 little-endian. */
+  for (index = 0U; index < GLOVE_TOUCH_COUNT; index++)
+  {
+    uint16_t value = block->data.touch[index].value;
+
+    frame[offset++] = (uint8_t)(value & 0xFFU);
+    frame[offset++] = (uint8_t)((value >> 8U) & 0xFFU);
+  }
+
+  /* CRC covers seq, point count and all touch data; CRC is low byte first. */
+  crc = TouchAdcTask_Crc16Modbus(&frame[2], offset - 2U);
+  frame[offset++] = (uint8_t)(crc & 0xFFU);
+  frame[offset++] = (uint8_t)((crc >> 8U) & 0xFFU);
+  frame[offset++] = TOUCH_ADC_STREAM_TAIL_0;
+  frame[offset++] = TOUCH_ADC_STREAM_TAIL_1;
+
+  UartRedirect_WriteData(frame, (uint16_t)offset);
+}
+#endif
 
 static uint32_t TouchAdcTask_MsToTicks(uint32_t timeout_ms)
 {
@@ -675,6 +758,9 @@ void TouchAdcTask(void *argument)
       if (status == GLOVE_STATUS_OK)
       {
         error_count = 0U;
+#if (TOUCH_ADC_STREAM_ENABLE != 0U)
+        TouchAdcTask_StreamSamples(seq, touch);
+#endif
         TouchAdcTask_PrintSamples(seq, touch);
         publish_status = DataManager_PublishTouchSensor(touch, TOUCH_ADC_QUEUE_TIMEOUT_MS);
         if (publish_status != GLOVE_STATUS_OK)

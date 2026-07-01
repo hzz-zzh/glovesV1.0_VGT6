@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "data_manager.h"
+#include "uart_redirect.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -35,7 +36,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define FREERTOS_ENABLE_UART_DEBUG_TASK            (1)
+#define FREERTOS_ENABLE_UART_DEBUG_TASK            (0)
 #define FREERTOS_ENABLE_TEST_TASK                  (0)
 #define FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY        (0)
 #define FREERTOS_ENABLE_SD_LOG_TEST_ONLY           (0)
@@ -222,6 +223,8 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_EVENTS */
   /* add events, ... */
+  /* From scheduler start onward, USART2 is reserved for tactile data. */
+  UartRedirect_SetPrintfEnabled(0U);
   /* USER CODE END RTOS_EVENTS */
 
 }
