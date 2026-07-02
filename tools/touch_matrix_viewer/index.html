@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>68点触觉手套可视化</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #071019;
+      --panel: #0d1925;
+      --panel-2: #122232;
+      --line: #23394b;
+      --text: #e9f4fb;
+      --muted: #8ba3b5;
+      --accent: #39d6c5;
+      --danger: #ff667d;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: var(--text); background:
+      radial-gradient(circle at 10% 10%, #12334a 0, transparent 30%), var(--bg); }
+    button, input, select { font: inherit; }
+    button, input, select {
+      min-height: 36px; border: 1px solid var(--line); border-radius: 8px;
+      color: var(--text); background: #0a1520; padding: 7px 10px;
+    }
+    button { cursor: pointer; }
+    button.primary { background: #087f78; border-color: #17a79d; }
+    button:hover { border-color: var(--accent); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    header {
+      position: sticky; top: 0; z-index: 5; display: flex; align-items: center;
+      gap: 12px; flex-wrap: wrap; padding: 12px 18px; background: rgba(7,16,25,.94);
+      border-bottom: 1px solid var(--line); backdrop-filter: blur(12px);
+    }
+    h1 { margin: 0 16px 0 0; font-size: 18px; letter-spacing: .4px; }
+    .control { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+    .control input { width: 92px; }
+    .control input[type="checkbox"] { width: 18px; min-height: 18px; accent-color: var(--accent); }
+    .status { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #536674; box-shadow: 0 0 0 4px #53667420; }
+    .dot.live { background: var(--accent); box-shadow: 0 0 0 4px #39d6c530; }
+
+    main { display: grid; grid-template-columns: minmax(580px, 1fr) 310px; gap: 16px; padding: 16px; }
+    .card { background: linear-gradient(145deg, rgba(18,34,50,.94), rgba(10,23,34,.94)); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+    .card-title { display: flex; justify-content: space-between; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); font-weight: 650; }
+    .card-title small { color: var(--muted); font-weight: 400; }
+    #gloveSvg { width: 100%; min-height: 680px; display: block; background: radial-gradient(circle at 50% 45%, #17344b 0, #09141e 58%, #060c12 100%); }
+    .hand-outline { fill: #0a1118; stroke: #42657b; stroke-width: 4; stroke-linejoin: round; }
+    .palm-outline { fill: none; stroke: #27465b; stroke-width: 2; stroke-dasharray: 7 7; }
+    .point circle { stroke: #e4fbff80; stroke-width: 1.5; transition: fill .08s linear, r .08s linear; }
+    .point text { fill: #f7fdff; text-anchor: middle; pointer-events: none; font-weight: 700; paint-order: stroke; stroke: #061018; stroke-width: 2px; }
+    .point .label { font-size: 10px; }
+    .point .value { font-size: 9px; font-weight: 500; }
+    .group-label { fill: #7895a9; font-size: 14px; font-weight: 650; letter-spacing: 1px; }
+
+    aside { display: grid; gap: 14px; align-content: start; }
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px; }
+    .metric { padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #07131d; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; }
+    .metric strong { display: block; margin-top: 4px; font-size: 20px; font-variant-numeric: tabular-nums; }
+    .groups { padding: 8px 12px 12px; }
+    .group-row { display: grid; grid-template-columns: 72px 1fr 48px; align-items: center; gap: 8px; padding: 7px 0; font-size: 12px; }
+    .bar { height: 8px; border-radius: 6px; background: #061019; overflow: hidden; }
+    .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #2178c8, #37dec0, #ffe66d, #ff5d6c); transition: width .1s; }
+    .group-row output { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+    .log { padding: 12px; }
+    #message { color: var(--muted); min-height: 42px; margin: 0 0 10px; font-size: 13px; line-height: 1.5; }
+    #rawLine { width: 100%; height: 96px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: #061019; color: #85a5b9; font: 11px Consolas, monospace; }
+    footer { color: #698497; padding: 0 18px 16px; font-size: 12px; }
+
+    @media (max-width: 980px) {
+      main { grid-template-columns: 1fr; }
+      #gloveSvg { min-height: 600px; }
+      .status { width: 100%; margin-left: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>68点触觉手套</h1>
+    <button id="connectBtn" class="primary">连接串口</button>
+    <button id="demoBtn">演示模式</button>
+    <div class="control"><label for="baud">波特率</label><input id="baud" type="number" value="921600" min="9600"></div>
+    <div class="control"><label for="minValue">下限</label><input id="minValue" type="number" value="0" min="0" max="4095"></div>
+    <div class="control"><label for="maxValue">上限</label><input id="maxValue" type="number" value="4095" min="1" max="65535"></div>
+    <div class="control"><input id="invert" type="checkbox"><label for="invert">低值代表按压</label></div>
+    <div class="status"><i id="statusDot" class="dot"></i><span id="statusText">未连接</span></div>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="card-title"><span>点位热力图</span><small>A0-A3 · B0-B3 · C0-C3 · D0-D3 · E0-E3 · F0-F47</small></div>
+      <svg id="gloveSvg" viewBox="0 0 820 720" role="img" aria-label="68点触觉手套点阵">
+        <path class="hand-outline" d="M238 665 L225 430 L205 385 L132 445 L78 400 L88 337 L137 282 L205 350 L208 126 Q208 72 252 72 Q292 74 292 126 L292 298 L315 292 L330 79 Q334 24 378 25 Q421 27 420 83 L418 280 L444 280 L461 105 Q466 54 510 57 Q553 61 548 115 L535 300 L561 307 L580 174 Q587 128 628 135 Q669 143 659 192 L635 358 L681 371 L690 665 Z"/>
+        <rect class="palm-outline" x="280" y="326" width="330" height="272" rx="24"/>
+        <text class="group-label" x="112" y="470">大拇指 A</text>
+        <text class="group-label" x="237" y="48">食指 B</text>
+        <text class="group-label" x="367" y="18">中指 C</text>
+        <text class="group-label" x="497" y="49">无名指 D</text>
+        <text class="group-label" x="625" y="119">小拇指 E</text>
+        <text class="group-label" x="420" y="625">手掌 F</text>
+        <g id="pointLayer"></g>
+      </svg>
+    </section>
+
+    <aside>
+      <section class="card">
+        <div class="card-title"><span>实时状态</span><small id="modeText">等待数据</small></div>
+        <div class="metrics">
+          <div class="metric"><span>序号</span><strong id="seqValue">--</strong></div>
+          <div class="metric"><span>帧率</span><strong><b id="fpsValue">0</b><small> Hz</small></strong></div>
+          <div class="metric"><span>接收帧</span><strong id="frameValue">0</strong></div>
+          <div class="metric"><span>跳号</span><strong id="dropValue">0</strong></div>
+          <div class="metric"><span>最小值</span><strong id="frameMin">--</strong></div>
+          <div class="metric"><span>最大值</span><strong id="frameMax">--</strong></div>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-title"><span>分区强度</span><small>当前最大值</small></div>
+        <div id="groupBars" class="groups"></div>
+      </section>
+      <section class="card log">
+        <p id="message">点击“连接串口”，选择固件 USART2 对应的串口。浏览器需使用 Chrome 或 Edge。</p>
+        <textarea id="rawLine" readonly placeholder="最新一帧原始文本"></textarea>
+      </section>
+    </aside>
+  </main>
+  <footer>串口格式：TOUCH seq=... thumb=4值 index=4值 middle=4值 ring=4值 little=4值 palm=48值</footer>
+
+  <script>
+    const svgNs = "http://www.w3.org/2000/svg";
+    const groups = [
+      {key:"thumb", name:"大拇指", prefix:"A", start:0, count:4},
+      {key:"index", name:"食指", prefix:"B", start:4, count:4},
+      {key:"middle", name:"中指", prefix:"C", start:8, count:4},
+      {key:"ring", name:"无名指", prefix:"D", start:12, count:4},
+      {key:"little", name:"小拇指", prefix:"E", start:16, count:4},
+      {key:"palm", name:"手掌", prefix:"F", start:20, count:48}
+    ];
+    const fingerCoords = [
+      [126,330],[154,315],[151,392],[179,377],
+      [240,112],[265,112],[240,205],[265,205],
+      [364,72],[390,72],[364,166],[390,166],
+      [485,105],[511,105],[485,194],[511,194],
+      [604,180],[630,180],[604,256],[630,256]
+    ];
+    const points = [];
+    const rowCol = [];
+    const fingerRows = [[14,13],[12,11],[10,9],[8,7],[6,5]];
+    groups.slice(0,5).forEach((group, finger) => {
+      for (let n=0; n<4; n++) {
+        const index = group.start+n;
+        points.push({index, label:group.prefix+n, x:fingerCoords[index][0], y:fingerCoords[index][1], group:group.key});
+        rowCol[index] = {row:fingerRows[finger][n%2], col:7+Math.floor(n/2)};
+      }
+    });
+    for (let n=0; n<48; n++) {
+      const visualRow = Math.floor(n/8), visualCol = n%8, index=20+n;
+      points.push({index, label:"F"+n, x:305+visualCol*41, y:354+visualRow*45, group:"palm"});
+      rowCol[index] = {row:12-(n%8), col:9+Math.floor(n/8)};
+    }
+
+    const els = Object.fromEntries(["connectBtn","demoBtn","baud","minValue","maxValue","invert","statusDot","statusText","modeText","seqValue","fpsValue","frameValue","dropValue","frameMin","frameMax","groupBars","message","rawLine","pointLayer"].map(id => [id, document.getElementById(id)]));
+    const pointEls = [];
+    let serialPort=null, reader=null, reading=false, textBuffer="", demoTimer=null;
+    let frameCount=0, dropCount=0, lastSeq=null, fpsFrames=0, fpsStart=performance.now();
+    let latestValues=new Array(68).fill(0), renderPending=false;
+
+    function createSvg(tag, attrs={}) {
+      const node=document.createElementNS(svgNs, tag);
+      Object.entries(attrs).forEach(([k,v]) => node.setAttribute(k,v));
+      return node;
+    }
+    points.sort((a,b)=>a.index-b.index).forEach(point => {
+      const g=createSvg("g", {class:"point", transform:`translate(${point.x} ${point.y})`});
+      const circle=createSvg("circle", {r:18, fill:"#18374c"});
+      const label=createSvg("text", {class:"label", y:-2}); label.textContent=point.label;
+      const value=createSvg("text", {class:"value", y:11}); value.textContent="0";
+      const title=createSvg("title"); title.textContent=`${point.label} · Row_${rowCol[point.index].row} · Col_${rowCol[point.index].col}`;
+      g.append(circle,label,value,title); els.pointLayer.appendChild(g);
+      pointEls[point.index]={circle,value,title};
+    });
+    groups.forEach(group => {
+      const row=document.createElement("div"); row.className="group-row"; row.dataset.group=group.key;
+      row.innerHTML=`<span>${group.name}</span><div class="bar"><i></i></div><output>0</output>`;
+      els.groupBars.appendChild(row);
+    });
+
+    function setStatus(text, live=false) {
+      els.statusText.textContent=text; els.statusDot.classList.toggle("live", live);
+    }
+    function colorFor(level) {
+      const t=Math.max(0,Math.min(1,level));
+      const hue=215*(1-t); return `hsl(${hue} 88% ${38+18*t}%)`;
+    }
+    function scheduleRender(values) {
+      latestValues=values;
+      if (!renderPending) { renderPending=true; requestAnimationFrame(renderFrame); }
+    }
+    function renderFrame() {
+      renderPending=false;
+      let low=Number(els.minValue.value)||0, high=Number(els.maxValue.value)||4095;
+      if (high<=low) high=low+1;
+      const invert=els.invert.checked;
+      latestValues.forEach((raw,index) => {
+        let level=(raw-low)/(high-low); if (invert) level=1-level;
+        level=Math.max(0,Math.min(1,level));
+        pointEls[index].circle.setAttribute("fill",colorFor(level));
+        pointEls[index].circle.setAttribute("r",String(15+level*7));
+        pointEls[index].value.textContent=String(raw);
+        pointEls[index].title.textContent=`${points[index].label} · Row_${rowCol[index].row} · Col_${rowCol[index].col} · ${raw}`;
+      });
+      els.frameMin.textContent=Math.min(...latestValues);
+      els.frameMax.textContent=Math.max(...latestValues);
+      groups.forEach(group => {
+        const max=Math.max(...latestValues.slice(group.start,group.start+group.count));
+        let level=(max-low)/(high-low); if (invert) level=1-level;
+        const row=els.groupBars.querySelector(`[data-group="${group.key}"]`);
+        row.querySelector("i").style.width=`${Math.max(0,Math.min(100,level*100))}%`;
+        row.querySelector("output").textContent=max;
+      });
+    }
+
+    function parseTouchLine(line) {
+      if (!line.startsWith("TOUCH seq=")) return null;
+      const seqMatch=line.match(/^TOUCH seq=(\d+)/); if (!seqMatch) return null;
+      const values=[];
+      for (const group of groups) {
+        const match=line.match(new RegExp(`(?:^|\\s)${group.key}=([0-9,]+)`));
+        if (!match) return null;
+        const part=match[1].split(",").map(Number);
+        if (part.length!==group.count || part.some(v=>!Number.isFinite(v))) return null;
+        values.push(...part);
+      }
+      return {seq:Number(seqMatch[1]), values};
+    }
+    function acceptFrame(frame, raw="") {
+      if (lastSeq!==null && frame.seq>lastSeq+1) dropCount+=frame.seq-lastSeq-1;
+      lastSeq=frame.seq; frameCount++; fpsFrames++;
+      els.seqValue.textContent=frame.seq; els.frameValue.textContent=frameCount; els.dropValue.textContent=dropCount;
+      if (raw) els.rawLine.value=raw;
+      const now=performance.now();
+      if (now-fpsStart>=500) { els.fpsValue.textContent=(fpsFrames*1000/(now-fpsStart)).toFixed(1); fpsFrames=0; fpsStart=now; }
+      scheduleRender(frame.values);
+    }
+    function consumeText(text) {
+      textBuffer+=text;
+      let end;
+      while ((end=textBuffer.indexOf("\n"))>=0) {
+        const line=textBuffer.slice(0,end).trim(); textBuffer=textBuffer.slice(end+1);
+        const frame=parseTouchLine(line); if (frame) acceptFrame(frame,line);
+      }
+    }
+
+    async function connectSerial() {
+      if (!("serial" in navigator)) {
+        els.message.textContent="当前浏览器不支持 Web Serial，请用 Chrome/Edge 并通过本地服务器打开。"; return;
+      }
+      stopDemo();
+      try {
+        serialPort=await navigator.serial.requestPort();
+        await serialPort.open({baudRate:Number(els.baud.value)||921600});
+        reader=serialPort.readable.getReader(); reading=true;
+        els.connectBtn.textContent="断开串口"; els.modeText.textContent="串口实时"; setStatus("串口已连接",true);
+        els.message.textContent="正在接收 TOUCH 文本帧。按压触点后，对应圆点应立即变色。";
+        while (reading) {
+          const {value,done}=await reader.read(); if (done) break;
+          if (value) consumeText(new TextDecoder().decode(value,{stream:true}));
+        }
+      } catch (error) {
+        if (reading) els.message.textContent=`串口错误：${error.message}`;
+      } finally {
+        if (reader) { reader.releaseLock(); reader=null; }
+        if (serialPort) { try { await serialPort.close(); } catch (_) {} serialPort=null; }
+        reading=false; els.connectBtn.textContent="连接串口"; setStatus("未连接",false);
+      }
+    }
+    async function disconnectSerial() {
+      reading=false; if (reader) { try { await reader.cancel(); } catch (_) {} }
+    }
+    function startDemo() {
+      if (demoTimer) { stopDemo(); return; }
+      if (reading) disconnectSerial();
+      let seq=0; els.demoBtn.textContent="停止演示"; els.modeText.textContent="演示数据"; setStatus("演示运行中",true);
+      demoTimer=setInterval(() => {
+        const center=(seq/5)%68, values=new Array(68).fill(0).map((_,i)=>Math.round(180+3600*Math.exp(-Math.pow(i-center,2)/12)));
+        acceptFrame({seq:seq++,values});
+      },20);
+    }
+    function stopDemo() {
+      if (demoTimer) clearInterval(demoTimer); demoTimer=null; els.demoBtn.textContent="演示模式";
+      if (!reading) { els.modeText.textContent="等待数据"; setStatus("未连接",false); }
+    }
+
+    els.connectBtn.addEventListener("click",()=>reading?disconnectSerial():connectSerial());
+    els.demoBtn.addEventListener("click",startDemo);
+    [els.minValue,els.maxValue,els.invert].forEach(el=>el.addEventListener("input",()=>scheduleRender(latestValues)));
+    navigator.serial?.addEventListener("disconnect",()=>disconnectSerial());
+    window.__touchViewerTest={parseTouchLine,acceptFrame,points,rowCol};
+    scheduleRender(latestValues);
+  </script>
+</body>
+</html>

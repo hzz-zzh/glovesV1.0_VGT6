@@ -11,12 +11,7 @@
 
 #define TOUCH_ADC_DEBUG_ENABLE         (0U)
 #define TOUCH_ADC_STREAM_ENABLE        (1U)
-#define TOUCH_ADC_STREAM_HEADER_0      (0xAAU)
-#define TOUCH_ADC_STREAM_HEADER_1      (0x55U)
-#define TOUCH_ADC_STREAM_TAIL_0        (0x55U)
-#define TOUCH_ADC_STREAM_TAIL_1        (0xAAU)
-#define TOUCH_ADC_STREAM_DATA_BYTES    (GLOVE_TOUCH_COUNT * 2U)
-#define TOUCH_ADC_STREAM_FRAME_SIZE    (2U + 4U + 1U + TOUCH_ADC_STREAM_DATA_BYTES + 2U + 2U)
+#define TOUCH_ADC_STREAM_BUFFER_SIZE   (512U)
 #define TOUCH_ADC_DEBUG_PRINT_PERIOD   (1U)
 #define TOUCH_ADC_DEBUG_PRINT_DETAILS  (1U)
 #define TOUCH_ADC_DEBUG_PRINT_STATUS   (1U)
@@ -49,12 +44,35 @@
 #define TOUCH_ADC_FINGER_COUNT          (5U)
 #define TOUCH_ADC_FINGER_BASE_COUNT     (TOUCH_ADC_FINGER_COUNT * TOUCH_ADC_POINTS_PER_FINGER)
 #define TOUCH_ADC_INVALID_INDEX         (0xFFFFU)
-#define TOUCH_ADC_MUX_SETTLE_NOP_COUNT  (64U)
+#define TOUCH_ADC_MUX_SETTLE_US         (80U)
+#define TOUCH_ADC_DELAY_LOOP_CYCLES_PER_ITERATION (4U)
 
 #if GLOVE_TOUCH_COUNT != (TOUCH_ADC_FINGER_BASE_COUNT + \
     ((TOUCH_ADC_PALM_LAST_COLUMN - TOUCH_ADC_PALM_FIRST_COLUMN + 1U) * TOUCH_ADC_PALM_ROWS))
 #error "GLOVE_TOUCH_COUNT must match the 68-point touch layout"
 #endif
+
+typedef struct
+{
+  uint8_t row;
+  uint8_t col;
+} TouchAdcPointMap_t;
+
+/* Exact index -> Row/Col order from the 68-point touch layout drawing. */
+static const TouchAdcPointMap_t s_touch_point_map[GLOVE_TOUCH_COUNT] =
+{
+  {14U, 7U}, {13U, 7U}, {14U, 8U}, {13U, 8U}, /* A0..A3 */
+  {12U, 7U}, {11U, 7U}, {12U, 8U}, {11U, 8U}, /* B0..B3 */
+  {10U, 7U}, { 9U, 7U}, {10U, 8U}, { 9U, 8U}, /* C0..C3 */
+  { 8U, 7U}, { 7U, 7U}, { 8U, 8U}, { 7U, 8U}, /* D0..D3 */
+  { 6U, 7U}, { 5U, 7U}, { 6U, 8U}, { 5U, 8U}, /* E0..E3 */
+  {12U, 9U}, {11U, 9U}, {10U, 9U}, { 9U, 9U}, { 8U, 9U}, { 7U, 9U}, { 6U, 9U}, { 5U, 9U},
+  {12U,10U}, {11U,10U}, {10U,10U}, { 9U,10U}, { 8U,10U}, { 7U,10U}, { 6U,10U}, { 5U,10U},
+  {12U,11U}, {11U,11U}, {10U,11U}, { 9U,11U}, { 8U,11U}, { 7U,11U}, { 6U,11U}, { 5U,11U},
+  {12U,12U}, {11U,12U}, {10U,12U}, { 9U,12U}, { 8U,12U}, { 7U,12U}, { 6U,12U}, { 5U,12U},
+  {12U,13U}, {11U,13U}, {10U,13U}, { 9U,13U}, { 8U,13U}, { 7U,13U}, { 6U,13U}, { 5U,13U},
+  {12U,14U}, {11U,14U}, {10U,14U}, { 9U,14U}, { 8U,14U}, { 7U,14U}, { 6U,14U}, { 5U,14U}
+};
 
 /* ROW_SEL0 high selects the first row in each analog switch pair. */
 static const uint8_t s_touch_rows_sel_high[TOUCH_ADC_CHANNEL_COUNT] =
@@ -73,79 +91,148 @@ static osThreadId_t s_touch_adc_task_id = NULL;
 static uint8_t s_touch_adc_trace_frame = 0U;
 static uint8_t s_touch_adc_trace_dma_once = 0U;
 static uint8_t s_touch_adc_debug_print_once = 1U;
+static uint8_t s_touch_adc_cycle_counter_ready = 0U;
+
+static void TouchAdcTask_InitCycleCounter(void)
+{
+  uint32_t start_cycles;
+  uint32_t end_cycles;
+
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0U;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+  start_cycles = DWT->CYCCNT;
+  __NOP();
+  __NOP();
+  __NOP();
+  end_cycles = DWT->CYCCNT;
+  s_touch_adc_cycle_counter_ready =
+      (((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U) &&
+       (end_cycles != start_cycles)) ? 1U : 0U;
+}
+
+static void TouchAdcTask_DelayUs(uint32_t delay_us)
+{
+  uint64_t target_cycles_64;
+  uint32_t cycles_per_us;
+  uint32_t target_cycles;
+  uint32_t start_cycles;
+  volatile uint32_t fallback_count;
+
+  if (delay_us == 0U)
+  {
+    return;
+  }
+
+  cycles_per_us = SystemCoreClock / 1000000U;
+  if (cycles_per_us == 0U)
+  {
+    cycles_per_us = 1U;
+  }
+
+  target_cycles_64 = (uint64_t)delay_us * (uint64_t)cycles_per_us;
+  target_cycles = (target_cycles_64 > 0xFFFFFFFFULL) ?
+                  0xFFFFFFFFUL : (uint32_t)target_cycles_64;
+
+  if ((s_touch_adc_cycle_counter_ready != 0U) &&
+      ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U))
+  {
+    start_cycles = DWT->CYCCNT;
+    while ((uint32_t)(DWT->CYCCNT - start_cycles) < target_cycles)
+    {
+      __NOP();
+    }
+    return;
+  }
+
+  fallback_count = (target_cycles + TOUCH_ADC_DELAY_LOOP_CYCLES_PER_ITERATION - 1U) /
+                   TOUCH_ADC_DELAY_LOOP_CYCLES_PER_ITERATION;
+  while (fallback_count > 0U)
+  {
+    __NOP();
+    fallback_count--;
+  }
+}
 
 #if (TOUCH_ADC_STREAM_ENABLE != 0U)
-static uint16_t TouchAdcTask_Crc16Modbus(const uint8_t *data, uint32_t length)
+static uint8_t TouchAdcTask_AppendGroup(char *buffer,
+                                        uint32_t buffer_size,
+                                        uint32_t *length,
+                                        const char *name,
+                                        const GloveTouchSensorBlock_t *block,
+                                        uint32_t base,
+                                        uint32_t count)
 {
-  uint16_t crc = 0xFFFFU;
-  uint32_t byte_index;
+  int written;
+  uint32_t index;
 
-  if (data == NULL)
+  if ((buffer == NULL) || (length == NULL) || (name == NULL) ||
+      (block == NULL) || (*length >= buffer_size) ||
+      (base > GLOVE_TOUCH_COUNT) || (count > (GLOVE_TOUCH_COUNT - base)))
   {
     return 0U;
   }
 
-  for (byte_index = 0U; byte_index < length; byte_index++)
+  written = snprintf(&buffer[*length], buffer_size - *length, " %s=", name);
+  if ((written < 0) || ((uint32_t)written >= (buffer_size - *length)))
   {
-    uint32_t bit_index;
+    return 0U;
+  }
+  *length += (uint32_t)written;
 
-    crc ^= data[byte_index];
-    for (bit_index = 0U; bit_index < 8U; bit_index++)
+  for (index = 0U; index < count; index++)
+  {
+    written = snprintf(&buffer[*length],
+                       buffer_size - *length,
+                       (index == 0U) ? "%u" : ",%u",
+                       (unsigned int)block->data.touch[base + index].value);
+    if ((written < 0) || ((uint32_t)written >= (buffer_size - *length)))
     {
-      if ((crc & 0x0001U) != 0U)
-      {
-        crc = (uint16_t)((crc >> 1U) ^ 0xA001U);
-      }
-      else
-      {
-        crc >>= 1U;
-      }
+      return 0U;
     }
+    *length += (uint32_t)written;
   }
 
-  return crc;
+  return 1U;
 }
 
 static void TouchAdcTask_StreamSamples(uint32_t seq,
                                        const GloveTouchSensorBlock_t *block)
 {
-  uint8_t frame[TOUCH_ADC_STREAM_FRAME_SIZE];
-  uint32_t offset = 0U;
-  uint32_t index;
-  uint16_t crc;
+  char line[TOUCH_ADC_STREAM_BUFFER_SIZE];
+  uint32_t length;
+  int written;
 
   if (block == NULL)
   {
     return;
   }
 
-  frame[offset++] = TOUCH_ADC_STREAM_HEADER_0;
-  frame[offset++] = TOUCH_ADC_STREAM_HEADER_1;
-
-  /* Sequence number, little-endian. */
-  frame[offset++] = (uint8_t)(seq & 0xFFU);
-  frame[offset++] = (uint8_t)((seq >> 8U) & 0xFFU);
-  frame[offset++] = (uint8_t)((seq >> 16U) & 0xFFU);
-  frame[offset++] = (uint8_t)((seq >> 24U) & 0xFFU);
-  frame[offset++] = (uint8_t)GLOVE_TOUCH_COUNT;
-
-  /* A0..E3, then F0..F47; each value is uint16 little-endian. */
-  for (index = 0U; index < GLOVE_TOUCH_COUNT; index++)
+  written = snprintf(line, sizeof(line), "TOUCH seq=%lu", (unsigned long)seq);
+  if ((written < 0) || ((uint32_t)written >= sizeof(line)))
   {
-    uint16_t value = block->data.touch[index].value;
+    return;
+  }
+  length = (uint32_t)written;
 
-    frame[offset++] = (uint8_t)(value & 0xFFU);
-    frame[offset++] = (uint8_t)((value >> 8U) & 0xFFU);
+  /* touch[] order: thumb, index, middle, ring, little, then palm. */
+  if ((TouchAdcTask_AppendGroup(line, sizeof(line), &length, "thumb", block, 0U, 4U) == 0U) ||
+      (TouchAdcTask_AppendGroup(line, sizeof(line), &length, "index", block, 4U, 4U) == 0U) ||
+      (TouchAdcTask_AppendGroup(line, sizeof(line), &length, "middle", block, 8U, 4U) == 0U) ||
+      (TouchAdcTask_AppendGroup(line, sizeof(line), &length, "ring", block, 12U, 4U) == 0U) ||
+      (TouchAdcTask_AppendGroup(line, sizeof(line), &length, "little", block, 16U, 4U) == 0U) ||
+      (TouchAdcTask_AppendGroup(line, sizeof(line), &length, "palm", block, 20U,
+                                GLOVE_TOUCH_COUNT - 20U) == 0U) ||
+      ((sizeof(line) - length) < 3U))
+  {
+    return;
   }
 
-  /* CRC covers seq, point count and all touch data; CRC is low byte first. */
-  crc = TouchAdcTask_Crc16Modbus(&frame[2], offset - 2U);
-  frame[offset++] = (uint8_t)(crc & 0xFFU);
-  frame[offset++] = (uint8_t)((crc >> 8U) & 0xFFU);
-  frame[offset++] = TOUCH_ADC_STREAM_TAIL_0;
-  frame[offset++] = TOUCH_ADC_STREAM_TAIL_1;
-
-  UartRedirect_WriteData(frame, (uint16_t)offset);
+  line[length++] = '\r';
+  line[length++] = '\n';
+  line[length] = '\0';
+  UartRedirect_WriteData(line, (uint16_t)length);
 }
 #endif
 
@@ -378,12 +465,7 @@ static void TouchAdcTask_PrintPublishError(uint32_t seq,
 
 static void TouchAdcTask_MuxSettle(void)
 {
-  volatile uint32_t delay;
-
-  for (delay = 0U; delay < TOUCH_ADC_MUX_SETTLE_NOP_COUNT; delay++)
-  {
-    __NOP();
-  }
+  TouchAdcTask_DelayUs(TOUCH_ADC_MUX_SETTLE_US);
 }
 
 static void TouchAdcTask_DisableColumns(void)
@@ -490,32 +572,15 @@ static void TouchAdcTask_RunMuxHoldTest(void)
 /* touch[] follows layout labels: A0..E3, then F0..F47. */
 static uint16_t TouchAdcTask_MapTouchIndex(uint8_t row, uint8_t col)
 {
-  uint8_t row_from_top;
-  uint8_t finger_index;
-  uint8_t point_in_finger;
-  uint16_t palm_index;
+  uint16_t index;
 
-  if ((col >= TOUCH_ADC_FINGER_FIRST_COLUMN) &&
-      (col <= TOUCH_ADC_FINGER_LAST_COLUMN) &&
-      (row >= TOUCH_ADC_FINGER_FIRST_ROW) &&
-      (row <= TOUCH_ADC_FINGER_LAST_ROW))
+  for (index = 0U; index < GLOVE_TOUCH_COUNT; index++)
   {
-    row_from_top = (uint8_t)(TOUCH_ADC_FINGER_LAST_ROW - row);
-    finger_index = (uint8_t)(row_from_top / TOUCH_ADC_ROWS_PER_FINGER);
-    point_in_finger = (uint8_t)(((col - TOUCH_ADC_FINGER_FIRST_COLUMN) * TOUCH_ADC_ROWS_PER_FINGER) +
-                                (row_from_top % TOUCH_ADC_ROWS_PER_FINGER));
-    return (uint16_t)((finger_index * TOUCH_ADC_POINTS_PER_FINGER) + point_in_finger);
-  }
-
-  if ((col >= TOUCH_ADC_PALM_FIRST_COLUMN) &&
-      (col <= TOUCH_ADC_PALM_LAST_COLUMN) &&
-      (row >= TOUCH_ADC_PALM_FIRST_ROW) &&
-      (row <= TOUCH_ADC_PALM_LAST_ROW))
-  {
-    palm_index = (uint16_t)(((uint16_t)(col - TOUCH_ADC_PALM_FIRST_COLUMN) *
-                             TOUCH_ADC_PALM_ROWS) +
-                            (uint16_t)(TOUCH_ADC_PALM_LAST_ROW - row));
-    return (uint16_t)(TOUCH_ADC_FINGER_BASE_COUNT + palm_index);
+    if ((s_touch_point_map[index].row == row) &&
+        (s_touch_point_map[index].col == col))
+    {
+      return index;
+    }
   }
 
   return TOUCH_ADC_INVALID_INDEX;
@@ -731,6 +796,7 @@ void TouchAdcTask(void *argument)
   (void)argument;
 
   s_touch_adc_task_id = osThreadGetId();
+  TouchAdcTask_InitCycleCounter();
   AcqSync_RegisterTouchTask(s_touch_adc_task_id);
   TouchAdcTask_PrintStartup();
 #if (TOUCH_ADC_MUX_HOLD_TEST_ENABLE != 0U)

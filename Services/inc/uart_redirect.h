@@ -10,7 +10,7 @@ int fgetc(FILE *f);
 void UartRedirect_SetPrintfEnabled(uint8_t enabled);
 
 /** Send an application data stream even when generic printf is suppressed. */
-void UartRedirect_WriteData(const uint8_t *data, uint16_t length);
+void UartRedirect_WriteData(const char *data, uint16_t length);
 
 #endif
 

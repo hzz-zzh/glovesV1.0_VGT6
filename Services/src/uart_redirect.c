@@ -25,13 +25,13 @@ void UartRedirect_SetPrintfEnabled(uint8_t enabled)
   s_uart_printf_enabled = (enabled != 0U) ? 1U : 0U;
 }
 
-void UartRedirect_WriteData(const uint8_t *data, uint16_t length)
+void UartRedirect_WriteData(const char *data, uint16_t length)
 {
   if ((data == NULL) || (length == 0U))
   {
     return;
   }
 
-  (void)HAL_UART_Transmit(&huart2, data, length, 0xffffU);
+  (void)HAL_UART_Transmit(&huart2, (const uint8_t *)data, length, 0xffffU);
 }
 
