@@ -51,13 +51,13 @@
 /* ROW_SEL0 high selects the first row in each analog switch pair. */
 static const uint8_t s_touch_rows_sel_high[TOUCH_ADC_CHANNEL_COUNT] =
 {
-  0U, 1U, 4U, 5U, 8U, 9U, 14U, 12U
+  0U, 1U, 4U, 8U, 5U, 9U, 14U, 12U
 };
 
 /* ROW_SEL0 low selects the second row in each analog switch pair. */
 static const uint8_t s_touch_rows_sel_low[TOUCH_ADC_CHANNEL_COUNT] =
 {
-  3U, 2U, 7U, 6U, 11U, 10U, 13U, 15U
+  3U, 2U, 7U, 11U, 6U, 10U, 13U, 15U
 };
 
 static uint32_t s_touch_adc_dma_storage[TOUCH_ADC_CHANNEL_COUNT / 2U];
