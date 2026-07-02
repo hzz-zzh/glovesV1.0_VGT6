@@ -45,6 +45,7 @@
     .dot.live { background: var(--accent); box-shadow: 0 0 0 4px #39d6c530; }
 
     main { display: grid; grid-template-columns: minmax(580px, 1fr) 310px; gap: 16px; padding: 16px; }
+    .visuals { display: grid; gap: 16px; align-content: start; }
     .card { background: linear-gradient(145deg, rgba(18,34,50,.94), rgba(10,23,34,.94)); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
     .card-title { display: flex; justify-content: space-between; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); font-weight: 650; }
     .card-title small { color: var(--muted); font-weight: 400; }
@@ -67,6 +68,14 @@
     .bar { height: 8px; border-radius: 6px; background: #061019; overflow: hidden; }
     .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #2178c8, #37dec0, #ffe66d, #ff5d6c); transition: width .1s; }
     .group-row output { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+    .matrix-wrap { overflow-x: auto; padding: 12px; }
+    .raw-matrix { display: grid; grid-template-columns: 48px repeat(8, minmax(54px, 1fr)); gap: 4px; min-width: 610px; }
+    .matrix-head, .matrix-row-label, .matrix-cell {
+      min-height: 34px; display: flex; align-items: center; justify-content: center;
+      border: 1px solid var(--line); border-radius: 6px; font: 12px Consolas, monospace;
+    }
+    .matrix-head, .matrix-row-label { color: var(--muted); background: #07131d; font-weight: 700; }
+    .matrix-cell { color: white; background: #18374c; transition: background .08s linear; }
     .log { padding: 12px; }
     #message { color: var(--muted); min-height: 42px; margin: 0 0 10px; font-size: 13px; line-height: 1.5; }
     #rawLine { width: 100%; height: 96px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: #061019; color: #85a5b9; font: 11px Consolas, monospace; }
@@ -92,6 +101,7 @@
   </header>
 
   <main>
+    <div class="visuals">
     <section class="card">
       <div class="card-title"><span>点位热力图</span><small>A0-A3 · B0-B3 · C0-C3 · D0-D3 · E0-E3 · F0-F47</small></div>
       <svg id="gloveSvg" viewBox="0 0 820 720" role="img" aria-label="68点触觉手套点阵">
@@ -106,6 +116,11 @@
         <g id="pointLayer"></g>
       </svg>
     </section>
+    <section class="card">
+      <div class="card-title"><span>行列扫描原始矩阵</span><small>R15-R0 × C7-C14 · 最新行序号 <b id="rawSeq">--</b></small></div>
+      <div class="matrix-wrap"><div id="rawMatrix" class="raw-matrix"></div></div>
+    </section>
+    </div>
 
     <aside>
       <section class="card">
@@ -129,7 +144,7 @@
       </section>
     </aside>
   </main>
-  <footer>串口格式：TOUCH seq=... thumb=4值 index=4值 middle=4值 ring=4值 little=4值 palm=48值</footer>
+  <footer>映射帧：TOUCH seq=... · 原始行：MATRIX seq=... row=... col_start=7 values=8值</footer>
 
   <script>
     const svgNs = "http://www.w3.org/2000/svg";
@@ -164,8 +179,9 @@
       rowCol[index] = {row:12-(n%8), col:9+Math.floor(n/8)};
     }
 
-    const els = Object.fromEntries(["connectBtn","demoBtn","baud","minValue","maxValue","invert","statusDot","statusText","modeText","seqValue","fpsValue","frameValue","dropValue","frameMin","frameMax","groupBars","message","rawLine","pointLayer"].map(id => [id, document.getElementById(id)]));
+    const els = Object.fromEntries(["connectBtn","demoBtn","baud","minValue","maxValue","invert","statusDot","statusText","modeText","seqValue","fpsValue","frameValue","dropValue","frameMin","frameMax","groupBars","message","rawLine","pointLayer","rawMatrix","rawSeq"].map(id => [id, document.getElementById(id)]));
     const pointEls = [];
+    const rawCells = Array.from({length:16},()=>new Array(8));
     let serialPort=null, reader=null, reading=false, textBuffer="", demoTimer=null;
     let frameCount=0, dropCount=0, lastSeq=null, fpsFrames=0, fpsStart=performance.now();
     let latestValues=new Array(68).fill(0), renderPending=false;
@@ -189,6 +205,16 @@
       row.innerHTML=`<span>${group.name}</span><div class="bar"><i></i></div><output>0</output>`;
       els.groupBars.appendChild(row);
     });
+    ["", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14"].forEach(text => {
+      const cell=document.createElement("div"); cell.className="matrix-head"; cell.textContent=text; els.rawMatrix.appendChild(cell);
+    });
+    for (let row=15; row>=0; row--) {
+      const label=document.createElement("div"); label.className="matrix-row-label"; label.textContent=`R${row}`; els.rawMatrix.appendChild(label);
+      for (let column=0; column<8; column++) {
+        const cell=document.createElement("div"); cell.className="matrix-cell"; cell.textContent="0";
+        cell.title=`Row_${row} · Col_${column+7}`; els.rawMatrix.appendChild(cell); rawCells[row][column]=cell;
+      }
+    }
 
     function setStatus(text, live=false) {
       els.statusText.textContent=text; els.statusDot.classList.toggle("live", live);
@@ -224,6 +250,18 @@
         row.querySelector("output").textContent=max;
       });
     }
+    function renderRawRow(row, values, seq) {
+      let low=Number(els.minValue.value)||0, high=Number(els.maxValue.value)||4095;
+      if (high<=low) high=low+1;
+      values.forEach((raw,column) => {
+        let level=(raw-low)/(high-low); if (els.invert.checked) level=1-level;
+        level=Math.max(0,Math.min(1,level));
+        rawCells[row][column].style.background=colorFor(level);
+        rawCells[row][column].textContent=String(raw);
+        rawCells[row][column].title=`Row_${row} · Col_${column+7} · ${raw}`;
+      });
+      els.rawSeq.textContent=String(seq);
+    }
 
     function parseTouchLine(line) {
       if (!line.startsWith("TOUCH seq=")) return null;
@@ -237,6 +275,14 @@
         values.push(...part);
       }
       return {seq:Number(seqMatch[1]), values};
+    }
+    function parseMatrixLine(line) {
+      const match=line.match(/^MATRIX seq=(\d+) row=(\d+) col_start=(\d+) values=([0-9,]+)$/);
+      if (!match) return null;
+      const values=match[4].split(",").map(Number);
+      const row=Number(match[2]), colStart=Number(match[3]);
+      if (row<0 || row>=16 || colStart!==7 || values.length!==8 || values.some(v=>!Number.isFinite(v))) return null;
+      return {seq:Number(match[1]), row, values};
     }
     function acceptFrame(frame, raw="") {
       if (lastSeq!==null && frame.seq>lastSeq+1) dropCount+=frame.seq-lastSeq-1;
@@ -252,7 +298,10 @@
       let end;
       while ((end=textBuffer.indexOf("\n"))>=0) {
         const line=textBuffer.slice(0,end).trim(); textBuffer=textBuffer.slice(end+1);
-        const frame=parseTouchLine(line); if (frame) acceptFrame(frame,line);
+        const frame=parseTouchLine(line);
+        if (frame) { acceptFrame(frame,line); continue; }
+        const matrixRow=parseMatrixLine(line);
+        if (matrixRow) renderRawRow(matrixRow.row,matrixRow.values,matrixRow.seq);
       }
     }
 
@@ -288,7 +337,9 @@
       let seq=0; els.demoBtn.textContent="停止演示"; els.modeText.textContent="演示数据"; setStatus("演示运行中",true);
       demoTimer=setInterval(() => {
         const center=(seq/5)%68, values=new Array(68).fill(0).map((_,i)=>Math.round(180+3600*Math.exp(-Math.pow(i-center,2)/12)));
-        acceptFrame({seq:seq++,values});
+        const rawRow=15-(seq%16);
+        const rawValues=new Array(8).fill(0).map((_,column)=>Math.round(180+3600*Math.exp(-(Math.pow(rawRow-8,2)+Math.pow(column-3.5,2))/16)));
+        acceptFrame({seq,values}); renderRawRow(rawRow,rawValues,seq); seq++;
       },20);
     }
     function stopDemo() {
@@ -300,7 +351,7 @@
     els.demoBtn.addEventListener("click",startDemo);
     [els.minValue,els.maxValue,els.invert].forEach(el=>el.addEventListener("input",()=>scheduleRender(latestValues)));
     navigator.serial?.addEventListener("disconnect",()=>disconnectSerial());
-    window.__touchViewerTest={parseTouchLine,acceptFrame,points,rowCol};
+    window.__touchViewerTest={parseTouchLine,parseMatrixLine,acceptFrame,points,rowCol};
     scheduleRender(latestValues);
   </script>
 </body>

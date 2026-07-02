@@ -12,6 +12,10 @@
 #define TOUCH_ADC_DEBUG_ENABLE         (0U)
 #define TOUCH_ADC_STREAM_ENABLE        (1U)
 #define TOUCH_ADC_STREAM_BUFFER_SIZE   (512U)
+#define TOUCH_ADC_RAW_STREAM_ENABLE    (1U)
+#define TOUCH_ADC_RAW_ROW_COUNT        (16U)
+#define TOUCH_ADC_RAW_COLUMN_COUNT     (TOUCH_ADC_SCAN_LAST_COLUMN - TOUCH_ADC_SCAN_FIRST_COLUMN + 1U)
+#define TOUCH_ADC_RAW_STREAM_BUFFER_SIZE (128U)
 #define TOUCH_ADC_DEBUG_PRINT_PERIOD   (1U)
 #define TOUCH_ADC_DEBUG_PRINT_DETAILS  (1U)
 #define TOUCH_ADC_DEBUG_PRINT_STATUS   (1U)
@@ -77,13 +81,13 @@ static const TouchAdcPointMap_t s_touch_point_map[GLOVE_TOUCH_COUNT] =
 /* ROW_SEL0 high selects the first row in each analog switch pair. */
 static const uint8_t s_touch_rows_sel_high[TOUCH_ADC_CHANNEL_COUNT] =
 {
-  0U, 1U, 4U, 5U, 8U, 9U, 14U, 12U
+  0U, 1U, 4U, 8U, 5U, 9U, 14U, 12U
 };
 
 /* ROW_SEL0 low selects the second row in each analog switch pair. */
 static const uint8_t s_touch_rows_sel_low[TOUCH_ADC_CHANNEL_COUNT] =
 {
-  3U, 2U, 7U, 6U, 11U, 10U, 13U, 15U
+  3U, 2U, 7U, 11U, 6U, 10U, 13U, 15U
 };
 
 static uint32_t s_touch_adc_dma_storage[TOUCH_ADC_CHANNEL_COUNT / 2U];
@@ -92,6 +96,9 @@ static uint8_t s_touch_adc_trace_frame = 0U;
 static uint8_t s_touch_adc_trace_dma_once = 0U;
 static uint8_t s_touch_adc_debug_print_once = 1U;
 static uint8_t s_touch_adc_cycle_counter_ready = 0U;
+#if (TOUCH_ADC_RAW_STREAM_ENABLE != 0U)
+static uint16_t s_touch_adc_raw_matrix[TOUCH_ADC_RAW_ROW_COUNT][TOUCH_ADC_RAW_COLUMN_COUNT];
+#endif
 
 static void TouchAdcTask_InitCycleCounter(void)
 {
@@ -234,6 +241,52 @@ static void TouchAdcTask_StreamSamples(uint32_t seq,
   line[length] = '\0';
   UartRedirect_WriteData(line, (uint16_t)length);
 }
+
+#if (TOUCH_ADC_RAW_STREAM_ENABLE != 0U)
+static void TouchAdcTask_StreamRawRow(uint32_t seq)
+{
+  char line[TOUCH_ADC_RAW_STREAM_BUFFER_SIZE];
+  uint32_t length;
+  uint32_t column;
+  uint8_t row = (uint8_t)((TOUCH_ADC_RAW_ROW_COUNT - 1U) -
+                          (seq % TOUCH_ADC_RAW_ROW_COUNT));
+  int written;
+
+  written = snprintf(line,
+                     sizeof(line),
+                     "MATRIX seq=%lu row=%u col_start=%u values=",
+                     (unsigned long)seq,
+                     (unsigned int)row,
+                     (unsigned int)TOUCH_ADC_SCAN_FIRST_COLUMN);
+  if ((written < 0) || ((uint32_t)written >= sizeof(line)))
+  {
+    return;
+  }
+  length = (uint32_t)written;
+
+  for (column = 0U; column < TOUCH_ADC_RAW_COLUMN_COUNT; column++)
+  {
+    written = snprintf(&line[length],
+                       sizeof(line) - length,
+                       (column == 0U) ? "%u" : ",%u",
+                       (unsigned int)s_touch_adc_raw_matrix[row][column]);
+    if ((written < 0) || ((uint32_t)written >= (sizeof(line) - length)))
+    {
+      return;
+    }
+    length += (uint32_t)written;
+  }
+
+  if ((sizeof(line) - length) < 3U)
+  {
+    return;
+  }
+  line[length++] = '\r';
+  line[length++] = '\n';
+  line[length] = '\0';
+  UartRedirect_WriteData(line, (uint16_t)length);
+}
+#endif
 #endif
 
 static uint32_t TouchAdcTask_MsToTicks(uint32_t timeout_ms)
@@ -598,6 +651,15 @@ static void TouchAdcTask_StoreSample(GloveTouchSensorBlock_t *block,
     return;
   }
 
+#if (TOUCH_ADC_RAW_STREAM_ENABLE != 0U)
+  if ((row < TOUCH_ADC_RAW_ROW_COUNT) &&
+      (col >= TOUCH_ADC_SCAN_FIRST_COLUMN) &&
+      (col <= TOUCH_ADC_SCAN_LAST_COLUMN))
+  {
+    s_touch_adc_raw_matrix[row][col - TOUCH_ADC_SCAN_FIRST_COLUMN] = adc_value;
+  }
+#endif
+
   touch_index = TouchAdcTask_MapTouchIndex(row, col);
   if ((touch_index != TOUCH_ADC_INVALID_INDEX) && (touch_index < GLOVE_TOUCH_COUNT))
   {
@@ -826,6 +888,9 @@ void TouchAdcTask(void *argument)
         error_count = 0U;
 #if (TOUCH_ADC_STREAM_ENABLE != 0U)
         TouchAdcTask_StreamSamples(seq, touch);
+#if (TOUCH_ADC_RAW_STREAM_ENABLE != 0U)
+        TouchAdcTask_StreamRawRow(seq);
+#endif
 #endif
         TouchAdcTask_PrintSamples(seq, touch);
         publish_status = DataManager_PublishTouchSensor(touch, TOUCH_ADC_QUEUE_TIMEOUT_MS);
