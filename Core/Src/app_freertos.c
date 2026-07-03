@@ -143,6 +143,7 @@ const osThreadAttr_t storageTask_attributes = {
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
   GloveStatus_t dm_status = DataManager_Init();
+  UartRedirect_Init();
   printf("[RTOS] DataManager_Init status=%u\r\n", (unsigned int)dm_status);
 
   /* USER CODE END Init */

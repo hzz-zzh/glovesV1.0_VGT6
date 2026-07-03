@@ -27,16 +27,15 @@ GloveStatus_t HandSolve_InitDefaultLayout(HandSolveLayout_t *layout,
                                           GloveHandSide_t hand_side);
 
 /*
- * imu_valid_mask uses bit 0 for IMU id 1, bit 1 for IMU id 2, ... bit 15 for
- * IMU id 16. raw_quat is the project native array: raw_quat[imu_id - 1].
+ * imu_valid_mask 的 bit0 对应 1 号 IMU，依次到 bit15 对应 16 号 IMU；
+ * raw_quat 使用工程原生下标，即 raw_quat[imu_id - 1]。
  *
- * Output order follows hand_solve_src_6.22:
- * [0..15]  index/middle/ring/little: MCP flex, MCP swing, PIP flex, DIP flex
- * [16..18] thumb: MCP flex, MCP swing, IP flex
- * [19..22] thumb CMC quaternion w,x,y,z
- * [23..26] palm absolute quaternion w,x,y,z
- * Values that cannot be solved because an IMU is missing are set to
- * HAND_SOLVE_MISSING_VALUE.
+ * 输出顺序与 hand_solve_src_6.22 保持一致：
+ * [0..15]  食指/中指/无名指/小拇指，每指依次为 MCP 屈伸、MCP 侧摆、PIP 屈伸、DIP 屈伸
+ * [16..18] 大拇指 MCP 屈伸、MCP 侧摆、IP 屈伸
+ * [19..22] 大拇指 CMC 四元数 w、x、y、z
+ * [23..26] 手掌绝对姿态四元数 w、x、y、z
+ * 缺少必要 IMU 时，对应输出设置为 HAND_SOLVE_MISSING_VALUE。
  */
 GloveStatus_t HandSolve_SolveAnglesDeg(const GloveQuaternion_t raw_quat[GLOVE_IMU_COUNT],
                                        uint32_t imu_valid_mask,

@@ -12,6 +12,7 @@
 #include "data_manager.h"
 #include "glove_hand_config.h"
 #include "hand_solve.h"
+#include "uart_redirect.h"
 
 #define DATA_PROCESS_GET_RAW_TIMEOUT_MS         (10U)
 #define DATA_PROCESS_IDLE_DELAY_MS              (1U)
@@ -20,6 +21,12 @@
 #define DATA_PROCESS_FULL_DEBUG_PRINT_PERIOD    (50U)
 #define DATA_PROCESS_FULL_DEBUG_IMU_PRINT_COUNT (2U)
 #define DATA_PROCESS_FULL_DEBUG_TOUCH_COUNT     (16U)
+/* 解算流前 19 项为关节角（毫度），后 8 项为两个四元数（放大 10000 倍）。 */
+#define DATA_PROCESS_SOLVED_STREAM_ENABLE       (1U)
+#define DATA_PROCESS_SOLVED_STREAM_BUFFER_SIZE  (512U)
+#define DATA_PROCESS_SOLVED_ANGLE_COUNT         (19U)
+#define DATA_PROCESS_SOLVED_QUAT_START          (19U)
+#define DATA_PROCESS_SOLVED_QUAT_COUNT          (8U)
 
 typedef struct
 {
@@ -136,6 +143,118 @@ static GloveTimestampUs_t DataProcess_GetKernelTimeUs(void)
     return (GloveTimestampUs_t)(((uint64_t)osKernelGetTickCount() * 1000000ULL) /
                                 (uint64_t)tick_freq);
 }
+
+#if (DATA_PROCESS_SOLVED_STREAM_ENABLE != 0U)
+static uint8_t DataProcess_StreamValueIsMissing(float value)
+{
+    return ((value >= (HAND_SOLVE_MISSING_VALUE * 0.5f)) ||
+            (value <= (-HAND_SOLVE_MISSING_VALUE * 0.5f))) ? 1U : 0U;
+}
+
+static uint8_t DataProcess_StreamAppendValues(char *buffer,
+                                               uint32_t buffer_size,
+                                               uint32_t *length,
+                                               const float *values,
+                                               uint32_t count,
+                                               float scale)
+{
+    uint32_t index;
+    int written;
+
+    if ((buffer == NULL) || (length == NULL) || (values == NULL) ||
+        (*length >= buffer_size))
+    {
+        return 0U;
+    }
+
+    for (index = 0U; index < count; index++)
+    {
+        if (DataProcess_StreamValueIsMissing(values[index]) != 0U)
+        {
+            written = snprintf(&buffer[*length],
+                               buffer_size - *length,
+                               (index == 0U) ? "MISS" : ",MISS");
+        }
+        else
+        {
+            float scaled = values[index] * scale;
+            int32_t fixed_value = (int32_t)(scaled + ((scaled >= 0.0f) ? 0.5f : -0.5f));
+
+            written = snprintf(&buffer[*length],
+                               buffer_size - *length,
+                               (index == 0U) ? "%ld" : ",%ld",
+                               (long)fixed_value);
+        }
+
+        if ((written < 0) || ((uint32_t)written >= (buffer_size - *length)))
+        {
+            return 0U;
+        }
+        *length += (uint32_t)written;
+    }
+
+    return 1U;
+}
+
+static void DataProcess_StreamSolved(const GloveProcessedFrame_t *processed,
+                                     GloveStatus_t process_status)
+{
+    char line[DATA_PROCESS_SOLVED_STREAM_BUFFER_SIZE];
+    uint32_t length;
+    int written;
+
+    if (processed == NULL)
+    {
+        return;
+    }
+
+    written = snprintf(line,
+                       sizeof(line),
+                       "SOLVED seq=%lu status=%u flags=0x%08lX angles_mdeg=",
+                       (unsigned long)processed->frame_id,
+                       (unsigned int)process_status,
+                       (unsigned long)processed->valid_flags);
+    if ((written < 0) || ((uint32_t)written >= sizeof(line)))
+    {
+        return;
+    }
+    length = (uint32_t)written;
+
+    /* 角度顺序与 hand_solve.h 的 HAND_JOINT_* 索引定义完全一致。 */
+    if (DataProcess_StreamAppendValues(line,
+                                       sizeof(line),
+                                       &length,
+                                       &processed->joint_angle_deg[0],
+                                       DATA_PROCESS_SOLVED_ANGLE_COUNT,
+                                       1000.0f) == 0U)
+    {
+        return;
+    }
+
+    written = snprintf(&line[length], sizeof(line) - length, " quat_1e4=");
+    if ((written < 0) || ((uint32_t)written >= (sizeof(line) - length)))
+    {
+        return;
+    }
+    length += (uint32_t)written;
+
+    if ((DataProcess_StreamAppendValues(line,
+                                        sizeof(line),
+                                        &length,
+                                        &processed->joint_angle_deg[DATA_PROCESS_SOLVED_QUAT_START],
+                                        DATA_PROCESS_SOLVED_QUAT_COUNT,
+                                        10000.0f) == 0U) ||
+        ((sizeof(line) - length) < 3U))
+    {
+        return;
+    }
+
+    line[length++] = '\r';
+    line[length++] = '\n';
+    line[length] = '\0';
+    UartRedirect_WriteData(line, (uint16_t)length);
+}
+#endif
 
 #if (DATA_PROCESS_FULL_DEBUG_PRINT_ENABLE != 0U)
 static int32_t DataProcess_FloatToMilli(float value)
@@ -380,6 +499,10 @@ static GloveStatus_t DataProcess_PublishFullFrame(const GloveRawFrame_t *raw,
     }
 
     AppData_BuildFullFrame(&full->frame, raw, processed);
+
+#if (DATA_PROCESS_SOLVED_STREAM_ENABLE != 0U)
+    DataProcess_StreamSolved(&full->frame.processed, process_status);
+#endif
 
 #if (DATA_PROCESS_FULL_DEBUG_PRINT_ENABLE != 0U)
     DataProcess_PrintFullFrame(&full->frame, process_status);
