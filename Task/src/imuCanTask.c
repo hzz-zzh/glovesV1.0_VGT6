@@ -1305,7 +1305,8 @@ void ImuCanTask(void *argument)
 #else
     ImuCanTask_SetJ1939NodeIdOnce();
 #endif
-
+	osDelay(200);
+	
     for (uint32_t i = 0U; i < IMU_CAN_TASK_BUS_COUNT; i++)
     {
         ImuCanTask_InitHi04Devices(&s_buses[i]);
