@@ -39,6 +39,8 @@
 #define SYSTEM_MANAGER_LOCKOUT_RELEASE_VOLTAGE_MV    (3500U)
 #define SYSTEM_MANAGER_LOW_SOC_PERCENT               (20U)
 #define SYSTEM_MANAGER_LOW_SOC_RELEASE_PERCENT       (25U)
+/* MAX17043尚未加载本电芯模型，SOC仅显示，不参与低电状态判断。 */
+#define SYSTEM_MANAGER_SOC_LOW_DETECTION_ENABLE      (0U)
 #define SYSTEM_MANAGER_LOW_CONFIRM_SAMPLES           (5U)
 #define SYSTEM_MANAGER_LOW_RELEASE_SAMPLES           (10U)
 #define SYSTEM_MANAGER_CRITICAL_CONFIRM_SAMPLES      (3U)
@@ -474,11 +476,13 @@ static void SystemManager_EvaluateBatteryLevel(void)
     {
         s_low_voltage_count = (voltage_mv <= SYSTEM_MANAGER_LOW_VOLTAGE_MV) ?
                               (uint8_t)(s_low_voltage_count + 1U) : 0U;
-        s_low_soc_count = ((s_gauge_valid != 0U) &&
+        s_low_soc_count = ((SYSTEM_MANAGER_SOC_LOW_DETECTION_ENABLE != 0U) &&
+                           (s_gauge_valid != 0U) &&
                            (s_gauge_data.soc_percent <= SYSTEM_MANAGER_LOW_SOC_PERCENT)) ?
                           (uint8_t)(s_low_soc_count + 1U) : 0U;
         if ((s_low_voltage_count >= SYSTEM_MANAGER_LOW_CONFIRM_SAMPLES) ||
-            (s_low_soc_count >= SYSTEM_MANAGER_LOW_CONFIRM_SAMPLES))
+            ((SYSTEM_MANAGER_SOC_LOW_DETECTION_ENABLE != 0U) &&
+             (s_low_soc_count >= SYSTEM_MANAGER_LOW_CONFIRM_SAMPLES)))
         {
             s_power_status.battery_level = GLOVE_BATTERY_LEVEL_LOW;
         }
@@ -499,7 +503,8 @@ static void SystemManager_EvaluateBatteryLevel(void)
 
     if (s_power_status.battery_level == GLOVE_BATTERY_LEVEL_LOW)
     {
-        uint8_t soc_released = (s_gauge_valid == 0U) ||
+        uint8_t soc_released = (SYSTEM_MANAGER_SOC_LOW_DETECTION_ENABLE == 0U) ||
+            (s_gauge_valid == 0U) ||
             (s_gauge_data.soc_percent > SYSTEM_MANAGER_LOW_SOC_RELEASE_PERCENT);
         s_low_release_count = ((voltage_mv >= SYSTEM_MANAGER_LOW_RELEASE_VOLTAGE_MV) &&
                                (soc_released != 0U)) ?
