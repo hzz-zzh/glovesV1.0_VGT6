@@ -1317,7 +1317,7 @@ void ImuCanTask(void *argument)
 #else
     ImuCanTask_SetJ1939NodeIdOnce();
 #endif
-	osDelay(200);
+	osDelay(300);
 	
     for (uint32_t i = 0U; i < IMU_CAN_TASK_BUS_COUNT; i++)
     {
