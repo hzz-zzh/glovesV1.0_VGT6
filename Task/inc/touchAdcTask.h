@@ -5,7 +5,11 @@
 extern "C" {
 #endif
 
+#include <stdint.h>
+
 void TouchAdcTask(void *argument);
+void TouchAdcTask_SetAcquisitionEnabled(uint8_t enabled);
+uint8_t TouchAdcTask_IsAcquisitionPaused(void);
 
 #ifdef __cplusplus
 }

@@ -107,12 +107,48 @@ Register order is little-endian by 16-bit Modbus word:
 
 ### 3.4 电源状态区
 
-当前电量和充电状态调试已临时关闭，此区为占位。
+电源状态区由 `SystemManagerTask` 的实时快照提供。float32 继续采用本协议统一的双寄存器字节序。
 
 | 地址 | 数量 | 类型 | 含义 |
 |---:|---:|---|---|
-| `0x0060` | 2 | float32 | battery voltage，占位 `0.0` |
-| `0x0062` | 2 | float32 | battery current，占位 `0.0` |
+| `0x0060` | 2 | float32 | battery voltage，单位 V |
+| `0x0062` | 2 | float32 | battery current，单位 A，充电为正、放电为负 |
+| `0x0064` | 2 | float32 | battery SOC，单位 % |
+| `0x0066` | 1 | U16 | system power state |
+| `0x0067` | 1 | U16 | charger state |
+| `0x0068` | 1 | U16 | power status flags |
+| `0x0069` | 1 | U16 | charger/local fault code |
+| `0x006A` | 2 | float32 | VBUS voltage，单位 V |
+| `0x006C` | 2 | float32 | input current，单位 A |
+| `0x006E` | 1 | U16 | BQ25622 diagnostic：高8位为诊断阶段，低8位为驱动状态 |
+
+system power state：`0=INIT`、`1=ON_NORMAL`、`2=ON_LOW`、`3=USER_OFF`、`4=LOW_BAT_LOCKOUT`。
+
+charger state：`0=UNKNOWN`、`1=NO_INPUT`、`2=IDLE`、`3=CC`、`4=CV`、`5=TOPOFF`、`6=FULL`、`7=SUSPENDED`、`8=FAULT`。
+
+`0x0068` 状态位定义：
+
+| 位 | 含义 |
+|---:|---|
+| bit0 | battery voltage valid |
+| bit1 | SOC valid |
+| bit2 | battery/input current valid |
+| bit3 | qualified VBUS present |
+| bit4 | charging active |
+| bit5 | low battery |
+| bit6 | critical battery |
+| bit7 | low-battery lockout |
+| bit8 | peripheral power enabled |
+| bit9 | BQ25622 communication fault |
+| bit10 | MAX17043 communication fault |
+| bit11 | two voltage readings differ by more than 100mV |
+| bit12 | charging limited or suspended by temperature state |
+| bit13 | charger fault |
+| bit14 | charge safety timer expired |
+
+读取数值前应检查对应有效位。`0x0069` 低8位为BQ25622原始故障状态，高位中 `bit8/bit9/bit10` 分别表示BQ通信、MAX17043通信和电压不一致。
+
+`0x006E` 用于定位BQ25622通信或配置失败的位置。诊断阶段定义：`0=none`、`1=init`、`2=watchdog`、`3=input_current`、`4=external_ilim`、`5=charge_voltage`、`6=charge_current`、`7=termination_current`、`8=charge_safety`、`9=adc`、`10=status_read`。驱动状态定义：`0=OK`、`1=ERROR`、`2=TIMEOUT`、`3=NO_MEMORY`、`4=INVALID_PARAM`、`5=QUEUE_FULL`、`6=QUEUE_EMPTY`、`7=NOT_READY`。诊断阶段为0且状态为0表示BQ配置和最近一次状态读取正常。
 
 ### 3.5 工作状态
 
@@ -347,4 +383,3 @@ Write Single Register 0x1255 = 0x0002
 - 访问未开放地址：返回 Modbus exception `0x02`，Illegal Data Address
 - 读写数量非法：返回 Modbus exception `0x03`，Illegal Data Value
 - 写入非开放区域：返回 Modbus exception `0x02`
-

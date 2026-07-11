@@ -135,6 +135,8 @@ static const ImuCanTaskBusConfig_t s_bus_configs[IMU_CAN_TASK_BUS_COUNT] =
 };
 
 static ImuCanTaskBusRuntime_t s_buses[IMU_CAN_TASK_BUS_COUNT];
+static volatile uint8_t s_imu_acquisition_enabled = 1U;
+static volatile uint8_t s_imu_acquisition_paused = 0U;
 static ImuCanTaskStats_t s_imu_can_stats;
 static uint32_t s_sensor_seq;
 
@@ -1273,6 +1275,16 @@ uint32_t ImuCanTask_GetNodeCount(void)
     return ImuCanTask_TotalLogicalNodeCount();
 }
 
+void ImuCanTask_SetAcquisitionEnabled(uint8_t enabled)
+{
+    s_imu_acquisition_enabled = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8_t ImuCanTask_IsAcquisitionPaused(void)
+{
+    return s_imu_acquisition_paused;
+}
+
 void ImuCanTask(void *argument)
 {
     uint32_t last_publish_ms;
@@ -1316,6 +1328,31 @@ void ImuCanTask(void *argument)
 
     for (;;)
     {
+        if (s_imu_acquisition_enabled == 0U)
+        {
+            s_imu_acquisition_paused = 1U;
+            osDelay(10U);
+            continue;
+        }
+
+        if (s_imu_acquisition_paused != 0U)
+        {
+            /* 外设重新上电后，等待节点启动并重新下发输出配置。 */
+            osDelay(200U);
+            for (uint32_t i = 0U; i < IMU_CAN_TASK_BUS_COUNT; i++)
+            {
+                ImuCanTask_DrainRxFifoForConfig(&s_buses[i]);
+                (void)memset(s_buses[i].node_sync_seq, 0, sizeof(s_buses[i].node_sync_seq));
+                (void)memset(s_buses[i].node_sync_timestamp_us, 0,
+                             sizeof(s_buses[i].node_sync_timestamp_us));
+                (void)memset(s_buses[i].node_sync_seen_mask, 0,
+                             sizeof(s_buses[i].node_sync_seen_mask));
+                ImuCanTask_InitHi04Devices(&s_buses[i]);
+            }
+            last_publish_ms = HAL_GetTick();
+            s_imu_acquisition_paused = 0U;
+        }
+
         (void)osThreadFlagsWait(IMU_CAN_TASK_RX_FLAG,
                                 osFlagsWaitAny,
                                 IMU_CAN_TASK_PUBLISH_PERIOD_MS);

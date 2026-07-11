@@ -74,6 +74,8 @@ void ImuCanTask_GetDebugSnapshotForNode(uint32_t node_id,
                                         ImuCanTaskDebugSnapshot_t *snapshot);
 uint32_t ImuCanTask_GetFirstNodeId(void);
 uint32_t ImuCanTask_GetNodeCount(void);
+void ImuCanTask_SetAcquisitionEnabled(uint8_t enabled);
+uint8_t ImuCanTask_IsAcquisitionPaused(void);
 
 #ifdef __cplusplus
 }

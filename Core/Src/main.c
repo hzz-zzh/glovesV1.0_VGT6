@@ -954,7 +954,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 3000000;
+  huart1.Init.BaudRate = 1000000;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -1062,7 +1062,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOB, TOUCH_COL_SEL0_Pin|TOUCH_COL_SEL1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, DISABLE_CHARGE_Pin|TOUCH_COL_SEL2_Pin, GPIO_PIN_RESET);
+  /* 充电参数回读确认前保持禁止充电，SystemManagerTask配置成功后再放开。 */
+  HAL_GPIO_WritePin(DISABLE_CHARGE_GPIO_Port, DISABLE_CHARGE_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(TOUCH_COL_SEL2_GPIO_Port, TOUCH_COL_SEL2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(USER_LED_GPIO_Port, USER_LED_Pin, GPIO_PIN_RESET);
@@ -1141,6 +1143,10 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI15_IRQn);
   HAL_NVIC_SetPriority(EXTI2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI2_IRQn);
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -1158,6 +1164,10 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
   {
     ModbusTimeSync_OnPpsEdge(GPIO_Pin);
   }
+  else if (GPIO_Pin == STATUS_CHARGE_Pin)
+  {
+    SystemManagerTask_OnPowerStatusEdgeFromIsr();
+  }
 }
 
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
@@ -1165,6 +1175,10 @@ void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
   if (GPIO_Pin == POWER_ON_OFF_Pin)
   {
     SystemManagerTask_OnPowerKeyEdgeFromIsr();
+  }
+  else if (GPIO_Pin == INT_GAUGE_BQ_Pin)
+  {
+    SystemManagerTask_OnPowerStatusEdgeFromIsr();
   }
 }
 

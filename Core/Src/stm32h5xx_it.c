@@ -338,9 +338,19 @@ void FDCAN2_IT0_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void EXTI0_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(STATUS_CHARGE_Pin);
+}
+
 void EXTI2_IRQHandler(void)
 {
   HAL_GPIO_EXTI_IRQHandler(POWER_ON_OFF_Pin);
+}
+
+void EXTI3_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(INT_GAUGE_BQ_Pin);
 }
 
 /* USER CODE END 1 */

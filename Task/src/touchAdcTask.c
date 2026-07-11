@@ -18,7 +18,7 @@
 #define TOUCH_ADC_DEBUG_TRACE_FIRST_FRAME (0U)
 #define TOUCH_ADC_MUX_HOLD_TEST_ENABLE (0U)
 #define TOUCH_ADC_MUX_HOLD_COL         (14U)
-#define TOUCH_ADC_SYNC_WAIT_TIMEOUT_MS  (osWaitForever)
+#define TOUCH_ADC_SYNC_WAIT_TIMEOUT_MS  (50U)
 #define TOUCH_ADC_QUEUE_TIMEOUT_MS      (0U)
 #define TOUCH_ADC_DMA_TIMEOUT_MS        (5U)
 #define TOUCH_ADC_DMA_DONE_FLAG         (1UL << 0)
@@ -61,6 +61,8 @@ static const uint8_t s_touch_rows_sel_low[TOUCH_ADC_CHANNEL_COUNT] =
 };
 
 static uint32_t s_touch_adc_dma_storage[TOUCH_ADC_CHANNEL_COUNT / 2U];
+static volatile uint8_t s_touch_acquisition_enabled = 1U;
+static volatile uint8_t s_touch_acquisition_paused = 0U;
 static osThreadId_t s_touch_adc_task_id = NULL;
 static uint8_t s_touch_adc_trace_frame = 0U;
 static uint8_t s_touch_adc_trace_dma_once = 0U;
@@ -635,6 +637,16 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
   return GLOVE_STATUS_OK;
 }
 
+void TouchAdcTask_SetAcquisitionEnabled(uint8_t enabled)
+{
+  s_touch_acquisition_enabled = (enabled != 0U) ? 1U : 0U;
+}
+
+uint8_t TouchAdcTask_IsAcquisitionPaused(void)
+{
+  return s_touch_acquisition_paused;
+}
+
 void TouchAdcTask(void *argument)
 {
   uint32_t seq = 0U;
@@ -658,10 +670,32 @@ void TouchAdcTask(void *argument)
   {
     GloveTouchSensorBlock_t *touch;
 
+    if (s_touch_acquisition_enabled == 0U)
+    {
+      TouchAdcTask_DisableColumns();
+      s_touch_acquisition_paused = 1U;
+      osDelay(10U);
+      continue;
+    }
+    if (s_touch_acquisition_paused != 0U)
+    {
+      /* AcqSync_Reset会清除任务句柄，恢复采集时需要重新注册。 */
+      AcqSync_RegisterTouchTask(s_touch_adc_task_id);
+    }
+    s_touch_acquisition_paused = 0U;
+
     if (AcqSync_WaitForTouchSync(&sync, TOUCH_ADC_SYNC_WAIT_TIMEOUT_MS) != osOK)
     {
-      error_count++;
-      TouchAdcTask_PrintError(seq, GLOVE_STATUS_TIMEOUT, error_count);
+      if (s_touch_acquisition_enabled != 0U)
+      {
+        error_count++;
+        TouchAdcTask_PrintError(seq, GLOVE_STATUS_TIMEOUT, error_count);
+      }
+      continue;
+    }
+
+    if (s_touch_acquisition_enabled == 0U)
+    {
       continue;
     }
 

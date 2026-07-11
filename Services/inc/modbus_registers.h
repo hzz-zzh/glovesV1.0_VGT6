@@ -66,13 +66,21 @@ extern "C" {
 #define SENSOR_STATE_ALL_OK            0xFFFFU
 #define COMM_STATE_OK                  0x0001U
 
-/* Power status registers: 0x0060 ~ 0x0063. */
+/* Power status registers: 0x0060 ~ 0x006E. */
 #define REG_BAT_VOLTAGE                0x0060U
 #define REG_BAT_CURRENT                0x0062U
+#define REG_BAT_SOC                    0x0064U
+#define REG_POWER_STATE                0x0066U
+#define REG_CHARGE_STATE               0x0067U
+#define REG_POWER_FLAGS                0x0068U
+#define REG_POWER_FAULT                0x0069U
+#define REG_VBUS_VOLTAGE               0x006AU
+#define REG_INPUT_CURRENT              0x006CU
+#define REG_BQ_DIAGNOSTIC              0x006EU
 
 #define REG_POWER_STATUS_START         REG_BAT_VOLTAGE
-#define REG_POWER_STATUS_END           0x0063U
-#define REG_POWER_STATUS_COUNT         4U
+#define REG_POWER_STATUS_END           0x006EU
+#define REG_POWER_STATUS_COUNT         15U
 
 /* SD card and log status registers: 0x0081 ~ 0x00BF. */
 #define REG_SD_FS_STATUS               0x0081U

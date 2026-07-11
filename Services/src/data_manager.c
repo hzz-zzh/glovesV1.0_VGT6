@@ -573,3 +573,29 @@ void DataManager_GetStats(DataManagerStats_t *stats)
     FramePool_GetStats(&s_raw_pool, &stats->raw_pool);
     FramePool_GetStats(&s_full_pool, &stats->full_pool);
 }
+
+void DataManager_FlushAcquisitionQueues(void)
+{
+    GloveImuSensorBlock_t *imu;
+    GloveTouchSensorBlock_t *touch;
+    GloveRawFrameBlock_t *raw;
+
+    if (s_initialized == 0U)
+    {
+        return;
+    }
+
+    /* 断开传感器电源前释放队列中的旧数据，避免恢复后拼接跨电源周期的数据。 */
+    while (osMessageQueueGet(s_queues.imu_sensor_for_assembler, &imu, NULL, 0U) == osOK)
+    {
+        (void)DataManager_ReleaseImuSensor(imu);
+    }
+    while (osMessageQueueGet(s_queues.touch_sensor_for_assembler, &touch, NULL, 0U) == osOK)
+    {
+        (void)DataManager_ReleaseTouchSensor(touch);
+    }
+    while (osMessageQueueGet(s_queues.raw_for_algorithm, &raw, NULL, 0U) == osOK)
+    {
+        (void)DataManager_ReleaseRawFrame(raw);
+    }
+}

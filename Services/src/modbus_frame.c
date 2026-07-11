@@ -9,6 +9,7 @@
 #include "dataProcessTask.h"
 #include "modbus_registers.h"
 #include "modbus_time_sync.h"
+#include "systemManagerTask.h"
 
 #if MODBUS_JOINT_COUNT != GLOVE_JOINT_DOF_COUNT
 #error "MODBUS_JOINT_COUNT must match GLOVE_JOINT_DOF_COUNT"
@@ -871,6 +872,9 @@ static GloveTimestampUs_t Modbus_GetTouchTimestampUs(void)
 
 static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 {
+  GlovePowerStatus_t power_status;
+
+  SystemManagerTask_GetPowerStatus(&power_status);
   if (reg_addr == REG_SLAVE_ADDR)
   {
     return (uint16_t)modbus_slave_address;
@@ -984,12 +988,44 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 
   if ((reg_addr >= REG_BAT_VOLTAGE) && (reg_addr < (REG_BAT_VOLTAGE + MODBUS_REGS_FLOAT32)))
   {
-    return Modbus_ReadFloatReg(0.0f, (uint16_t)(reg_addr - REG_BAT_VOLTAGE));
+    return Modbus_ReadFloatReg((float)power_status.battery_voltage_mv / 1000.0f,
+                               (uint16_t)(reg_addr - REG_BAT_VOLTAGE));
   }
 
   if ((reg_addr >= REG_BAT_CURRENT) && (reg_addr < (REG_BAT_CURRENT + MODBUS_REGS_FLOAT32)))
   {
-    return Modbus_ReadFloatReg(0.0f, (uint16_t)(reg_addr - REG_BAT_CURRENT));
+    return Modbus_ReadFloatReg((float)power_status.battery_current_ma / 1000.0f,
+                               (uint16_t)(reg_addr - REG_BAT_CURRENT));
+  }
+
+  if ((reg_addr >= REG_BAT_SOC) && (reg_addr < (REG_BAT_SOC + MODBUS_REGS_FLOAT32)))
+  {
+    return Modbus_ReadFloatReg((float)power_status.soc_centi_percent / 100.0f,
+                               (uint16_t)(reg_addr - REG_BAT_SOC));
+  }
+
+  switch (reg_addr)
+  {
+    case REG_POWER_STATE: return power_status.system_state;
+    case REG_CHARGE_STATE: return power_status.charge_state;
+    case REG_POWER_FLAGS: return power_status.flags;
+    case REG_POWER_FAULT: return power_status.fault_code;
+    case REG_BQ_DIAGNOSTIC:
+      return (uint16_t)(((uint16_t)power_status.bq_diagnostic_stage << 8) |
+                        power_status.bq_last_status);
+    default: break;
+  }
+
+  if ((reg_addr >= REG_VBUS_VOLTAGE) && (reg_addr < (REG_VBUS_VOLTAGE + MODBUS_REGS_FLOAT32)))
+  {
+    return Modbus_ReadFloatReg((float)power_status.vbus_voltage_mv / 1000.0f,
+                               (uint16_t)(reg_addr - REG_VBUS_VOLTAGE));
+  }
+
+  if ((reg_addr >= REG_INPUT_CURRENT) && (reg_addr < (REG_INPUT_CURRENT + MODBUS_REGS_FLOAT32)))
+  {
+    return Modbus_ReadFloatReg((float)power_status.input_current_ma / 1000.0f,
+                               (uint16_t)(reg_addr - REG_INPUT_CURRENT));
   }
 
   if ((reg_addr >= REG_SD_TOTAL_SIZE_MB) && (reg_addr <= REG_SD_STATUS_END))
