@@ -7,6 +7,7 @@
 #include "task.h"
 
 #include "dataProcessTask.h"
+#include "imuCanTask.h"
 #include "modbus_registers.h"
 #include "modbus_time_sync.h"
 #include "systemManagerTask.h"
@@ -642,13 +643,15 @@ static uint8_t Modbus_WriteCalibrationReg(uint16_t reg_addr, uint16_t value)
 static uint16_t Modbus_ReadImuStatusBits(void)
 {
   uint32_t valid_flags;
+  uint16_t snapshot_mask;
 
   taskENTER_CRITICAL();
   valid_flags = (modbus_imu_snapshot.valid != 0U) ? modbus_imu_snapshot.valid_flags : 0U;
   taskEXIT_CRITICAL();
 
-  return (uint16_t)((valid_flags & GLOVE_FRAME_VALID_IMU_ALL_MASK) >>
-                    GLOVE_FRAME_VALID_IMU_BIT_SHIFT);
+  snapshot_mask = (uint16_t)((valid_flags & GLOVE_FRAME_VALID_IMU_ALL_MASK) >>
+                             GLOVE_FRAME_VALID_IMU_BIT_SHIFT);
+  return (uint16_t)(snapshot_mask & ImuCanTask_GetFreshMask());
 }
 
 static GloveTimestampUs_t Modbus_GetImuTimestampUs(void)
@@ -740,6 +743,12 @@ static float Modbus_GetImuFloat(uint16_t imu_index, uint16_t float_index)
   float value = 0.0f;
 
   if ((imu_index >= GLOVE_IMU_COUNT) || (float_index >= MODBUS_IMU_FLOATS_PER_UNIT))
+  {
+    return 0.0f;
+  }
+
+  /* IMU超时或失联后直接返回0，禁止485继续输出历史缓存。 */
+  if ((ImuCanTask_GetFreshMask() & (uint16_t)(1U << imu_index)) == 0U)
   {
     return 0.0f;
   }
