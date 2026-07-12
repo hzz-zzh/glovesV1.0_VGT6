@@ -49,8 +49,10 @@ extern "C" {
 #define REG_SD_STATE                   0x0043U
 #define REG_SENSOR_STATE               0x0044U
 #define REG_COMM_STATE                 0x0045U
-#define REG_SYSTEM_RESERVED_START      0x0046U
-#define REG_SYSTEM_RESERVED_END        0x0047U
+#define REG_RESET_CAUSE                0x0046U
+#define REG_WATCHDOG_STATUS            0x0047U
+#define REG_SYSTEM_RESERVED_START      REG_RESET_CAUSE
+#define REG_SYSTEM_RESERVED_END        REG_WATCHDOG_STATUS
 #define REG_TEMPERATURE_BOARD          0x0048U
 
 #define REG_SYSTEM_STATUS_START        REG_SYSTEM_STATE

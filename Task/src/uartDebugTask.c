@@ -14,6 +14,7 @@
 
 #define UART_DEBUG_PRINT_PERIOD_MS    (1000U)
 #define UART_DEBUG_PRINT_IMU_DUMP     (0U)
+#define UART_DEBUG_FLUSH_MAX_BYTES    (3072U)
 
 static uint32_t UartDebugTask_RateHzX10(uint32_t delta_count,
                                         uint32_t elapsed_ticks)
@@ -190,7 +191,7 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
            (unsigned long)frame_stats.last_time_diff_us,
            (unsigned long)frame_stats.last_frame_id);
 
-    printf("[IMU_CAN] irq=%lu rx=%lu parsed=%lu unparsed=%lu rejected=%lu pub=%lu drop=%lu init_err=%lu err=%lu last=0x%08lx ext=%lu dlc=%lu cfg_tx=%lu cfg_reply=%lu first_node=%lu seen=0x%08lx\r\n",
+    printf("[IMU_CAN] irq=%lu rx=%lu parsed=%lu unparsed=%lu rejected=%lu pub=%lu drop=%lu init_err=%lu err=%lu last=0x%08lx ext=%lu dlc=%lu cfg_tx=%lu cfg_reply=%lu cfg_ok=0x%04lx cfg_fail=0x%04lx cfg_retry=%lu fresh=0x%04x first_node=%lu seen=0x%08lx\r\n",
            (unsigned long)imu_stats.rx_irq_count,
            (unsigned long)imu_stats.rx_frame_count,
            (unsigned long)imu_stats.parsed_frame_count,
@@ -205,6 +206,10 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
            (unsigned long)imu_stats.last_rx_dlc,
            (unsigned long)imu_stats.cfg_tx_count,
            (unsigned long)imu_stats.cfg_reply_count,
+           (unsigned long)imu_stats.cfg_verified_node_mask,
+           (unsigned long)imu_stats.cfg_failed_node_mask,
+           (unsigned long)imu_stats.cfg_retry_count,
+           (unsigned int)ImuCanTask_GetFreshMask(),
            (unsigned long)imu_stats.first_valid_node_id,
            (unsigned long)imu_stats.first_valid_seen_mask);
 
@@ -259,6 +264,7 @@ void UartDebugTask(void *argument)
         UartDebugTask_PrintImuDump();
 #endif
 
+        UartRedirect_Flush(UART_DEBUG_FLUSH_MAX_BYTES);
         tick_count++;
         osDelay(UART_DEBUG_PRINT_PERIOD_MS);
     }

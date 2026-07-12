@@ -37,6 +37,9 @@ typedef struct
     uint32_t cfg_last_reply_id;
     uint32_t cfg_last_reply_dlc;
     uint8_t cfg_last_reply_data[8];
+    uint32_t cfg_verified_node_mask;
+    uint32_t cfg_failed_node_mask;
+    uint32_t cfg_retry_count;
     uint32_t cfg_step_ack_count[6];
     uint32_t cfg_step_ack_id[6];
     uint8_t cfg_step_ack_data[6][8];

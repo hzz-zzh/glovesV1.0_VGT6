@@ -64,6 +64,8 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define IMU_CAN_TASK_SET_IMU_NEW_ID             (3U)
 #define IMU_CAN_TASK_ID_CONFIG_LOOP_MS          (500U)
 #define IMU_CAN_TASK_ENABLE_PUBLISH             (1U)
+#define IMU_CAN_TASK_CONFIG_RETRY_LIMIT         (3U)
+#define IMU_CAN_TASK_CONFIG_RETRY_INTERVAL_MS   (500U)
 #define IMU_CAN_TASK_QUAT_SOURCE_NONE           (0U)
 #define IMU_CAN_TASK_QUAT_SOURCE_RAW            (1U)
 #define IMU_CAN_TASK_IRQ_PRIORITY               (configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY)
@@ -125,6 +127,9 @@ typedef struct
     volatile uint32_t cfg_last_reply_dlc;
     uint8_t cfg_last_reply_data[8];
     volatile uint32_t cfg_active_step;
+    volatile uint32_t cfg_verified_node_mask;
+    volatile uint32_t cfg_failed_node_mask;
+    volatile uint32_t cfg_retry_count;
     uint32_t cfg_step_ack_count[6];
     uint32_t cfg_step_ack_id[6];
     uint8_t cfg_step_ack_data[6][8];
@@ -146,6 +151,7 @@ static volatile uint8_t s_imu_acquisition_paused = 0U;
 static volatile uint16_t s_imu_fresh_mask = 0U;
 static ImuCanTaskStats_t s_imu_can_stats;
 static uint32_t s_sensor_seq;
+static uint32_t s_config_next_retry_ms;
 
 static const uint8_t s_left_bus1_output_index[IMU_CAN_TASK_MAX_NODES_PER_BUS] =
 {
@@ -909,6 +915,97 @@ static void ImuCanTask_DrainAllRxFifos(void)
     }
 }
 
+static void ImuCanTask_ResetConfigurationMonitor(void)
+{
+    s_imu_can_stats.cfg_verified_node_mask = 0U;
+    s_imu_can_stats.cfg_failed_node_mask = (uint16_t)GLOVE_IMU_VALID_ALL_MASK;
+    s_imu_can_stats.cfg_retry_count = 0U;
+    s_config_next_retry_ms = HAL_GetTick() + IMU_CAN_TASK_CONFIG_RETRY_INTERVAL_MS;
+}
+
+static uint16_t ImuCanTask_BuildObservedNodeMask(void)
+{
+    uint16_t mask = 0U;
+
+    for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
+    {
+        ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
+
+        if (bus->config == NULL)
+        {
+            continue;
+        }
+
+        for (uint32_t local_i = 0U; local_i < bus->config->node_count; local_i++)
+        {
+            uint32_t output_index;
+
+            if (((bus->devices[local_i].seen_mask & IMU_CAN_TASK_VALID_FLAGS_REQUIRED) ==
+                 IMU_CAN_TASK_VALID_FLAGS_REQUIRED) &&
+                (ImuCanTask_BusOutputIndex(bus, local_i, &output_index) != false))
+            {
+                mask |= (uint16_t)(1U << output_index);
+            }
+        }
+    }
+
+    return mask;
+}
+
+static void ImuCanTask_RetryMissingNodeConfigs(uint16_t configured_mask)
+{
+    for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
+    {
+        ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
+
+        if ((bus->config == NULL) || (bus->fdcan_started == false))
+        {
+            continue;
+        }
+
+        for (uint32_t local_i = 0U; local_i < bus->config->config_node_count; local_i++)
+        {
+            uint32_t output_index;
+
+            if ((ImuCanTask_BusOutputIndex(bus, local_i, &output_index) != false) &&
+                ((configured_mask & (uint16_t)(1U << output_index)) == 0U))
+            {
+                uint8_t node_id = (uint8_t)(bus->config->first_node_id + local_i);
+                ImuCanTask_ConfigJ1939Outputs(bus, node_id);
+                ImuCanTask_ConfigJ1939SyncOnce(bus, node_id);
+            }
+        }
+    }
+}
+
+static void ImuCanTask_UpdateConfigurationMonitor(uint16_t observed_mask)
+{
+    const uint16_t expected_mask = (uint16_t)GLOVE_IMU_VALID_ALL_MASK;
+    uint32_t now_ms = HAL_GetTick();
+
+    s_imu_can_stats.cfg_verified_node_mask = observed_mask;
+    s_imu_can_stats.cfg_failed_node_mask = (uint16_t)(expected_mask & ~observed_mask);
+
+    if ((observed_mask != expected_mask) &&
+        (s_imu_can_stats.cfg_retry_count < IMU_CAN_TASK_CONFIG_RETRY_LIMIT) &&
+        ((int32_t)(now_ms - s_config_next_retry_ms) >= 0))
+    {
+        /* 正常采集循环不中断，仅对持续缺失的节点重新下发配置。 */
+        ImuCanTask_RetryMissingNodeConfigs(observed_mask);
+        s_imu_can_stats.cfg_retry_count++;
+        s_config_next_retry_ms = now_ms + IMU_CAN_TASK_CONFIG_RETRY_INTERVAL_MS;
+    }
+    else if ((observed_mask != expected_mask) &&
+             (s_imu_can_stats.cfg_retry_count >= IMU_CAN_TASK_CONFIG_RETRY_LIMIT))
+    {
+        s_imu_can_stats.last_error = 90U;
+    }
+    else if ((observed_mask == expected_mask) && (s_imu_can_stats.last_error == 90U))
+    {
+        s_imu_can_stats.last_error = 0U;
+    }
+}
+
 static void ImuCanTask_GetQuaternion(const hi04_sample_t *sample,
                                      uint32_t seen_mask,
                                      float *qw,
@@ -1205,6 +1302,9 @@ static void ImuCanTask_CopyStatsToSnapshot(ImuCanTaskDebugSnapshot_t *snapshot)
     snapshot->cfg_reply_count = s_imu_can_stats.cfg_reply_count;
     snapshot->cfg_last_reply_id = s_imu_can_stats.cfg_last_reply_id;
     snapshot->cfg_last_reply_dlc = s_imu_can_stats.cfg_last_reply_dlc;
+    snapshot->cfg_verified_node_mask = s_imu_can_stats.cfg_verified_node_mask;
+    snapshot->cfg_failed_node_mask = s_imu_can_stats.cfg_failed_node_mask;
+    snapshot->cfg_retry_count = s_imu_can_stats.cfg_retry_count;
     (void)memcpy(snapshot->cfg_last_reply_data,
                  s_imu_can_stats.cfg_last_reply_data,
                  sizeof(snapshot->cfg_last_reply_data));
@@ -1390,6 +1490,7 @@ void ImuCanTask(void *argument)
     {
         ImuCanTask_InitHi04Devices(&s_buses[i]);
     }
+    ImuCanTask_ResetConfigurationMonitor();
 
     last_publish_ms = HAL_GetTick();
 
@@ -1423,6 +1524,7 @@ void ImuCanTask(void *argument)
                              sizeof(s_buses[i].node_quat_rx_ms));
                 ImuCanTask_InitHi04Devices(&s_buses[i]);
             }
+            ImuCanTask_ResetConfigurationMonitor();
             last_publish_ms = HAL_GetTick();
             s_imu_acquisition_paused = 0U;
         }
@@ -1432,6 +1534,7 @@ void ImuCanTask(void *argument)
                                 IMU_CAN_TASK_PUBLISH_PERIOD_MS);
         ImuCanTask_DrainAllRxFifos();
         s_imu_fresh_mask = ImuCanTask_BuildFreshMask(HAL_GetTick());
+        ImuCanTask_UpdateConfigurationMonitor(ImuCanTask_BuildObservedNodeMask());
 
 #if IMU_CAN_TASK_ENABLE_PUBLISH
         if ((HAL_GetTick() - last_publish_ms) >= IMU_CAN_TASK_PUBLISH_PERIOD_MS)

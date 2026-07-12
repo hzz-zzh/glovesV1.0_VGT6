@@ -23,6 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "data_manager.h"
+#include "watchdogTask.h"
+#include "FreeRTOS.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -49,6 +51,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
+static StaticTask_t watchdogTaskControlBlock;
+static uint64_t watchdogTaskStack[256];
 
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
@@ -57,6 +61,17 @@ const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
   .priority = (osPriority_t) osPriorityNormal,
   .stack_size = 128 * 4
+};
+/* Definitions for watchdogTask */
+osThreadId_t watchdogTaskHandle;
+const osThreadAttr_t watchdogTask_attributes = {
+  .name = "watchdogTask",
+  /* 必须高于持续采集任务，确保CPU调度异常时能够及时暴露而不是误喂狗。 */
+  .priority = (osPriority_t) osPriorityRealtime,
+  .stack_mem = watchdogTaskStack,
+  .stack_size = sizeof(watchdogTaskStack),
+  .cb_mem = &watchdogTaskControlBlock,
+  .cb_size = sizeof(watchdogTaskControlBlock)
 };
 /* Definitions for uartDebugTask */
 osThreadId_t uartDebugTaskHandle;
@@ -164,6 +179,9 @@ void MX_FREERTOS_Init(void) {
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
+  /* MCU长期由电池供电，看门狗任务不受外设电源开关影响。 */
+  watchdogTaskHandle = osThreadNew(WatchdogTask, NULL, &watchdogTask_attributes);
+
 #if FREERTOS_ENABLE_UART_DEBUG_TASK
   /* creation of uartDebugTask */
   uartDebugTaskHandle = osThreadNew(UartDebugTask, NULL, &uartDebugTask_attributes);
@@ -206,8 +224,9 @@ void MX_FREERTOS_Init(void) {
 #endif
 
   /* USER CODE BEGIN RTOS_THREADS */
-  printf("[RTOS] handles default=0x%08lX test=0x%08lX frame=0x%08lX sys=0x%08lX time=0x%08lX imu=0x%08lX touch=0x%08lX data=0x%08lX rs485=0x%08lX storage=0x%08lX\r\n",
+  printf("[RTOS] handles default=0x%08lX watchdog=0x%08lX test=0x%08lX frame=0x%08lX sys=0x%08lX time=0x%08lX imu=0x%08lX touch=0x%08lX data=0x%08lX rs485=0x%08lX storage=0x%08lX\r\n",
          (unsigned long)(uintptr_t)defaultTaskHandle,
+         (unsigned long)(uintptr_t)watchdogTaskHandle,
          (unsigned long)(uintptr_t)testTaskHandle,
          (unsigned long)(uintptr_t)frameAssemblerTaskHandle,
          (unsigned long)(uintptr_t)systemManagerTaskHandle,

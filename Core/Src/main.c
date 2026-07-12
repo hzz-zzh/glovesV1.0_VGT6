@@ -27,6 +27,7 @@
 #include "glove_hand_config.h"
 #include "modbus_time_sync.h"
 #include "systemManagerTask.h"
+#include "system_watchdog.h"
 #include "uart_redirect.h"
 
 /* USER CODE END Includes */
@@ -125,6 +126,9 @@ int main(void)
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* 在任何代码清除RCC标志前保存上一次复位原因。 */
+  SystemWatchdog_CaptureResetCause();
 
   /* USER CODE BEGIN Init */
 

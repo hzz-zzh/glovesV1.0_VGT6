@@ -29,7 +29,7 @@
 #define SYSTEM_MANAGER_BQ25622_TERMINATION_CURRENT_MA (100U)
 #define SYSTEM_MANAGER_MAX17043_TIMEOUT_MS           (20U)
 #define SYSTEM_MANAGER_POWER_KEY_DEBOUNCE_MS         (20U)
-#define SYSTEM_MANAGER_POWER_KEY_LONG_PRESS_MS       (1000U)
+#define SYSTEM_MANAGER_POWER_KEY_LONG_PRESS_MS       (600U)
 #define SYSTEM_MANAGER_POWER_KEY_PRESSED_LEVEL       GPIO_PIN_RESET
 #define SYSTEM_MANAGER_POWER_STOP_TIMEOUT_MS         (100U)
 #define SYSTEM_MANAGER_LOW_VOLTAGE_MV                (3500U)
@@ -59,11 +59,15 @@ static volatile uint8_t s_power_key_release_edge_seen;
 static volatile uint8_t s_power_key_off_wake_armed = 1U;
 static volatile uint8_t s_power_key_ignore_until_release;
 static volatile uint8_t s_power_status_edge_pending;
+static volatile uint8_t s_power_key_press_edge_valid;
+static volatile uint32_t s_power_key_press_edge_ms;
 static uint8_t s_power_key_last_raw_pressed;
 static uint8_t s_power_key_debounced_pressed;
 static uint8_t s_power_key_long_handled;
 static uint32_t s_power_key_changed_ms;
 static uint32_t s_power_key_pressed_ms;
+static uint32_t s_power_key_last_trigger_elapsed_ms;
+static uint32_t s_power_key_last_poweroff_elapsed_ms;
 static uint8_t s_bq_ready;
 static uint8_t s_bq_valid;
 static uint8_t s_gauge_valid;
@@ -159,7 +163,21 @@ uint8_t SystemManagerTask_IsPeripheralPowerEnabled(void)
 
 void SystemManagerTask_OnPowerKeyEdgeFromIsr(void)
 {
-    if (s_periph_power_enabled != 0U) return;
+    if (s_periph_power_enabled != 0U)
+    {
+        if (HAL_GPIO_ReadPin(POWER_ON_OFF_GPIO_Port, POWER_ON_OFF_Pin) ==
+            SYSTEM_MANAGER_POWER_KEY_PRESSED_LEVEL)
+        {
+            /* 长按时间从真实按下沿开始计算，消抖不再额外增加20ms。 */
+            s_power_key_press_edge_ms = HAL_GetTick();
+            s_power_key_press_edge_valid = 1U;
+        }
+        else
+        {
+            s_power_key_release_edge_seen = 1U;
+        }
+        return;
+    }
     if (s_power_key_ignore_until_release != 0U)
     {
         s_power_key_release_edge_seen = 1U;
@@ -195,7 +213,7 @@ static uint8_t SystemManager_ReadPowerKeyPressed(void)
 
 static void SystemManager_InitPowerKeyState(void)
 {
-    uint32_t now = SystemManager_GetTimestampMs();
+    uint32_t now = HAL_GetTick();
     s_periph_power_enabled =
         (HAL_GPIO_ReadPin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin) == GPIO_PIN_SET) ? 1U : 0U;
     s_power_key_last_raw_pressed = SystemManager_ReadPowerKeyPressed();
@@ -203,11 +221,12 @@ static void SystemManager_InitPowerKeyState(void)
     s_power_key_off_wake_armed = 1U;
     s_power_key_changed_ms = now;
     s_power_key_pressed_ms = (s_power_key_debounced_pressed != 0U) ? now : 0U;
+    s_power_key_press_edge_valid = 0U;
 }
 
 static void SystemManager_ServicePowerKey(void)
 {
-    uint32_t now = SystemManager_GetTimestampMs();
+    uint32_t now = HAL_GetTick();
     uint8_t raw_pressed = SystemManager_ReadPowerKeyPressed();
 
     if (raw_pressed != s_power_key_last_raw_pressed)
@@ -248,18 +267,43 @@ static void SystemManager_ServicePowerKey(void)
         return;
     }
 
+    if (s_power_key_ignore_until_release != 0U)
+    {
+        if ((SystemManager_TakeIsrFlag(&s_power_key_release_edge_seen) != 0U) ||
+            ((raw_pressed == 0U) &&
+             ((uint32_t)(now - s_power_key_changed_ms) >= SYSTEM_MANAGER_POWER_KEY_DEBOUNCE_MS)))
+        {
+            /* 短按开机后的第一次松手必须解除锁定，不能依赖消抖状态发生变化。 */
+            s_power_key_ignore_until_release = 0U;
+            s_power_key_off_wake_armed = 1U;
+            s_power_key_debounced_pressed = 0U;
+            s_power_key_long_handled = 0U;
+            s_power_key_pressed_ms = 0U;
+            s_power_key_press_edge_valid = 0U;
+        }
+        else
+        {
+            return;
+        }
+    }
+
     if ((raw_pressed != s_power_key_debounced_pressed) &&
         ((uint32_t)(now - s_power_key_changed_ms) >= SYSTEM_MANAGER_POWER_KEY_DEBOUNCE_MS))
     {
         s_power_key_debounced_pressed = raw_pressed;
         if (raw_pressed != 0U)
         {
-            s_power_key_pressed_ms = now;
+            taskENTER_CRITICAL();
+            s_power_key_pressed_ms = (s_power_key_press_edge_valid != 0U) ?
+                                     s_power_key_press_edge_ms : now;
+            s_power_key_press_edge_valid = 0U;
+            taskEXIT_CRITICAL();
             s_power_key_long_handled = 0U;
         }
         else
         {
             s_power_key_pressed_ms = 0U;
+            s_power_key_press_edge_valid = 0U;
             s_power_key_long_handled = 0U;
             s_power_key_ignore_until_release = 0U;
         }
@@ -270,11 +314,18 @@ static void SystemManager_ServicePowerKey(void)
         (s_power_key_long_handled == 0U) &&
         ((uint32_t)(now - s_power_key_pressed_ms) >= SYSTEM_MANAGER_POWER_KEY_LONG_PRESS_MS))
     {
+        uint32_t press_start_ms = s_power_key_pressed_ms;
+
         s_power_key_long_handled = 1U;
         s_power_key_ignore_until_release = 1U;
         s_power_key_off_wake_armed = 0U;
+        s_power_key_last_trigger_elapsed_ms = (uint32_t)(now - press_start_ms);
         SystemManager_StopPeripheralPower(GLOVE_POWER_STATE_USER_OFF);
-        printf("[Power] peripheral power off by long press\r\n");
+        s_power_key_last_poweroff_elapsed_ms =
+            (uint32_t)(HAL_GetTick() - press_start_ms);
+        printf("[Power] peripheral power off trigger=%lums rail_off=%lums\r\n",
+               (unsigned long)s_power_key_last_trigger_elapsed_ms,
+               (unsigned long)s_power_key_last_poweroff_elapsed_ms);
     }
 }
 
@@ -652,6 +703,16 @@ void SystemManagerTask(void *argument)
     for (;;)
     {
         SystemManager_ServicePowerKey();
+
+        if ((s_periph_power_enabled != 0U) &&
+            (s_power_key_last_raw_pressed != 0U) &&
+            (s_power_key_long_handled == 0U))
+        {
+            /* 按住关机键期间不启动阻塞式I2C事务，保证600ms判定不被电源采样拖延。 */
+            next_wake += SystemManager_MsToTicks(SYSTEM_MANAGER_LOOP_PERIOD_MS);
+            (void)osDelayUntil(next_wake);
+            continue;
+        }
 
         if (SystemManager_TakeIsrFlag(&s_power_status_edge_pending) != 0U)
         {

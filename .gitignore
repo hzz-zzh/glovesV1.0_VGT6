@@ -22,8 +22,10 @@ DebugConfig/
 # 日志解析目录
 parsed_log/
 
-#工具目录
-tools/
+# 上位机和数据解析工具属于项目源码，只忽略工具产生的缓存与IDE配置。
+tools/__pycache__/
+tools/.idea/
+*.py[cod]
 
 # 多工程工作区文件
 *.uvmpw

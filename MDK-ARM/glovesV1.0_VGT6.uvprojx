@@ -488,6 +488,11 @@
               <FileType>1</FileType>
               <FilePath>..\Task\src\rs485Task.c</FilePath>
             </File>
+            <File>
+              <FileName>watchdogTask.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Task\src\watchdogTask.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -532,6 +537,11 @@
               <FileName>modbus_time_sync.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Services\src\modbus_time_sync.c</FilePath>
+            </File>
+            <File>
+              <FileName>system_watchdog.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Services\src\system_watchdog.c</FilePath>
             </File>
             <File>
               <FileName>sd_log.c</FileName>
@@ -789,6 +799,11 @@
               <FileName>stm32h5xx_hal_cortex.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_cortex.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h5xx_hal_iwdg.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_iwdg.c</FilePath>
             </File>
             <File>
               <FileName>stm32h5xx_hal.c</FileName>

@@ -102,8 +102,13 @@ Register order is little-endian by 16-bit Modbus word:
 | `0x0043` | 1 | U16 | sd_state，当前 `0=not ready` |
 | `0x0044` | 1 | U16 | sensor_state，IMU 有效位，bit0 对应 IMU0 |
 | `0x0045` | 1 | U16 | comm_state，当前 `1=ok` |
-| `0x0046..0x0047` | 2 | U16 | reserved，当前读 `0` |
+| `0x0046` | 1 | U16 | MCU复位原因位图 |
+| `0x0047` | 1 | U16 | MCU独立看门狗状态位图 |
 | `0x0048` | 2 | float32 | board temperature，当前占位 `25.0` |
+
+`0x0046`：bit0=引脚复位、bit1=上电或欠压复位、bit2=软件复位、bit3=IWDG复位、bit4=WWDG复位、bit5=低功耗复位。多个原因可能同时存在。
+
+`0x0047`：bit0=IWDG已经启动、bit1=已经执行硬件刷新、bit2=IWDG配置回读警告。正常稳定运行时通常为 `0x0003`；若为 `0x0007`，表示预分频或重装值回读不一致，但任务仍会每100毫秒刷新硬件狗。
 
 ### 3.4 电源状态区
 

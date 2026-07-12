@@ -11,6 +11,7 @@
 #include "modbus_registers.h"
 #include "modbus_time_sync.h"
 #include "systemManagerTask.h"
+#include "system_watchdog.h"
 
 #if MODBUS_JOINT_COUNT != GLOVE_JOINT_DOF_COUNT
 #error "MODBUS_JOINT_COUNT must match GLOVE_JOINT_DOF_COUNT"
@@ -45,10 +46,25 @@ typedef struct
   GloveTouchSample_t touch[GLOVE_TOUCH_COUNT];
 } ModbusTouchSnapshot_t;
 
+typedef struct
+{
+  ModbusImuSnapshot_t imu;
+  ModbusJointSnapshot_t joint;
+  ModbusTouchSnapshot_t touch;
+  GlovePowerStatus_t power;
+  SystemWatchdogStatus_t watchdog;
+  GloveTimestampUs_t utc_timestamp_us;
+  GloveTimestampUs_t local_uptime_us;
+  GloveTimestampUs_t last_sync_utc_us;
+  uint16_t imu_fresh_mask;
+} ModbusReadSnapshot_t;
+
 static uint8_t modbus_slave_address = MODBUS_SLAVE_ADDR_DEFAULT;
 static ModbusImuSnapshot_t modbus_imu_snapshot;
 static ModbusJointSnapshot_t modbus_joint_snapshot;
 static ModbusTouchSnapshot_t modbus_touch_snapshot;
+/* 一个03功能码请求只抓取一次数据，保证多字寄存器来自同一采样帧。 */
+static ModbusReadSnapshot_t modbus_read_snapshot;
 static uint8_t modbus_calib_initialized;
 static GloveQuaternion_t modbus_calib_c_staging[GLOVE_IMU_COUNT];
 static GloveQuaternion_t modbus_calib_m_staging[GLOVE_IMU_COUNT];
@@ -60,6 +76,23 @@ static uint16_t modbus_calib_seq;
 static uint16_t modbus_calib_status = IMU_CALIB_STATUS_IDLE;
 static uint16_t modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
 static uint16_t modbus_calib_last_applied_seq;
+
+static void Modbus_CaptureReadSnapshot(void)
+{
+  /* 这些接口各自负责并发保护，避免在临界区内嵌套调用。 */
+  SystemManagerTask_GetPowerStatus(&modbus_read_snapshot.power);
+  SystemWatchdog_GetStatus(&modbus_read_snapshot.watchdog);
+  modbus_read_snapshot.utc_timestamp_us = ModbusTimeSync_GetUtcTimestampUs();
+  modbus_read_snapshot.local_uptime_us = ModbusTimeSync_GetLocalUptimeUs();
+  modbus_read_snapshot.last_sync_utc_us = ModbusTimeSync_GetLastSyncUtcUs();
+
+  taskENTER_CRITICAL();
+  modbus_read_snapshot.imu_fresh_mask = ImuCanTask_GetFreshMask();
+  modbus_read_snapshot.imu = modbus_imu_snapshot;
+  modbus_read_snapshot.joint = modbus_joint_snapshot;
+  modbus_read_snapshot.touch = modbus_touch_snapshot;
+  taskEXIT_CRITICAL();
+}
 
 static uint16_t Modbus_ReadU16(const uint8_t *data)
 {
@@ -645,22 +678,20 @@ static uint16_t Modbus_ReadImuStatusBits(void)
   uint32_t valid_flags;
   uint16_t snapshot_mask;
 
-  taskENTER_CRITICAL();
-  valid_flags = (modbus_imu_snapshot.valid != 0U) ? modbus_imu_snapshot.valid_flags : 0U;
-  taskEXIT_CRITICAL();
+  valid_flags = (modbus_read_snapshot.imu.valid != 0U) ?
+                modbus_read_snapshot.imu.valid_flags : 0U;
 
   snapshot_mask = (uint16_t)((valid_flags & GLOVE_FRAME_VALID_IMU_ALL_MASK) >>
                              GLOVE_FRAME_VALID_IMU_BIT_SHIFT);
-  return (uint16_t)(snapshot_mask & ImuCanTask_GetFreshMask());
+  return (uint16_t)(snapshot_mask & modbus_read_snapshot.imu_fresh_mask);
 }
 
 static GloveTimestampUs_t Modbus_GetImuTimestampUs(void)
 {
   GloveTimestampUs_t timestamp_us;
 
-  taskENTER_CRITICAL();
-  timestamp_us = (modbus_imu_snapshot.valid != 0U) ? modbus_imu_snapshot.timestamp_us : 0ULL;
-  taskEXIT_CRITICAL();
+  timestamp_us = (modbus_read_snapshot.imu.valid != 0U) ?
+                 modbus_read_snapshot.imu.timestamp_us : 0ULL;
 
   return timestamp_us;
 }
@@ -669,9 +700,8 @@ static GloveTimestampUs_t Modbus_GetJointTimestampUs(void)
 {
   GloveTimestampUs_t timestamp_us;
 
-  taskENTER_CRITICAL();
-  timestamp_us = (modbus_joint_snapshot.valid != 0U) ? modbus_joint_snapshot.timestamp_us : 0ULL;
-  taskEXIT_CRITICAL();
+  timestamp_us = (modbus_read_snapshot.joint.valid != 0U) ?
+                 modbus_read_snapshot.joint.timestamp_us : 0ULL;
 
   return timestamp_us;
 }
@@ -680,21 +710,18 @@ static uint16_t Modbus_ReadJointStatusFlags(void)
 {
   uint16_t status = 0U;
 
-  taskENTER_CRITICAL();
-  if (modbus_joint_snapshot.valid != 0U)
+  if (modbus_read_snapshot.joint.valid != 0U)
   {
     status |= JOINT_STATUS_SNAPSHOT_VALID;
-    if ((modbus_joint_snapshot.valid_flags & GLOVE_FRAME_FLAG_ALGORITHM_VALID) != 0U)
+    if ((modbus_read_snapshot.joint.valid_flags & GLOVE_FRAME_FLAG_ALGORITHM_VALID) != 0U)
     {
       status |= JOINT_STATUS_ALGORITHM_VALID;
     }
-    if ((modbus_joint_snapshot.valid_flags & GLOVE_FRAME_FLAG_IMU_CALIB_APPLIED) != 0U)
+    if ((modbus_read_snapshot.joint.valid_flags & GLOVE_FRAME_FLAG_IMU_CALIB_APPLIED) != 0U)
     {
       status |= JOINT_STATUS_IMU_CALIB_APPLIED;
     }
   }
-  taskEXIT_CRITICAL();
-
   return status;
 }
 
@@ -702,17 +729,14 @@ static uint16_t Modbus_ReadTouchStatusFlags(void)
 {
   uint16_t status = 0U;
 
-  taskENTER_CRITICAL();
-  if (modbus_touch_snapshot.valid != 0U)
+  if (modbus_read_snapshot.touch.valid != 0U)
   {
     status |= R_STATUS_SNAPSHOT_VALID;
-    if ((modbus_touch_snapshot.valid_flags & GLOVE_FRAME_FLAG_TOUCH_VALID) != 0U)
+    if ((modbus_read_snapshot.touch.valid_flags & GLOVE_FRAME_FLAG_TOUCH_VALID) != 0U)
     {
       status |= R_STATUS_TOUCH_VALID;
     }
   }
-  taskEXIT_CRITICAL();
-
   return status;
 }
 
@@ -720,12 +744,11 @@ static uint32_t Modbus_GetJointValidBits(void)
 {
   uint32_t valid_bits = 0UL;
 
-  taskENTER_CRITICAL();
-  if (modbus_joint_snapshot.valid != 0U)
+  if (modbus_read_snapshot.joint.valid != 0U)
   {
     for (uint32_t index = 0U; index < GLOVE_JOINT_DOF_COUNT; index++)
     {
-      float value = modbus_joint_snapshot.joint_angle_deg[index];
+      float value = modbus_read_snapshot.joint.joint_angle_deg[index];
 
       if ((value < 999999936.0f) && (value > -999999936.0f))
       {
@@ -733,8 +756,6 @@ static uint32_t Modbus_GetJointValidBits(void)
       }
     }
   }
-  taskEXIT_CRITICAL();
-
   return valid_bits;
 }
 
@@ -748,53 +769,50 @@ static float Modbus_GetImuFloat(uint16_t imu_index, uint16_t float_index)
   }
 
   /* IMU超时或失联后直接返回0，禁止485继续输出历史缓存。 */
-  if ((ImuCanTask_GetFreshMask() & (uint16_t)(1U << imu_index)) == 0U)
+  if ((modbus_read_snapshot.imu_fresh_mask & (uint16_t)(1U << imu_index)) == 0U)
   {
     return 0.0f;
   }
 
-  taskENTER_CRITICAL();
-  if (modbus_imu_snapshot.valid != 0U)
+  if (modbus_read_snapshot.imu.valid != 0U)
   {
     switch (float_index)
     {
       case 0U:
-        value = modbus_imu_snapshot.imu[imu_index].accel_mps2.x;
+        value = modbus_read_snapshot.imu.imu[imu_index].accel_mps2.x;
         break;
       case 1U:
-        value = modbus_imu_snapshot.imu[imu_index].accel_mps2.y;
+        value = modbus_read_snapshot.imu.imu[imu_index].accel_mps2.y;
         break;
       case 2U:
-        value = modbus_imu_snapshot.imu[imu_index].accel_mps2.z;
+        value = modbus_read_snapshot.imu.imu[imu_index].accel_mps2.z;
         break;
       case 3U:
-        value = modbus_imu_snapshot.imu[imu_index].gyro_radps.x;
+        value = modbus_read_snapshot.imu.imu[imu_index].gyro_radps.x;
         break;
       case 4U:
-        value = modbus_imu_snapshot.imu[imu_index].gyro_radps.y;
+        value = modbus_read_snapshot.imu.imu[imu_index].gyro_radps.y;
         break;
       case 5U:
-        value = modbus_imu_snapshot.imu[imu_index].gyro_radps.z;
+        value = modbus_read_snapshot.imu.imu[imu_index].gyro_radps.z;
         break;
       case 6U:
-        value = modbus_imu_snapshot.quat[imu_index].w;
+        value = modbus_read_snapshot.imu.quat[imu_index].w;
         break;
       case 7U:
-        value = modbus_imu_snapshot.quat[imu_index].x;
+        value = modbus_read_snapshot.imu.quat[imu_index].x;
         break;
       case 8U:
-        value = modbus_imu_snapshot.quat[imu_index].y;
+        value = modbus_read_snapshot.imu.quat[imu_index].y;
         break;
       case 9U:
-        value = modbus_imu_snapshot.quat[imu_index].z;
+        value = modbus_read_snapshot.imu.quat[imu_index].z;
         break;
       default:
         value = 0.0f;
         break;
     }
   }
-  taskEXIT_CRITICAL();
-
   return value;
 }
 
@@ -807,12 +825,10 @@ static float Modbus_GetJointFloat(uint16_t joint_index)
     return 0.0f;
   }
 
-  taskENTER_CRITICAL();
-  if (modbus_joint_snapshot.valid != 0U)
+  if (modbus_read_snapshot.joint.valid != 0U)
   {
-    value = modbus_joint_snapshot.joint_angle_deg[joint_index];
+    value = modbus_read_snapshot.joint.joint_angle_deg[joint_index];
   }
-  taskEXIT_CRITICAL();
 
   return value;
 }
@@ -826,12 +842,10 @@ static uint16_t Modbus_GetTouchValue(uint16_t touch_index)
     return 0U;
   }
 
-  taskENTER_CRITICAL();
-  if (modbus_touch_snapshot.valid != 0U)
+  if (modbus_read_snapshot.touch.valid != 0U)
   {
-    value = modbus_touch_snapshot.touch[touch_index].value;
+    value = modbus_read_snapshot.touch.touch[touch_index].value;
   }
-  taskEXIT_CRITICAL();
 
   return value;
 }
@@ -872,18 +886,14 @@ static GloveTimestampUs_t Modbus_GetTouchTimestampUs(void)
 {
   GloveTimestampUs_t timestamp_us;
 
-  taskENTER_CRITICAL();
-  timestamp_us = (modbus_touch_snapshot.valid != 0U) ? modbus_touch_snapshot.timestamp_us : 0ULL;
-  taskEXIT_CRITICAL();
+  timestamp_us = (modbus_read_snapshot.touch.valid != 0U) ?
+                 modbus_read_snapshot.touch.timestamp_us : 0ULL;
 
   return timestamp_us;
 }
 
 static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 {
-  GlovePowerStatus_t power_status;
-
-  SystemManagerTask_GetPowerStatus(&power_status);
   if (reg_addr == REG_SLAVE_ADDR)
   {
     return (uint16_t)modbus_slave_address;
@@ -896,19 +906,19 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 
   if ((reg_addr >= REG_UTC_TIMESTAMP_US) && (reg_addr < (REG_UTC_TIMESTAMP_US + MODBUS_REGS_ROS_TIME)))
   {
-    return Modbus_ReadRosTimeRegFromUs(ModbusTimeSync_GetUtcTimestampUs(),
+    return Modbus_ReadRosTimeRegFromUs(modbus_read_snapshot.utc_timestamp_us,
                                        (uint16_t)(reg_addr - REG_UTC_TIMESTAMP_US));
   }
 
   if ((reg_addr >= REG_LOCAL_UPTIME_US) && (reg_addr < (REG_LOCAL_UPTIME_US + MODBUS_REGS_ROS_TIME)))
   {
-    return Modbus_ReadRosTimeRegFromUs(ModbusTimeSync_GetLocalUptimeUs(),
+    return Modbus_ReadRosTimeRegFromUs(modbus_read_snapshot.local_uptime_us,
                                        (uint16_t)(reg_addr - REG_LOCAL_UPTIME_US));
   }
 
   if ((reg_addr >= REG_TIME_SYNC_UTC_US) && (reg_addr < (REG_TIME_SYNC_UTC_US + MODBUS_REGS_ROS_TIME)))
   {
-    return Modbus_ReadRosTimeRegFromUs(ModbusTimeSync_GetLastSyncUtcUs(),
+    return Modbus_ReadRosTimeRegFromUs(modbus_read_snapshot.last_sync_utc_us,
                                        (uint16_t)(reg_addr - REG_TIME_SYNC_UTC_US));
   }
 
@@ -941,6 +951,12 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 
     case REG_COMM_STATE:
       return COMM_STATE_OK;
+
+    case REG_RESET_CAUSE:
+      return modbus_read_snapshot.watchdog.reset_cause;
+
+    case REG_WATCHDOG_STATUS:
+      return modbus_read_snapshot.watchdog.status_flags;
 
     case REG_WORK_STATE:
       return WORK_STATE_IDLE;
@@ -997,43 +1013,43 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 
   if ((reg_addr >= REG_BAT_VOLTAGE) && (reg_addr < (REG_BAT_VOLTAGE + MODBUS_REGS_FLOAT32)))
   {
-    return Modbus_ReadFloatReg((float)power_status.battery_voltage_mv / 1000.0f,
+    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.battery_voltage_mv / 1000.0f,
                                (uint16_t)(reg_addr - REG_BAT_VOLTAGE));
   }
 
   if ((reg_addr >= REG_BAT_CURRENT) && (reg_addr < (REG_BAT_CURRENT + MODBUS_REGS_FLOAT32)))
   {
-    return Modbus_ReadFloatReg((float)power_status.battery_current_ma / 1000.0f,
+    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.battery_current_ma / 1000.0f,
                                (uint16_t)(reg_addr - REG_BAT_CURRENT));
   }
 
   if ((reg_addr >= REG_BAT_SOC) && (reg_addr < (REG_BAT_SOC + MODBUS_REGS_FLOAT32)))
   {
-    return Modbus_ReadFloatReg((float)power_status.soc_centi_percent / 100.0f,
+    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.soc_centi_percent / 100.0f,
                                (uint16_t)(reg_addr - REG_BAT_SOC));
   }
 
   switch (reg_addr)
   {
-    case REG_POWER_STATE: return power_status.system_state;
-    case REG_CHARGE_STATE: return power_status.charge_state;
-    case REG_POWER_FLAGS: return power_status.flags;
-    case REG_POWER_FAULT: return power_status.fault_code;
+    case REG_POWER_STATE: return modbus_read_snapshot.power.system_state;
+    case REG_CHARGE_STATE: return modbus_read_snapshot.power.charge_state;
+    case REG_POWER_FLAGS: return modbus_read_snapshot.power.flags;
+    case REG_POWER_FAULT: return modbus_read_snapshot.power.fault_code;
     case REG_BQ_DIAGNOSTIC:
-      return (uint16_t)(((uint16_t)power_status.bq_diagnostic_stage << 8) |
-                        power_status.bq_last_status);
+      return (uint16_t)(((uint16_t)modbus_read_snapshot.power.bq_diagnostic_stage << 8) |
+                        modbus_read_snapshot.power.bq_last_status);
     default: break;
   }
 
   if ((reg_addr >= REG_VBUS_VOLTAGE) && (reg_addr < (REG_VBUS_VOLTAGE + MODBUS_REGS_FLOAT32)))
   {
-    return Modbus_ReadFloatReg((float)power_status.vbus_voltage_mv / 1000.0f,
+    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.vbus_voltage_mv / 1000.0f,
                                (uint16_t)(reg_addr - REG_VBUS_VOLTAGE));
   }
 
   if ((reg_addr >= REG_INPUT_CURRENT) && (reg_addr < (REG_INPUT_CURRENT + MODBUS_REGS_FLOAT32)))
   {
-    return Modbus_ReadFloatReg((float)power_status.input_current_ma / 1000.0f,
+    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.input_current_ma / 1000.0f,
                                (uint16_t)(reg_addr - REG_INPUT_CURRENT));
   }
 
@@ -1159,6 +1175,8 @@ static ModbusResult_t Modbus_HandleReadHoldingRegs(uint8_t response_addr,
                                  tx_buf_size,
                                  tx_len);
   }
+
+  Modbus_CaptureReadSnapshot();
 
   tx_buf[0] = response_addr;
   tx_buf[1] = MB_FC_READ_HOLDING_REGS;
