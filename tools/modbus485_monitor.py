@@ -43,7 +43,7 @@ MODBUS_ROS_TIME_REG_COUNT = 4
 REG_SYSTEM_STATUS_START = 0x0040
 REG_SYSTEM_STATUS_COUNT = 10
 REG_POWER_STATUS_START = 0x0060
-REG_POWER_STATUS_COUNT = 15
+REG_POWER_STATUS_COUNT = 18
 REG_WORK_STATE = 0x0500
 
 REG_IMU_DATA_START = 0x1000
@@ -142,6 +142,8 @@ BQ_DIAG_STAGE_NAMES = {
     8: "charge_safety",
     9: "adc",
     10: "status_read",
+    11: "interrupt_config",
+    12: "interrupt_read",
 }
 
 GLOVE_STATUS_NAMES = {
@@ -171,6 +173,28 @@ POWER_FLAG_NAMES = (
     (1 << 12, "temp_limited"),
     (1 << 13, "charge_fault"),
     (1 << 14, "safety_timer"),
+    (1 << 15, "charge_full"),
+)
+
+BQ_CHARGER_EVENT_NAMES = (
+    (1 << 0, "watchdog"),
+    (1 << 1, "safety_timer"),
+    (1 << 2, "vindpm"),
+    (1 << 3, "iindpm"),
+    (1 << 4, "vsys"),
+    (1 << 5, "thermal_regulation"),
+    (1 << 6, "adc_done"),
+    (1 << 8, "vbus_changed"),
+    (1 << 11, "charge_changed"),
+)
+
+BQ_FAULT_EVENT_NAMES = (
+    (1 << 0, "ts_changed"),
+    (1 << 3, "thermal_shutdown"),
+    (1 << 4, "otg_fault"),
+    (1 << 5, "system_fault"),
+    (1 << 6, "battery_fault"),
+    (1 << 7, "vbus_fault"),
 )
 
 RESET_CAUSE_NAMES = (
@@ -814,6 +838,9 @@ class PowerSnapshot:
     input_current_a: float
     bq_diag_stage: int
     bq_diag_status: int
+    bq_charger_events: int
+    bq_fault_events: int
+    bq_interrupt_count: int
 
 
 def decode_power(regs: list[int]) -> PowerSnapshot:
@@ -831,6 +858,9 @@ def decode_power(regs: list[int]) -> PowerSnapshot:
         input_current_a=regs_to_f32_le_words(regs[12], regs[13]),
         bq_diag_stage=(regs[14] >> 8) & 0xFF,
         bq_diag_status=regs[14] & 0xFF,
+        bq_charger_events=regs[15],
+        bq_fault_events=regs[16],
+        bq_interrupt_count=regs[17],
     )
 
 
@@ -2127,6 +2157,11 @@ class ModbusMonitorApp(tk.Tk):
             f"Power fault       : 0x{power.fault_code:04X}",
             f"BQ diagnostic     : {power.bq_diag_stage} ({BQ_DIAG_STAGE_NAMES.get(power.bq_diag_stage, 'unknown')}) / "
             f"{power.bq_diag_status} ({GLOVE_STATUS_NAMES.get(power.bq_diag_status, 'unknown')})",
+            f"BQ charger event  : 0x{power.bq_charger_events:04X} "
+            f"({format_flags(power.bq_charger_events, BQ_CHARGER_EVENT_NAMES)})",
+            f"BQ fault event    : 0x{power.bq_fault_events:02X} "
+            f"({format_flags(power.bq_fault_events, BQ_FAULT_EVENT_NAMES)})",
+            f"BQ INT count      : {power.bq_interrupt_count} (low 16 bits)",
             f"VBUS/input        : {power.vbus_voltage_v:.3f} V / {power.input_current_a:+.3f} A",
             "",
             f"IMU timestamp     : {imu_time}",
@@ -2162,6 +2197,11 @@ class ModbusMonitorApp(tk.Tk):
             f"({BQ_DIAG_STAGE_NAMES.get(power.bq_diag_stage, 'unknown')}), "
             f"status={power.bq_diag_status} "
             f"({GLOVE_STATUS_NAMES.get(power.bq_diag_status, 'unknown')})",
+            f"BQ events       : charger=0x{power.bq_charger_events:04X} "
+            f"({format_flags(power.bq_charger_events, BQ_CHARGER_EVENT_NAMES)})",
+            f"                  fault=0x{power.bq_fault_events:02X} "
+            f"({format_flags(power.bq_fault_events, BQ_FAULT_EVENT_NAMES)})",
+            f"BQ INT count    : {power.bq_interrupt_count} (low 16 bits)",
             "",
             "Fault high bits: bit8=BQ comm, bit9=MAX17043 comm, bit10=voltage mismatch",
         ]
@@ -2342,6 +2382,9 @@ class ModbusMonitorApp(tk.Tk):
             writer.writerow(("status", "power", "input_current_a", power.input_current_a))
             writer.writerow(("status", "power", "bq_diag_stage", power.bq_diag_stage))
             writer.writerow(("status", "power", "bq_diag_status", power.bq_diag_status))
+            writer.writerow(("status", "power", "bq_charger_events", f"0x{power.bq_charger_events:04X}"))
+            writer.writerow(("status", "power", "bq_fault_events", f"0x{power.bq_fault_events:02X}"))
+            writer.writerow(("status", "power", "bq_interrupt_count", power.bq_interrupt_count))
             writer.writerow(("status", "system", "reset_cause", f"0x{snapshot.system[6]:04X}"))
             writer.writerow(("status", "system", "watchdog_missing_tasks", f"0x{snapshot.system[7]:04X}"))
             writer.writerow(("status", "imu", "timestamp_datetime_utc", imu_time_text))

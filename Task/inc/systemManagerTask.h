@@ -64,7 +64,9 @@ typedef enum
     GLOVE_BQ_DIAG_TERMINATION_CURRENT = 7,
     GLOVE_BQ_DIAG_CHARGE_SAFETY = 8,
     GLOVE_BQ_DIAG_ADC = 9,
-    GLOVE_BQ_DIAG_STATUS_READ = 10
+    GLOVE_BQ_DIAG_STATUS_READ = 10,
+    GLOVE_BQ_DIAG_INTERRUPT_CONFIG = 11,
+    GLOVE_BQ_DIAG_INTERRUPT_READ = 12
 } GloveBqDiagnosticStage_t;
 
 #define GLOVE_POWER_FLAG_VOLTAGE_VALID       (1U << 0)
@@ -82,6 +84,7 @@ typedef enum
 #define GLOVE_POWER_FLAG_TEMP_LIMITED        (1U << 12)
 #define GLOVE_POWER_FLAG_CHARGE_FAULT        (1U << 13)
 #define GLOVE_POWER_FLAG_SAFETY_TIMER         (1U << 14)
+#define GLOVE_POWER_FLAG_CHARGE_FULL          (1U << 15)
 
 typedef struct
 {
@@ -94,6 +97,9 @@ typedef struct
     uint16_t soc_centi_percent;
     uint16_t flags;
     uint16_t fault_code;
+    uint16_t bq_charger_events;
+    uint16_t bq_fault_events;
+    uint16_t bq_interrupt_count;
     uint8_t soc_percent;
     uint8_t system_state;
     uint8_t charge_state;
@@ -108,7 +114,8 @@ void SystemManagerTask(void *argument);
 void SystemManagerTask_GetBatteryStatus(GloveBatteryStatus_t *status);
 void SystemManagerTask_GetPowerStatus(GlovePowerStatus_t *status);
 void SystemManagerTask_OnPowerKeyEdgeFromIsr(void);
-void SystemManagerTask_OnPowerStatusEdgeFromIsr(void);
+void SystemManagerTask_OnChargeStatusEdgeFromIsr(void);
+void SystemManagerTask_OnBqInterruptFromIsr(void);
 uint8_t SystemManagerTask_IsPeripheralPowerEnabled(void);
 
 #ifdef __cplusplus

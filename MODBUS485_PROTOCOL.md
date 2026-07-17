@@ -126,6 +126,9 @@ Register order is little-endian by 16-bit Modbus word:
 | `0x006A` | 2 | float32 | VBUS voltage，单位 V |
 | `0x006C` | 2 | float32 | input current，单位 A |
 | `0x006E` | 1 | U16 | BQ25622 diagnostic：高8位为诊断阶段，低8位为驱动状态 |
+| `0x006F` | 1 | U16 | 最近一次BQ充电事件：低8位为Charger Flag 0，高8位为Charger Flag 1 |
+| `0x0070` | 1 | U16 | 最近一次BQ故障事件：低8位为Fault Flag 0，高8位保留 |
+| `0x0071` | 1 | U16 | BQ INT下降沿累计次数低16位，溢出后回绕 |
 
 system power state：`0=INIT`、`1=ON_NORMAL`、`2=ON_LOW`、`3=USER_OFF`、`4=LOW_BAT_LOCKOUT`。
 
@@ -150,10 +153,15 @@ charger state：`0=UNKNOWN`、`1=NO_INPUT`、`2=IDLE`、`3=CC`、`4=CV`、`5=TOP
 | bit12 | charging limited or suspended by temperature state |
 | bit13 | charger fault |
 | bit14 | charge safety timer expired |
+| bit15 | hardware charge termination confirmed，充电状态为FULL |
 
 读取数值前应检查对应有效位。MAX17043尚未加载本电芯的定制模型，因此SOC只显示，不参与低电状态和严重低电保护；相关保护仅依据有效电压。`0x0069` 低8位为BQ25622原始故障状态，高位中 `bit8/bit9/bit10` 分别表示BQ通信、MAX17043通信和电压不一致。
 
-`0x006E` 用于定位BQ25622通信或配置失败的位置。诊断阶段定义：`0=none`、`1=init`、`2=watchdog`、`3=input_current`、`4=external_ilim`、`5=charge_voltage`、`6=charge_current`、`7=termination_current`、`8=charge_safety`、`9=adc`、`10=status_read`。驱动状态定义：`0=OK`、`1=ERROR`、`2=TIMEOUT`、`3=NO_MEMORY`、`4=INVALID_PARAM`、`5=QUEUE_FULL`、`6=QUEUE_EMPTY`、`7=NOT_READY`。诊断阶段为0且状态为0表示BQ配置和最近一次状态读取正常。
+`0x006E` 用于定位BQ25622通信或配置失败的位置。诊断阶段定义：`0=none`、`1=init`、`2=watchdog`、`3=input_current`、`4=external_ilim`、`5=charge_voltage`、`6=charge_current`、`7=termination_current`、`8=charge_safety`、`9=adc`、`10=status_read`、`11=interrupt_config`、`12=interrupt_read`。驱动状态定义：`0=OK`、`1=ERROR`、`2=TIMEOUT`、`3=NO_MEMORY`、`4=INVALID_PARAM`、`5=QUEUE_FULL`、`6=QUEUE_EMPTY`、`7=NOT_READY`。诊断阶段为0且状态为0表示BQ配置和最近一次状态读取正常。
+
+`0x006F` 的低字节对应BQ25622 `Charger_Flag_0`：bit0=watchdog、bit1=safety timer、bit2=VINDPM、bit3=IINDPM、bit4=VSYS、bit5=thermal regulation、bit6=ADC done。高字节对应 `Charger_Flag_1`：高字节bit0=VBUS changed，高字节bit3=charge status changed。换算到整个U16后分别是bit8和bit11。
+
+`0x0070` 低字节对应 `Fault_Flag_0`：bit0=TS changed、bit3=thermal shutdown、bit4=OTG fault、bit5=system fault、bit6=battery fault、bit7=VBUS fault。BQ硬件Flag为读清零，固件会先保存最近一次INT原因，再读取当前Status；因此这些寄存器表示最近一次成功读取的中断事件，而不是当前持续故障，当前故障仍以 `0x0069` 为准。
 
 ### 3.5 工作状态
 

@@ -18,6 +18,12 @@
 #define BQ25622_REG_CHARGER_STATUS_0              (0x1DU)
 #define BQ25622_REG_CHARGER_STATUS_1              (0x1EU)
 #define BQ25622_REG_FAULT_STATUS_0                (0x1FU)
+#define BQ25622_REG_CHARGER_FLAG_0                (0x20U)
+#define BQ25622_REG_CHARGER_FLAG_1                (0x21U)
+#define BQ25622_REG_FAULT_FLAG_0                  (0x22U)
+#define BQ25622_REG_CHARGER_MASK_0                (0x23U)
+#define BQ25622_REG_CHARGER_MASK_1                (0x24U)
+#define BQ25622_REG_FAULT_MASK_0                  (0x25U)
 #define BQ25622_REG_ADC_CONTROL                   (0x26U)
 #define BQ25622_REG_IBUS_ADC                      (0x28U)
 #define BQ25622_REG_IBAT_ADC                      (0x2AU)
@@ -53,6 +59,11 @@
 #define BQ25622_TERMINATION_CURRENT_MIN_MA         (10U)
 #define BQ25622_TERMINATION_CURRENT_MAX_MA         (620U)
 #define BQ25622_TERMINATION_CURRENT_STEP_MA        (10U)
+
+/* 屏蔽容易频繁变化的ADC、输入限流和输入电压调节事件，其余状态及故障保留中断。 */
+#define BQ25622_CHARGER_MASK_0_CONFIG              (0x4CU)
+#define BQ25622_CHARGER_MASK_1_CONFIG              (0x00U)
+#define BQ25622_FAULT_MASK_0_CONFIG                (0x00U)
 
 #define BQ25622_DEBUG_PRINTF(...)                 \
     do                                            \
@@ -331,7 +342,8 @@ GloveStatus_t Bq25622_EnableChargeSafety(const Bq25622Handle_t *handle)
 
     status = Bq25622_ReadRegister8(handle, BQ25622_REG_CHARGE_CONTROL_0, &control0);
     if (status != GLOVE_STATUS_OK) return status;
-    control0 |= 0x04U; /* EN_TERM */
+    /* 开启硬件终止，并明确使用VREG以下100mV的自动再充电阈值。 */
+    control0 = (uint8_t)((control0 | 0x04U) & (uint8_t)(~0x01U));
     status = Bq25622_WriteRegister8(handle, BQ25622_REG_CHARGE_CONTROL_0, control0);
     if (status != GLOVE_STATUS_OK) return status;
 
@@ -349,12 +361,81 @@ GloveStatus_t Bq25622_EnableChargeSafety(const Bq25622Handle_t *handle)
     if (status != GLOVE_STATUS_OK) return status;
 
     status = Bq25622_ReadRegister8(handle, BQ25622_REG_CHARGE_CONTROL_0, &control0);
-    if ((status != GLOVE_STATUS_OK) || ((control0 & 0x04U) == 0U)) return GLOVE_STATUS_ERROR;
+    if ((status != GLOVE_STATUS_OK) || ((control0 & 0x05U) != 0x04U)) return GLOVE_STATUS_ERROR;
     status = Bq25622_ReadRegister8(handle, BQ25622_REG_CHARGE_TIMER_CONTROL, &timer_control);
     if ((status != GLOVE_STATUS_OK) || ((timer_control & 0x05U) != 0x04U)) return GLOVE_STATUS_ERROR;
     status = Bq25622_ReadRegister8(handle, BQ25622_REG_CHARGER_CONTROL_1, &charger_control1);
     if ((status != GLOVE_STATUS_OK) || ((charger_control1 & 0x23U) != 0x20U)) return GLOVE_STATUS_ERROR;
     return GLOVE_STATUS_OK;
+}
+
+GloveStatus_t Bq25622_ConfigureInterrupts(const Bq25622Handle_t *handle)
+{
+    uint8_t readback;
+    GloveStatus_t status;
+
+    if (handle == NULL)
+    {
+        return GLOVE_STATUS_INVALID_PARAM;
+    }
+
+    status = Bq25622_WriteRegister8(handle,
+                                    BQ25622_REG_CHARGER_MASK_0,
+                                    BQ25622_CHARGER_MASK_0_CONFIG);
+    if (status != GLOVE_STATUS_OK) return status;
+    status = Bq25622_WriteRegister8(handle,
+                                    BQ25622_REG_CHARGER_MASK_1,
+                                    BQ25622_CHARGER_MASK_1_CONFIG);
+    if (status != GLOVE_STATUS_OK) return status;
+    status = Bq25622_WriteRegister8(handle,
+                                    BQ25622_REG_FAULT_MASK_0,
+                                    BQ25622_FAULT_MASK_0_CONFIG);
+    if (status != GLOVE_STATUS_OK) return status;
+
+    status = Bq25622_ReadRegister8(handle, BQ25622_REG_CHARGER_MASK_0, &readback);
+    if ((status != GLOVE_STATUS_OK) ||
+        ((readback & 0x7FU) != BQ25622_CHARGER_MASK_0_CONFIG))
+    {
+        return GLOVE_STATUS_ERROR;
+    }
+    status = Bq25622_ReadRegister8(handle, BQ25622_REG_CHARGER_MASK_1, &readback);
+    if ((status != GLOVE_STATUS_OK) ||
+        ((readback & 0x09U) != BQ25622_CHARGER_MASK_1_CONFIG))
+    {
+        return GLOVE_STATUS_ERROR;
+    }
+    status = Bq25622_ReadRegister8(handle, BQ25622_REG_FAULT_MASK_0, &readback);
+    if ((status != GLOVE_STATUS_OK) ||
+        ((readback & 0xF9U) != BQ25622_FAULT_MASK_0_CONFIG))
+    {
+        return GLOVE_STATUS_ERROR;
+    }
+    return GLOVE_STATUS_OK;
+}
+
+GloveStatus_t Bq25622_ReadInterruptFlags(const Bq25622Handle_t *handle,
+                                         Bq25622InterruptFlags_t *flags)
+{
+    GloveStatus_t status;
+
+    if ((handle == NULL) || (flags == NULL))
+    {
+        return GLOVE_STATUS_INVALID_PARAM;
+    }
+
+    (void)memset(flags, 0, sizeof(*flags));
+    /* Flag寄存器为读清零，先保存事件原因，再由任务读取当前状态寄存器。 */
+    status = Bq25622_ReadRegister8(handle,
+                                   BQ25622_REG_CHARGER_FLAG_0,
+                                   &flags->charger_flag0);
+    if (status != GLOVE_STATUS_OK) return status;
+    status = Bq25622_ReadRegister8(handle,
+                                   BQ25622_REG_CHARGER_FLAG_1,
+                                   &flags->charger_flag1);
+    if (status != GLOVE_STATUS_OK) return status;
+    return Bq25622_ReadRegister8(handle,
+                                 BQ25622_REG_FAULT_FLAG_0,
+                                 &flags->fault_flag0);
 }
 
 static int16_t Bq25622_SignExtend(uint16_t value, uint8_t width)

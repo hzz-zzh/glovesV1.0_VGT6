@@ -1170,7 +1170,7 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
   }
   else if (GPIO_Pin == STATUS_CHARGE_Pin)
   {
-    SystemManagerTask_OnPowerStatusEdgeFromIsr();
+    SystemManagerTask_OnChargeStatusEdgeFromIsr();
   }
 }
 
@@ -1182,7 +1182,7 @@ void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
   }
   else if (GPIO_Pin == INT_GAUGE_BQ_Pin)
   {
-    SystemManagerTask_OnPowerStatusEdgeFromIsr();
+    SystemManagerTask_OnBqInterruptFromIsr();
   }
 }
 

@@ -1038,6 +1038,12 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
     case REG_BQ_DIAGNOSTIC:
       return (uint16_t)(((uint16_t)modbus_read_snapshot.power.bq_diagnostic_stage << 8) |
                         modbus_read_snapshot.power.bq_last_status);
+    case REG_BQ_CHARGER_EVENTS:
+      return modbus_read_snapshot.power.bq_charger_events;
+    case REG_BQ_FAULT_EVENTS:
+      return modbus_read_snapshot.power.bq_fault_events;
+    case REG_BQ_INTERRUPT_COUNT:
+      return modbus_read_snapshot.power.bq_interrupt_count;
     default: break;
   }
 

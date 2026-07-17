@@ -32,7 +32,7 @@
 #define SYSTEM_MANAGER_POWER_KEY_LONG_PRESS_MS       (600U)
 #define SYSTEM_MANAGER_POWER_KEY_PRESSED_LEVEL       GPIO_PIN_RESET
 #define SYSTEM_MANAGER_POWER_STOP_TIMEOUT_MS         (100U)
-#define SYSTEM_MANAGER_LOW_VOLTAGE_MV                (3500U)
+#define SYSTEM_MANAGER_LOW_VOLTAGE_MV                (3300U)
 #define SYSTEM_MANAGER_LOW_RELEASE_VOLTAGE_MV        (3650U)
 #define SYSTEM_MANAGER_CRITICAL_VOLTAGE_MV           (3200U)
 #define SYSTEM_MANAGER_EMERGENCY_VOLTAGE_MV          (3050U)
@@ -46,19 +46,26 @@
 #define SYSTEM_MANAGER_CRITICAL_CONFIRM_SAMPLES      (3U)
 #define SYSTEM_MANAGER_LOCKOUT_RELEASE_SAMPLES       (10U)
 #define SYSTEM_MANAGER_VOLTAGE_MISMATCH_MV           (100U)
+#define SYSTEM_MANAGER_FULL_MIN_VOLTAGE_MV            (4300U)
+#define SYSTEM_MANAGER_FULL_RELEASE_VOLTAGE_MV        (4200U)
+#define SYSTEM_MANAGER_FULL_CONFIRM_SAMPLES           (3U)
+#define SYSTEM_MANAGER_FULL_CURRENT_MARGIN_MA         (40U)
 
 static GloveBatteryStatus_t s_battery_status;
 static GlovePowerStatus_t s_power_status;
 static Bq25622Handle_t s_bq25622;
 static Max17043Handle_t s_max17043;
 static Bq25622StatusSnapshot_t s_bq_snapshot;
+static Bq25622InterruptFlags_t s_bq_last_events;
 static Max17043BatteryData_t s_gauge_data;
 static volatile uint8_t s_periph_power_enabled = 1U;
 static volatile uint8_t s_power_key_off_wake_pulse_seen;
 static volatile uint8_t s_power_key_release_edge_seen;
 static volatile uint8_t s_power_key_off_wake_armed = 1U;
 static volatile uint8_t s_power_key_ignore_until_release;
-static volatile uint8_t s_power_status_edge_pending;
+static volatile uint8_t s_bq_interrupt_pending;
+static volatile uint8_t s_charge_status_edge_pending;
+static volatile uint32_t s_bq_interrupt_count;
 static volatile uint8_t s_power_key_press_edge_valid;
 static volatile uint32_t s_power_key_press_edge_ms;
 static uint8_t s_power_key_last_raw_pressed;
@@ -73,6 +80,11 @@ static uint8_t s_bq_valid;
 static uint8_t s_gauge_valid;
 static uint8_t s_bq_failures;
 static uint8_t s_gauge_failures;
+static uint8_t s_charge_allowed;
+static uint8_t s_charge_was_active;
+static uint8_t s_charge_change_event_pending;
+static uint8_t s_full_confirm_count;
+static uint8_t s_full_latched;
 static uint8_t s_bq_diagnostic_stage;
 static GloveStatus_t s_bq_last_status = GLOVE_STATUS_OK;
 static uint8_t s_low_voltage_count;
@@ -103,9 +115,10 @@ static uint16_t SystemManager_AbsDiffU16(uint16_t left, uint16_t right)
 
 static void SystemManager_SetChargeAllowed(uint8_t allowed)
 {
+    s_charge_allowed = (allowed != 0U) ? 1U : 0U;
     HAL_GPIO_WritePin(DISABLE_CHARGE_GPIO_Port,
                       DISABLE_CHARGE_Pin,
-                      (allowed != 0U) ? GPIO_PIN_RESET : GPIO_PIN_SET);
+                      (s_charge_allowed != 0U) ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
 static uint8_t SystemManager_WaitAcquisitionPaused(uint32_t timeout_ms)
@@ -190,9 +203,15 @@ void SystemManagerTask_OnPowerKeyEdgeFromIsr(void)
     }
 }
 
-void SystemManagerTask_OnPowerStatusEdgeFromIsr(void)
+void SystemManagerTask_OnChargeStatusEdgeFromIsr(void)
 {
-    s_power_status_edge_pending = 1U;
+    s_charge_status_edge_pending = 1U;
+}
+
+void SystemManagerTask_OnBqInterruptFromIsr(void)
+{
+    s_bq_interrupt_pending = 1U;
+    s_bq_interrupt_count++;
 }
 
 static uint8_t SystemManager_TakeIsrFlag(volatile uint8_t *flag)
@@ -343,6 +362,8 @@ static const char *SystemManager_BqStageName(uint8_t stage)
         case GLOVE_BQ_DIAG_CHARGE_SAFETY: return "charge_safety";
         case GLOVE_BQ_DIAG_ADC: return "adc";
         case GLOVE_BQ_DIAG_STATUS_READ: return "status_read";
+        case GLOVE_BQ_DIAG_INTERRUPT_CONFIG: return "interrupt_config";
+        case GLOVE_BQ_DIAG_INTERRUPT_READ: return "interrupt_read";
         default: return "none";
     }
 }
@@ -371,8 +392,13 @@ static GloveStatus_t SystemManager_ConfigureBq(void)
 {
     GloveStatus_t status;
     uint8_t stage = GLOVE_BQ_DIAG_INIT;
+    Bq25622InterruptFlags_t cleared_events;
 
     SystemManager_SetChargeAllowed(0U);
+    s_full_latched = 0U;
+    s_full_confirm_count = 0U;
+    s_charge_was_active = 0U;
+    s_charge_change_event_pending = 0U;
     status = Bq25622_Init(&s_bq25622, I2C_BUS_1, SYSTEM_MANAGER_BQ25622_TIMEOUT_MS);
     if (status != GLOVE_STATUS_OK) goto failed;
 
@@ -408,6 +434,14 @@ static GloveStatus_t SystemManager_ConfigureBq(void)
     status = Bq25622_EnableChargeSafety(&s_bq25622);
     if (status != GLOVE_STATUS_OK) goto failed;
 
+    stage = GLOVE_BQ_DIAG_INTERRUPT_CONFIG;
+    status = Bq25622_ConfigureInterrupts(&s_bq25622);
+    if (status != GLOVE_STATUS_OK) goto failed;
+    /* 清除上电和重新配置前锁存的事件，之后只记录新的INT原因。 */
+    status = Bq25622_ReadInterruptFlags(&s_bq25622, &cleared_events);
+    if (status != GLOVE_STATUS_OK) goto failed;
+    (void)memset(&s_bq_last_events, 0, sizeof(s_bq_last_events));
+
     stage = GLOVE_BQ_DIAG_ADC;
     status = Bq25622_EnableAdc(&s_bq25622);
     if (status != GLOVE_STATUS_OK) goto failed;
@@ -431,6 +465,88 @@ failed:
     return status;
 }
 
+static uint8_t SystemManager_IsRawChargeActive(void)
+{
+    return ((s_bq_snapshot.charge_status >= 1U) &&
+            (s_bq_snapshot.charge_status <= 3U)) ? 1U : 0U;
+}
+
+static uint8_t SystemManager_IsFullElectricalCondition(void)
+{
+    int32_t current_ma;
+    int32_t current_limit_ma =
+        (int32_t)SYSTEM_MANAGER_BQ25622_TERMINATION_CURRENT_MA +
+        (int32_t)SYSTEM_MANAGER_FULL_CURRENT_MARGIN_MA;
+
+    if ((s_bq_snapshot.battery_voltage_mv < SYSTEM_MANAGER_FULL_MIN_VOLTAGE_MV) ||
+        (s_bq_snapshot.current_valid == 0U))
+    {
+        return 0U;
+    }
+
+    current_ma = (int32_t)s_bq_snapshot.battery_current_ma;
+    if (current_ma < 0) current_ma = -current_ma;
+    return (current_ma <= current_limit_ma) ? 1U : 0U;
+}
+
+static void SystemManager_UpdateFullDetection(void)
+{
+    uint8_t raw_active;
+    uint8_t full_candidate;
+
+    if ((s_bq_valid == 0U) ||
+        (s_bq_snapshot.vbus_present == 0U) ||
+        (s_charge_allowed == 0U) ||
+        ((s_bq_snapshot.fault_status0 & 0xF8U) != 0U) ||
+        (s_bq_snapshot.temperature_status != 0U))
+    {
+        s_full_latched = 0U;
+        s_full_confirm_count = 0U;
+        s_charge_was_active = 0U;
+        s_charge_change_event_pending = 0U;
+        return;
+    }
+
+    raw_active = SystemManager_IsRawChargeActive();
+    if (raw_active != 0U)
+    {
+        s_charge_was_active = 1U;
+        s_charge_change_event_pending = 0U;
+        s_full_latched = 0U;
+        s_full_confirm_count = 0U;
+        return;
+    }
+
+    if ((s_full_latched != 0U) &&
+        (s_bq_snapshot.battery_voltage_mv >= SYSTEM_MANAGER_FULL_RELEASE_VOLTAGE_MV))
+    {
+        return;
+    }
+
+    full_candidate = ((s_charge_was_active != 0U) ||
+                      (s_charge_change_event_pending != 0U) ||
+                      (SystemManager_IsFullElectricalCondition() != 0U)) ? 1U : 0U;
+    if ((full_candidate != 0U) &&
+        (s_bq_snapshot.battery_voltage_mv >= SYSTEM_MANAGER_FULL_MIN_VOLTAGE_MV))
+    {
+        if (s_full_confirm_count < SYSTEM_MANAGER_FULL_CONFIRM_SAMPLES)
+        {
+            s_full_confirm_count++;
+        }
+        if (s_full_confirm_count >= SYSTEM_MANAGER_FULL_CONFIRM_SAMPLES)
+        {
+            s_full_latched = 1U;
+            s_charge_was_active = 0U;
+            s_charge_change_event_pending = 0U;
+        }
+    }
+    else
+    {
+        s_full_latched = 0U;
+        s_full_confirm_count = 0U;
+    }
+}
+
 static GloveChargeState_t SystemManager_DecodeChargeState(void)
 {
     if (s_bq_valid == 0U) return GLOVE_CHARGE_STATE_UNKNOWN;
@@ -440,13 +556,7 @@ static GloveChargeState_t SystemManager_DecodeChargeState(void)
     if (s_bq_snapshot.charge_status == 1U) return GLOVE_CHARGE_STATE_CC;
     if (s_bq_snapshot.charge_status == 2U) return GLOVE_CHARGE_STATE_CV;
     if (s_bq_snapshot.charge_status == 3U) return GLOVE_CHARGE_STATE_TOPOFF;
-    if ((s_bq_snapshot.battery_voltage_mv >= 4300U) &&
-        (s_bq_snapshot.current_valid != 0U) &&
-        (s_bq_snapshot.battery_current_ma >= 0) &&
-        (s_bq_snapshot.battery_current_ma <= (int16_t)SYSTEM_MANAGER_BQ25622_TERMINATION_CURRENT_MA))
-    {
-        return GLOVE_CHARGE_STATE_FULL;
-    }
+    if (s_full_latched != 0U) return GLOVE_CHARGE_STATE_FULL;
     return GLOVE_CHARGE_STATE_IDLE;
 }
 
@@ -618,6 +728,7 @@ static void SystemManager_UpdatePublicStatus(void)
     if ((s_bq_valid != 0U) && (s_bq_snapshot.temperature_status != 0U)) flags |= GLOVE_POWER_FLAG_TEMP_LIMITED;
     if (charge_state == GLOVE_CHARGE_STATE_FAULT) flags |= GLOVE_POWER_FLAG_CHARGE_FAULT;
     if ((s_bq_valid != 0U) && ((s_bq_snapshot.charger_status0 & 0x02U) != 0U)) flags |= GLOVE_POWER_FLAG_SAFETY_TIMER;
+    if (charge_state == GLOVE_CHARGE_STATE_FULL) flags |= GLOVE_POWER_FLAG_CHARGE_FULL;
 
     taskENTER_CRITICAL();
     s_power_status.timestamp_ms = SystemManager_GetTimestampMs();
@@ -628,6 +739,11 @@ static void SystemManager_UpdatePublicStatus(void)
     s_power_status.soc_centi_percent = (s_gauge_valid != 0U) ? s_gauge_data.soc_centi_percent : 0U;
     s_power_status.soc_percent = (s_gauge_valid != 0U) ? s_gauge_data.soc_percent : 0U;
     s_power_status.flags = flags;
+    s_power_status.bq_charger_events =
+        (uint16_t)((uint16_t)s_bq_last_events.charger_flag0 |
+                   ((uint16_t)s_bq_last_events.charger_flag1 << 8));
+    s_power_status.bq_fault_events = s_bq_last_events.fault_flag0;
+    s_power_status.bq_interrupt_count = (uint16_t)s_bq_interrupt_count;
     s_power_status.charge_state = (uint8_t)charge_state;
     s_power_status.bq_vbus_type = (s_bq_valid != 0U) ? s_bq_snapshot.vbus_status : 0U;
     s_power_status.bq_temperature_status = (s_bq_valid != 0U) ? s_bq_snapshot.temperature_status : 0U;
@@ -684,6 +800,9 @@ void SystemManagerTask(void *argument)
     uint32_t gauge_elapsed = 0U;
     uint32_t startup_elapsed = 0U;
     uint32_t retry_elapsed = SYSTEM_MANAGER_BQ_RETRY_PERIOD_MS;
+    uint8_t bq_interrupt_pending;
+    uint8_t charge_status_edge_pending;
+    Bq25622InterruptFlags_t interrupt_events;
     GloveStatus_t status;
 
     (void)argument;
@@ -714,11 +833,34 @@ void SystemManagerTask(void *argument)
             continue;
         }
 
-        if (SystemManager_TakeIsrFlag(&s_power_status_edge_pending) != 0U)
+        bq_interrupt_pending = SystemManager_TakeIsrFlag(&s_bq_interrupt_pending);
+        charge_status_edge_pending =
+            SystemManager_TakeIsrFlag(&s_charge_status_edge_pending);
+
+        if ((bq_interrupt_pending != 0U) && (s_bq_ready != 0U))
         {
-            /* 中断只用于提前轮询，最终状态仍以I2C寄存器为准。 */
+            status = Bq25622_ReadInterruptFlags(&s_bq25622, &interrupt_events);
+            if (status == GLOVE_STATUS_OK)
+            {
+                /* 保存最近一次硬件事件，供状态机和485诊断使用。 */
+                s_bq_last_events = interrupt_events;
+                if ((interrupt_events.charger_flag1 &
+                     BQ25622_EVENT_CHARGE_CHANGED) != 0U)
+                {
+                    s_charge_change_event_pending = 1U;
+                }
+            }
+            else
+            {
+                SystemManager_SetBqDiagnostic(GLOVE_BQ_DIAG_INTERRUPT_READ, status);
+            }
+        }
+
+        if ((bq_interrupt_pending != 0U) ||
+            (charge_status_edge_pending != 0U))
+        {
+            /* INT和STAT只用于提前轮询，最终状态仍以I2C寄存器为准。 */
             bq_elapsed = SYSTEM_MANAGER_BQ_READ_PERIOD_MS;
-            gauge_elapsed = SYSTEM_MANAGER_GAUGE_READ_PERIOD_MS;
         }
 
         if (s_bq_ready == 0U)
@@ -741,11 +883,13 @@ void SystemManagerTask(void *argument)
                 {
                     s_bq_valid = 1U;
                     s_bq_failures = 0U;
-                    if (s_bq_diagnostic_stage == GLOVE_BQ_DIAG_STATUS_READ)
+                    if ((s_bq_diagnostic_stage == GLOVE_BQ_DIAG_STATUS_READ) ||
+                        (s_bq_diagnostic_stage == GLOVE_BQ_DIAG_INTERRUPT_READ))
                     {
                         SystemManager_SetBqDiagnostic(GLOVE_BQ_DIAG_NONE, GLOVE_STATUS_OK);
                     }
                     s_power_status.sample_seq++;
+                    SystemManager_UpdateFullDetection();
                     SystemManager_UpdatePublicStatus();
                     if ((s_bq_snapshot.battery_voltage_mv <= SYSTEM_MANAGER_EMERGENCY_VOLTAGE_MV) &&
                         (s_bq_snapshot.battery_voltage_mv != 0U))
