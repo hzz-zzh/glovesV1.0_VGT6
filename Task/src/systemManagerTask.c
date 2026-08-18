@@ -181,16 +181,18 @@ void SystemManagerTask_OnPowerKeyEdgeFromIsr(void)
         if (HAL_GPIO_ReadPin(POWER_ON_OFF_GPIO_Port, POWER_ON_OFF_Pin) ==
             SYSTEM_MANAGER_POWER_KEY_PRESSED_LEVEL)
         {
-            /* 长按时间从真实按下沿开始计算，消抖不再额外增加20ms。 */
+            /* 新的按下沿先清除旧松手标志，避免长按关机后误开机。 */
+            s_power_key_release_edge_seen = 0U;
             s_power_key_press_edge_ms = HAL_GetTick();
             s_power_key_press_edge_valid = 1U;
         }
-        else
+        else if (s_power_key_ignore_until_release != 0U)
         {
             s_power_key_release_edge_seen = 1U;
         }
         return;
     }
+
     if (s_power_key_ignore_until_release != 0U)
     {
         s_power_key_release_edge_seen = 1U;
@@ -198,6 +200,7 @@ void SystemManagerTask_OnPowerKeyEdgeFromIsr(void)
     }
     if (s_power_key_off_wake_armed != 0U)
     {
+        /* 外设断电后保留边沿脉冲唤醒，兼容板上按键的实际波形。 */
         s_power_key_off_wake_pulse_seen = 1U;
         s_power_key_off_wake_armed = 0U;
     }
@@ -237,6 +240,8 @@ static void SystemManager_InitPowerKeyState(void)
         (HAL_GPIO_ReadPin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin) == GPIO_PIN_SET) ? 1U : 0U;
     s_power_key_last_raw_pressed = SystemManager_ReadPowerKeyPressed();
     s_power_key_debounced_pressed = s_power_key_last_raw_pressed;
+    s_power_key_off_wake_pulse_seen = 0U;
+    s_power_key_release_edge_seen = 0U;
     s_power_key_off_wake_armed = 1U;
     s_power_key_changed_ms = now;
     s_power_key_pressed_ms = (s_power_key_debounced_pressed != 0U) ? now : 0U;
@@ -276,6 +281,10 @@ static void SystemManager_ServicePowerKey(void)
                 SystemManager_StartPeripheralPower();
                 printf("[Power] peripheral power on by key pulse\r\n");
             }
+            else
+            {
+                printf("[Power] key press ignored by low battery lockout\r\n");
+            }
             s_power_key_ignore_until_release = 1U;
             s_power_key_off_wake_armed = 0U;
         }
@@ -292,7 +301,7 @@ static void SystemManager_ServicePowerKey(void)
             ((raw_pressed == 0U) &&
              ((uint32_t)(now - s_power_key_changed_ms) >= SYSTEM_MANAGER_POWER_KEY_DEBOUNCE_MS)))
         {
-            /* 短按开机后的第一次松手必须解除锁定，不能依赖消抖状态发生变化。 */
+            /* 按键稳定释放后再解除锁定，避免松手抖动被误认为下一次开机按下。 */
             s_power_key_ignore_until_release = 0U;
             s_power_key_off_wake_armed = 1U;
             s_power_key_debounced_pressed = 0U;
@@ -336,8 +345,12 @@ static void SystemManager_ServicePowerKey(void)
         uint32_t press_start_ms = s_power_key_pressed_ms;
 
         s_power_key_long_handled = 1U;
+        taskENTER_CRITICAL();
+        s_power_key_release_edge_seen = 0U;
+        s_power_key_off_wake_pulse_seen = 0U;
         s_power_key_ignore_until_release = 1U;
         s_power_key_off_wake_armed = 0U;
+        taskEXIT_CRITICAL();
         s_power_key_last_trigger_elapsed_ms = (uint32_t)(now - press_start_ms);
         SystemManager_StopPeripheralPower(GLOVE_POWER_STATE_USER_OFF);
         s_power_key_last_poweroff_elapsed_ms =
