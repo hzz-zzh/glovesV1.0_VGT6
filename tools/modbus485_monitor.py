@@ -29,10 +29,11 @@ DEFAULT_POLL_MS = 500
 
 MAX_READ_REGS = 100
 MAX_WRITE_REGS = 100
-SENSOR_100HZ_PERIOD_S = 0.010
-SENSOR_100HZ_TIMEOUT_S = 0.030
-SENSOR_100HZ_MAX_READ_REGS = 125
-SENSOR_100HZ_RETRIES = 1
+SENSOR_120HZ_PERIOD_S = 1.0 / 120.0
+SENSOR_120HZ_TIMEOUT_S = 0.008
+SENSOR_120HZ_READ_SLICE_S = 0.002
+SENSOR_120HZ_RETRIES = 1
+SENSOR_120HZ_SPIN_GUARD_S = 0.004
 
 REG_BASIC_STATUS_START = 0x0000
 REG_BASIC_STATUS_COUNT = 14
@@ -83,6 +84,18 @@ REG_TOUCH_TIMESTAMP_US = 0x2080
 REG_TOUCH_STATUS_FLAGS = 0x2084
 MODBUS_TOUCH_COUNT = 68
 MODBUS_TOUCH_DATA_REG_COUNT = 68
+
+MB_FC_READ_SENSOR_SNAPSHOT = 0x41
+SENSOR_SNAPSHOT_METADATA_REG_COUNT = 6
+SENSOR_SNAPSHOT_SENSOR_REG_COUNT = (
+    MODBUS_IMU_DATA_REG_COUNT
+    + MODBUS_JOINT_DATA_REG_COUNT
+    + MODBUS_TOUCH_DATA_REG_COUNT
+)
+SENSOR_SNAPSHOT_REG_COUNT = (
+    SENSOR_SNAPSHOT_METADATA_REG_COUNT + SENSOR_SNAPSHOT_SENSOR_REG_COUNT
+)
+SENSOR_SNAPSHOT_DATA_SIZE = SENSOR_SNAPSHOT_REG_COUNT * 2
 
 CALIB_STATUS_NAMES = {
     0x0000: "idle",
@@ -372,6 +385,15 @@ class ModbusError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class LowLatencyStats:
+    requests: int
+    timeouts: int
+    retries: int
+    max_request_ms: float
+    last_timeout_start: int
+
+
 class ModbusRtuClient:
     def __init__(self) -> None:
         self.port: serial.Serial | None = None
@@ -380,6 +402,13 @@ class ModbusRtuClient:
         self.connected_baud = 0
         self.last_tx = b""
         self.last_rx = b""
+        self.low_latency_saved_timeout: float | None = None
+        self.low_latency_saved_inter_byte_timeout: float | None = None
+        self.low_latency_requests = 0
+        self.low_latency_timeouts = 0
+        self.low_latency_retries = 0
+        self.low_latency_max_request_ms = 0.0
+        self.low_latency_last_timeout_start = 0
 
     def open(self, port_name: str, baud: int, timeout_s: float) -> None:
         if serial is None:
@@ -411,17 +440,50 @@ class ModbusRtuClient:
                 self.port = None
                 self.connected_port_name = ""
                 self.connected_baud = 0
+                self.low_latency_saved_timeout = None
+                self.low_latency_saved_inter_byte_timeout = None
 
     @property
     def is_open(self) -> bool:
         return self.port is not None and self.port.is_open
 
     def prepare_low_latency_poll(self) -> None:
-        """Clear stale input once before starting a continuous high-rate poll."""
+        """Configure bounded reads before starting a continuous high-rate poll."""
         if not self.is_open or self.port is None:
             raise ModbusError("serial port is not open")
         with self.lock:
+            if self.low_latency_saved_timeout is None:
+                self.low_latency_saved_timeout = self.port.timeout
+                self.low_latency_saved_inter_byte_timeout = self.port.inter_byte_timeout
+            # 高频读取按2ms分片返回，确保外层8ms事务截止时间能够真正生效。
+            self.port.timeout = SENSOR_120HZ_READ_SLICE_S
+            self.port.inter_byte_timeout = None
             self.port.reset_input_buffer()
+            self.low_latency_requests = 0
+            self.low_latency_timeouts = 0
+            self.low_latency_retries = 0
+            self.low_latency_max_request_ms = 0.0
+            self.low_latency_last_timeout_start = 0
+
+    def finish_low_latency_poll(self) -> None:
+        """Restore normal serial timeouts after the high-rate poll stops."""
+        if not self.is_open or self.port is None:
+            return
+        with self.lock:
+            if self.low_latency_saved_timeout is not None:
+                self.port.timeout = self.low_latency_saved_timeout
+                self.port.inter_byte_timeout = self.low_latency_saved_inter_byte_timeout
+                self.low_latency_saved_timeout = None
+                self.low_latency_saved_inter_byte_timeout = None
+
+    def get_low_latency_stats(self) -> LowLatencyStats:
+        return LowLatencyStats(
+            requests=self.low_latency_requests,
+            timeouts=self.low_latency_timeouts,
+            retries=self.low_latency_retries,
+            max_request_ms=self.low_latency_max_request_ms,
+            last_timeout_start=self.low_latency_last_timeout_start,
+        )
 
     def recover_low_latency_poll(self) -> None:
         """Discard an incomplete response after a timeout or protocol error."""
@@ -459,6 +521,7 @@ class ModbusRtuClient:
         )
         expected_len = 5 + count * 2
         deadline = time.monotonic() + timeout_s
+        request_started = time.perf_counter()
 
         with self.lock:
             # 高频连续轮询只在启动和异常恢复时清空缓冲区，避免每帧产生USB控制开销。
@@ -472,19 +535,33 @@ class ModbusRtuClient:
 
             buffer = bytearray()
             while time.monotonic() < deadline:
-                waiting = self.port.in_waiting
                 want = max(1, expected_len - len(buffer))
-                chunk = self.port.read(waiting or want)
+                if low_latency:
+                    # 高频模式直接等待当前响应剩余字节，避免每包查询串口队列引入系统调用延迟。
+                    chunk = self.port.read(want)
+                else:
+                    waiting = self.port.in_waiting
+                    chunk = self.port.read(waiting or want)
                 if chunk:
                     buffer.extend(chunk)
                     parsed = self._try_parse_response(buffer, slave, count)
                     if parsed is not None:
                         self.last_rx = bytes(buffer)
+                        if low_latency:
+                            request_ms = (time.perf_counter() - request_started) * 1000.0
+                            self.low_latency_requests += 1
+                            self.low_latency_max_request_ms = max(
+                                self.low_latency_max_request_ms, request_ms
+                            )
                         return parsed
                 else:
-                    time.sleep(0.002)
+                    if not low_latency:
+                        time.sleep(0.002)
 
         self.last_rx = bytes(buffer)
+        if low_latency:
+            self.low_latency_timeouts += 1
+            self.low_latency_last_timeout_start = start
         hex_rx = " ".join(f"{byte:02X}" for byte in buffer)
         raise ModbusError(
             f"timeout reading 0x{start:04X}+{count}, rx=[{hex_rx}], "
@@ -545,6 +622,119 @@ class ModbusRtuClient:
 
         return None
 
+    def read_sensor_snapshot_registers(
+        self,
+        slave: int,
+        timeout_s: float,
+        retries: int = SENSOR_120HZ_RETRIES,
+    ) -> list[int]:
+        """Read the complete high-rate sensor snapshot with one RTU transaction."""
+        last_error: ModbusError | None = None
+
+        for attempt in range(retries + 1):
+            try:
+                return self._read_sensor_snapshot_once(slave, timeout_s)
+            except ModbusError as exc:
+                last_error = exc
+                if attempt < retries:
+                    self.low_latency_retries += 1
+                    self.recover_low_latency_poll()
+
+        if last_error is None:
+            raise ModbusError("sensor snapshot failed without error detail")
+        raise last_error
+
+    def _read_sensor_snapshot_once(self, slave: int, timeout_s: float) -> list[int]:
+        if not self.is_open or self.port is None:
+            raise ModbusError("serial port is not open")
+        if not (1 <= slave <= 247):
+            raise ModbusError("slave id must be 1..247")
+
+        request = append_crc(bytes((slave & 0xFF, MB_FC_READ_SENSOR_SNAPSHOT)))
+        expected_len = 4 + SENSOR_SNAPSHOT_DATA_SIZE + 2
+        deadline = time.monotonic() + timeout_s
+        request_started = time.perf_counter()
+
+        with self.lock:
+            self.last_tx = request
+            self.last_rx = b""
+            self.port.write(request)
+
+            buffer = bytearray()
+            while time.monotonic() < deadline:
+                chunk = self.port.read(max(1, expected_len - len(buffer)))
+                if chunk:
+                    buffer.extend(chunk)
+                    parsed = self._try_parse_sensor_snapshot_response(buffer, slave)
+                    if parsed is not None:
+                        self.last_rx = bytes(buffer)
+                        request_ms = (time.perf_counter() - request_started) * 1000.0
+                        self.low_latency_requests += 1
+                        self.low_latency_max_request_ms = max(
+                            self.low_latency_max_request_ms, request_ms
+                        )
+                        return parsed
+
+        self.last_rx = bytes(buffer)
+        self.low_latency_timeouts += 1
+        self.low_latency_last_timeout_start = MB_FC_READ_SENSOR_SNAPSHOT
+        hex_head = " ".join(f"{byte:02X}" for byte in buffer[:16])
+        raise ModbusError(
+            f"timeout reading sensor snapshot, rx_len={len(buffer)} "
+            f"rx_head=[{hex_head}], expected={expected_len}"
+        )
+
+    @staticmethod
+    def _try_parse_sensor_snapshot_response(
+        buffer: bytearray, slave: int
+    ) -> list[int] | None:
+        expected_len = 4 + SENSOR_SNAPSHOT_DATA_SIZE + 2
+        index = 0
+
+        while index < len(buffer):
+            if buffer[index] != slave:
+                index += 1
+                continue
+            if index + 4 > len(buffer):
+                return None
+
+            func = buffer[index + 1]
+            if func == (MB_FC_READ_SENSOR_SNAPSHOT | 0x80):
+                if index + 5 > len(buffer):
+                    return None
+                frame = bytes(buffer[index : index + 5])
+                if crc16_modbus(frame[:-2]) == int.from_bytes(frame[-2:], "little"):
+                    raise ModbusError(
+                        f"sensor snapshot exception 0x{frame[2]:02X} "
+                        f"({modbus_exception_name(frame[2])})"
+                    )
+                index += 1
+                continue
+
+            if func != MB_FC_READ_SENSOR_SNAPSHOT:
+                index += 1
+                continue
+
+            byte_count = (buffer[index + 2] << 8) | buffer[index + 3]
+            if byte_count != SENSOR_SNAPSHOT_DATA_SIZE:
+                index += 1
+                continue
+            if index + expected_len > len(buffer):
+                return None
+
+            frame = bytes(buffer[index : index + expected_len])
+            if crc16_modbus(frame[:-2]) != int.from_bytes(frame[-2:], "little"):
+                index += 1
+                continue
+
+            data = frame[4:-2]
+            return [
+                ((data[pos] << 8) | data[pos + 1])
+                for pos in range(0, len(data), 2)
+            ]
+
+        return None
+
     def read_block_split(
         self,
         slave: int,
@@ -577,8 +767,10 @@ class ModbusRtuClient:
                     last_error = exc
                     if attempt < retries:
                         if low_latency:
+                            self.low_latency_retries += 1
                             self.recover_low_latency_poll()
-                        time.sleep(0.001)
+                        else:
+                            time.sleep(0.001)
             if last_error is not None:
                 raise last_error
             offset += chunk
@@ -880,6 +1072,15 @@ class GloveSnapshot:
     touch_regs: list[int]
     poll_mode: str = "full"
     actual_hz: float = 0.0
+    sensor_hz: float = 0.0
+    sensor_frame_id: int = 0
+    sensor_timestamp_us: int = 0
+    duplicate_responses: int = 0
+    comm_requests: int = 0
+    comm_timeouts: int = 0
+    comm_retries: int = 0
+    comm_max_request_ms: float = 0.0
+    comm_last_timeout_start: int = 0
 
 
 def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> GloveSnapshot:
@@ -936,45 +1137,30 @@ def empty_snapshot() -> GloveSnapshot:
     )
 
 
-def read_sensor_snapshot_100hz(
+def read_sensor_snapshot_120hz(
     client: ModbusRtuClient,
     slave: int,
     timeout_s: float,
     previous: GloveSnapshot | None,
     actual_hz: float,
 ) -> GloveSnapshot:
-    """Read only IMU, solved joint and touch data using five Modbus requests."""
+    """Read IMU, solved joint and touch data with one snapshot request."""
     base = previous if previous is not None else empty_snapshot()
-    fast_timeout_s = min(timeout_s, SENSOR_100HZ_TIMEOUT_S)
+    fast_timeout_s = min(timeout_s, SENSOR_120HZ_TIMEOUT_S)
 
-    imu_regs = client.read_block_split(
-        slave,
-        REG_IMU_DATA_START,
-        MODBUS_IMU_DATA_REG_COUNT,
-        fast_timeout_s,
-        max_read_regs=SENSOR_100HZ_MAX_READ_REGS,
-        retries=SENSOR_100HZ_RETRIES,
-        low_latency=True,
+    snapshot_regs = client.read_sensor_snapshot_registers(
+        slave, fast_timeout_s, retries=SENSOR_120HZ_RETRIES
     )
-    joint_regs = client.read_block_split(
-        slave,
-        REG_JOINT_DATA_START,
-        MODBUS_JOINT_DATA_REG_COUNT,
-        fast_timeout_s,
-        max_read_regs=SENSOR_100HZ_MAX_READ_REGS,
-        retries=SENSOR_100HZ_RETRIES,
-        low_latency=True,
-    )
-    touch_regs = client.read_block_split(
-        slave,
-        REG_TOUCH_DATA_START,
-        MODBUS_TOUCH_DATA_REG_COUNT,
-        fast_timeout_s,
-        max_read_regs=SENSOR_100HZ_MAX_READ_REGS,
-        retries=SENSOR_100HZ_RETRIES,
-        low_latency=True,
-    )
+    sensor_frame_id = snapshot_regs[0] | (snapshot_regs[1] << 16)
+    sensor_timestamp_us = ros_time_to_us(snapshot_regs[2:6])
+    sensor_regs = snapshot_regs[SENSOR_SNAPSHOT_METADATA_REG_COUNT:]
+    imu_end = MODBUS_IMU_DATA_REG_COUNT
+    joint_end = imu_end + MODBUS_JOINT_DATA_REG_COUNT
+    imu_regs = sensor_regs[:imu_end]
+    joint_regs = sensor_regs[imu_end:joint_end]
+    touch_regs = sensor_regs[joint_end:]
 
+    comm_stats = client.get_low_latency_stats()
     return GloveSnapshot(
         timestamp=time.time(),
         basic=base.basic,
@@ -988,9 +1174,28 @@ def read_sensor_snapshot_100hz(
         imu_regs=imu_regs,
         joint_regs=joint_regs,
         touch_regs=touch_regs,
-        poll_mode="sensors100",
+        poll_mode="sensors120",
         actual_hz=actual_hz,
+        sensor_frame_id=sensor_frame_id,
+        sensor_timestamp_us=sensor_timestamp_us,
+        comm_requests=comm_stats.requests,
+        comm_timeouts=comm_stats.timeouts,
+        comm_retries=comm_stats.retries,
+        comm_max_request_ms=comm_stats.max_request_ms,
+        comm_last_timeout_start=comm_stats.last_timeout_start,
     )
+
+
+def wait_sensor_120hz_deadline(stop_event: threading.Event, deadline: float) -> None:
+    """Wait to an absolute deadline without stretching an 8.333 ms period."""
+    while not stop_event.is_set():
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0.0:
+            return
+        if remaining > SENSOR_120HZ_SPIN_GUARD_S:
+            # 先阻塞较长空闲时间，最后4ms忙等，避免Windows定时等待多睡1～2ms。
+            if stop_event.wait(remaining - SENSOR_120HZ_SPIN_GUARD_S):
+                return
 
 
 def decode_imu(imu_regs: list[int]) -> list[list[float]]:
@@ -1181,7 +1386,7 @@ class ModbusMonitorApp(tk.Tk):
         ttk.Button(top, text="Start Poll", command=self.start_poll).grid(
             row=0, column=14, padx=2
         )
-        ttk.Button(top, text="100Hz Sensors", command=self.start_sensor_100hz).grid(
+        ttk.Button(top, text="120Hz Sensors", command=self.start_sensor_120hz).grid(
             row=0, column=15, padx=2
         )
         ttk.Button(top, text="Stop", command=self.stop_poll).grid(row=0, column=16, padx=2)
@@ -1988,7 +2193,7 @@ class ModbusMonitorApp(tk.Tk):
         self.worker.start()
         self.status_var.set(self.status_var.get() + " | polling")
 
-    def start_sensor_100hz(self) -> None:
+    def start_sensor_120hz(self) -> None:
         if self.worker is not None and self.worker.is_alive():
             return
         try:
@@ -2002,12 +2207,12 @@ class ModbusMonitorApp(tk.Tk):
                 return
         self.stop_event.clear()
         self.worker = threading.Thread(
-            target=self._sensor_100hz_worker,
+            target=self._sensor_120hz_worker,
             args=(slave, timeout_s),
             daemon=True,
         )
         self.worker.start()
-        self.status_var.set(self.status_var.get() + " | 100Hz IMU+Joint+Touch")
+        self.status_var.set(self.status_var.get() + " | 120Hz IMU+Joint+Touch")
 
     def stop_poll(self) -> None:
         self.stop_event.set()
@@ -2023,12 +2228,18 @@ class ModbusMonitorApp(tk.Tk):
                 self.events.put(("error", exc))
                 self.stop_event.wait(0.5)
 
-    def _sensor_100hz_worker(self, slave: int, timeout_s: float) -> None:
+    def _sensor_120hz_worker(self, slave: int, timeout_s: float) -> None:
         previous = self.last_snapshot
         next_deadline = time.perf_counter()
         rate_started = next_deadline
+        sensor_rate_start_frame_id: int | None = None
+        sensor_rate_started = next_deadline
+        last_sensor_frame_id: int | None = None
+        last_new_sensor_frame_time = next_deadline
         rate_count = 0
         actual_hz = 0.0
+        sensor_hz = 0.0
+        duplicate_responses = 0
 
         try:
             self.client.prepare_low_latency_poll()
@@ -2036,32 +2247,65 @@ class ModbusMonitorApp(tk.Tk):
             self.events.put(("error", exc))
             return
 
-        while not self.stop_event.is_set():
-            try:
-                snapshot = read_sensor_snapshot_100hz(
-                    self.client, slave, timeout_s, previous, actual_hz
-                )
-                previous = snapshot
-                rate_count += 1
-                now = time.perf_counter()
-                rate_elapsed = now - rate_started
-                if rate_elapsed >= 1.0:
-                    actual_hz = rate_count / rate_elapsed
-                    rate_count = 0
-                    rate_started = now
-                snapshot.actual_hz = actual_hz
-                self.events.put(("snapshot", snapshot))
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    snapshot = read_sensor_snapshot_120hz(
+                        self.client, slave, timeout_s, previous, actual_hz
+                    )
+                    previous = snapshot
+                    rate_count += 1
+                    now = time.perf_counter()
 
-                next_deadline += SENSOR_100HZ_PERIOD_S
-                now = time.perf_counter()
-                if next_deadline < now:
-                    next_deadline = now
-                self.stop_event.wait(max(0.0, next_deadline - now))
-            except Exception as exc:
-                self.events.put(("error", exc))
-                self.client.recover_low_latency_poll()
-                next_deadline = time.perf_counter() + SENSOR_100HZ_PERIOD_S
-                self.stop_event.wait(SENSOR_100HZ_PERIOD_S)
+                    if last_sensor_frame_id == snapshot.sensor_frame_id:
+                        duplicate_responses += 1
+                    else:
+                        last_new_sensor_frame_time = now
+                    last_sensor_frame_id = snapshot.sensor_frame_id
+
+                    if sensor_rate_start_frame_id is None:
+                        sensor_rate_start_frame_id = snapshot.sensor_frame_id
+                        sensor_rate_started = now
+
+                    sensor_rate_elapsed = now - sensor_rate_started
+                    if sensor_rate_elapsed >= 1.0:
+                        frame_delta = (
+                            snapshot.sensor_frame_id - sensor_rate_start_frame_id
+                        ) & 0xFFFFFFFF
+                        if frame_delta <= 0x7FFFFFFF:
+                            # 用帧号增量统计完整传感器帧率，避免依赖尚未初始化的设备时间戳。
+                            sensor_hz = frame_delta / sensor_rate_elapsed
+                        else:
+                            # 从机复位导致帧号回退时重新建立统计窗口。
+                            sensor_hz = 0.0
+                        sensor_rate_start_frame_id = snapshot.sensor_frame_id
+                        sensor_rate_started = now
+                    if (now - last_new_sensor_frame_time) >= 1.0:
+                        sensor_hz = 0.0
+
+                    rate_elapsed = now - rate_started
+                    if rate_elapsed >= 1.0:
+                        actual_hz = rate_count / rate_elapsed
+                        rate_count = 0
+                        rate_started = now
+                    snapshot.actual_hz = actual_hz
+                    snapshot.sensor_hz = sensor_hz
+                    snapshot.duplicate_responses = duplicate_responses
+                    self.events.put(("snapshot", snapshot))
+
+                    next_deadline += SENSOR_120HZ_PERIOD_S
+                    now = time.perf_counter()
+                    if next_deadline < now:
+                        next_deadline = now
+                    wait_sensor_120hz_deadline(self.stop_event, next_deadline)
+                except Exception as exc:
+                    self.events.put(("error", exc))
+                    self.client.recover_low_latency_poll()
+                    # 异常后只等待一个短分片，避免额外空转完整8.333ms周期。
+                    next_deadline = time.perf_counter() + SENSOR_120HZ_PERIOD_S
+                    self.stop_event.wait(SENSOR_120HZ_READ_SLICE_S)
+        finally:
+            self.client.finish_low_latency_poll()
 
     def _process_events(self) -> None:
         latest_snapshot: Optional[GloveSnapshot] = None
@@ -2071,7 +2315,7 @@ class ModbusMonitorApp(tk.Tk):
                 if kind == "snapshot":
                     self.read_count += 1
                     self.last_snapshot = payload  # type: ignore[assignment]
-                    # 100 Hz采集时只绘制本轮消息中的最新帧，避免界面刷新堵塞通信线程。
+                    # 高频采集时只绘制本轮消息中的最新帧，避免界面刷新堵塞通信线程。
                     latest_snapshot = payload  # type: ignore[assignment]
                 elif kind == "calibration":
                     c_table, m_table, ctrl = payload  # type: ignore[misc]
@@ -2118,8 +2362,19 @@ class ModbusMonitorApp(tk.Tk):
         touch_count = snapshot.touch_status_regs[5]
         touch_capacity = snapshot.touch_status_regs[6]
 
-        if snapshot.poll_mode == "sensors100":
-            poll_text = f"100Hz Sensors actual={snapshot.actual_hz:.1f}Hz"
+        if snapshot.poll_mode == "sensors120":
+            last_timeout = (
+                f" last=0x{snapshot.comm_last_timeout_start:04X}"
+                if snapshot.comm_timeouts > 0
+                else ""
+            )
+            poll_text = (
+                f"120Hz Sensors comm={snapshot.actual_hz:.1f}Hz "
+                f"sensor={snapshot.sensor_hz:.1f}Hz frame={snapshot.sensor_frame_id} "
+                f"dup={snapshot.duplicate_responses} "
+                f"timeout={snapshot.comm_timeouts} retry={snapshot.comm_retries} "
+                f"max={snapshot.comm_max_request_ms:.2f}ms{last_timeout}"
+            )
         else:
             poll_text = "Full poll"
         self.status_var.set(
@@ -2130,6 +2385,11 @@ class ModbusMonitorApp(tk.Tk):
         summary = [
             f"Read count        : {self.read_count}",
             f"Host time         : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(snapshot.timestamp))}",
+            f"Communication Hz  : {snapshot.actual_hz:.3f}",
+            f"Sensor frame Hz   : {snapshot.sensor_hz:.3f}",
+            f"Sensor frame id   : {snapshot.sensor_frame_id}",
+            f"Sensor timestamp  : {snapshot.sensor_timestamp_us} us",
+            f"Duplicate replies : {snapshot.duplicate_responses}",
             f"Slave addr reg    : {snapshot.basic[0]}",
             f"Baud code reg     : {snapshot.basic[1]}",
             f"UTC time          : {utc_time}",
@@ -2371,6 +2631,11 @@ class ModbusMonitorApp(tk.Tk):
             writer = csv.writer(handle)
             writer.writerow(("section", "index", "field", "value"))
             writer.writerow(("meta", "host_time", "unix", snapshot.timestamp))
+            writer.writerow(("meta", "sensor", "communication_hz", snapshot.actual_hz))
+            writer.writerow(("meta", "sensor", "frame_hz", snapshot.sensor_hz))
+            writer.writerow(("meta", "sensor", "frame_id", snapshot.sensor_frame_id))
+            writer.writerow(("meta", "sensor", "timestamp_us", snapshot.sensor_timestamp_us))
+            writer.writerow(("meta", "sensor", "duplicate_responses", snapshot.duplicate_responses))
             writer.writerow(("status", "power", "battery_voltage_v", power.battery_voltage_v))
             writer.writerow(("status", "power", "battery_current_a", power.battery_current_a))
             writer.writerow(("status", "power", "soc_percent", power.soc_percent))

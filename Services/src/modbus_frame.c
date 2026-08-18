@@ -20,10 +20,16 @@
 #define MODBUS_TIME_US_PER_SEC          1000000ULL
 #define MODBUS_TIME_NS_PER_US           1000ULL
 #define MODBUS_TIME_NS_PER_SEC          1000000000UL
+#define MODBUS_SENSOR_SNAPSHOT_METADATA_REG_COUNT 6U
+#define MODBUS_SENSOR_SNAPSHOT_REG_COUNT \
+  (MODBUS_SENSOR_SNAPSHOT_METADATA_REG_COUNT + MODBUS_IMU_DATA_REG_COUNT + \
+   MODBUS_JOINT_DATA_REG_COUNT + MODBUS_R_POINT_COUNT)
+#define MODBUS_SENSOR_SNAPSHOT_DATA_SIZE (MODBUS_SENSOR_SNAPSHOT_REG_COUNT * 2U)
 
 typedef struct
 {
   uint8_t valid;
+  uint32_t frame_id;
   GloveTimestampUs_t timestamp_us;
   uint32_t valid_flags;
   GloveImuSample_t imu[GLOVE_IMU_COUNT];
@@ -63,7 +69,7 @@ static uint8_t modbus_slave_address = MODBUS_SLAVE_ADDR_DEFAULT;
 static ModbusImuSnapshot_t modbus_imu_snapshot;
 static ModbusJointSnapshot_t modbus_joint_snapshot;
 static ModbusTouchSnapshot_t modbus_touch_snapshot;
-/* 一个03功能码请求只抓取一次数据，保证多字寄存器来自同一采样帧。 */
+/* 每个读请求只抓取一次数据，保证多字寄存器来自同一采样帧。 */
 static ModbusReadSnapshot_t modbus_read_snapshot;
 static uint8_t modbus_calib_initialized;
 static GloveQuaternion_t modbus_calib_c_staging[GLOVE_IMU_COUNT];
@@ -1201,6 +1207,88 @@ static ModbusResult_t Modbus_HandleReadHoldingRegs(uint8_t response_addr,
   return MODBUS_RESULT_RESPONSE_READY;
 }
 
+static uint16_t Modbus_WriteSnapshotRegisterRange(uint8_t *tx_buf,
+                                                  uint16_t write_offset,
+                                                  uint16_t start_reg,
+                                                  uint16_t reg_count)
+{
+  uint16_t index;
+
+  for (index = 0U; index < reg_count; index++)
+  {
+    Modbus_WriteU16(&tx_buf[write_offset],
+                    Modbus_ReadHoldingRegister((uint16_t)(start_reg + index)));
+    write_offset = (uint16_t)(write_offset + 2U);
+  }
+
+  return write_offset;
+}
+
+static ModbusResult_t Modbus_HandleReadSensorSnapshot(uint8_t response_addr,
+                                                      uint8_t *tx_buf,
+                                                      uint16_t tx_buf_size,
+                                                      uint16_t *tx_len)
+{
+  uint16_t index;
+  uint16_t write_offset;
+  uint16_t len_without_crc;
+
+  if ((tx_buf == 0) || (tx_len == 0))
+  {
+    return MODBUS_RESULT_FRAME_ERROR;
+  }
+
+  len_without_crc = (uint16_t)(4U + MODBUS_SENSOR_SNAPSHOT_DATA_SIZE);
+  if (tx_buf_size < (uint16_t)(len_without_crc + 2U))
+  {
+    return MODBUS_RESULT_FRAME_ERROR;
+  }
+
+  /* 整个大帧只抓取一次快照，保证三类数据来自同一个FullFrame。 */
+  Modbus_CaptureReadSnapshot();
+  tx_buf[0] = response_addr;
+  tx_buf[1] = MB_FC_READ_SENSOR_SNAPSHOT;
+  tx_buf[2] = (uint8_t)(MODBUS_SENSOR_SNAPSHOT_DATA_SIZE >> 8);
+  tx_buf[3] = (uint8_t)(MODBUS_SENSOR_SNAPSHOT_DATA_SIZE & 0xFFU);
+
+  write_offset = 4U;
+  /* 元数据沿用寄存器低字在前的32位编码，便于上位机与现有协议共用解析函数。 */
+  Modbus_WriteU16(&tx_buf[write_offset],
+                  (uint16_t)(modbus_read_snapshot.imu.frame_id & 0xFFFFU));
+  write_offset = (uint16_t)(write_offset + 2U);
+  Modbus_WriteU16(&tx_buf[write_offset],
+                  (uint16_t)(modbus_read_snapshot.imu.frame_id >> 16U));
+  write_offset = (uint16_t)(write_offset + 2U);
+  for (index = 0U; index < MODBUS_REGS_ROS_TIME; index++)
+  {
+    Modbus_WriteU16(&tx_buf[write_offset],
+                    Modbus_ReadRosTimeRegFromUs(modbus_read_snapshot.imu.timestamp_us,
+                                                index));
+    write_offset = (uint16_t)(write_offset + 2U);
+  }
+
+  write_offset = Modbus_WriteSnapshotRegisterRange(tx_buf,
+                                                    write_offset,
+                                                    REG_IMU_DATA_START,
+                                                    MODBUS_IMU_DATA_REG_COUNT);
+  write_offset = Modbus_WriteSnapshotRegisterRange(tx_buf,
+                                                    write_offset,
+                                                    REG_JOINT_DATA_START,
+                                                    MODBUS_JOINT_DATA_REG_COUNT);
+  write_offset = Modbus_WriteSnapshotRegisterRange(tx_buf,
+                                                    write_offset,
+                                                    REG_R_DATA_START,
+                                                    MODBUS_R_POINT_COUNT);
+  if (write_offset != len_without_crc)
+  {
+    return MODBUS_RESULT_FRAME_ERROR;
+  }
+
+  Modbus_AppendCrc(tx_buf, len_without_crc);
+  *tx_len = (uint16_t)(len_without_crc + 2U);
+  return MODBUS_RESULT_RESPONSE_READY;
+}
+
 static uint8_t Modbus_IsRegRangeWithin(uint16_t start_reg,
                                        uint16_t reg_count,
                                        uint16_t range_start,
@@ -1480,6 +1568,7 @@ void Modbus_UpdateFullFrameSnapshot(const GloveFullFrame_t *frame)
   frame_timestamp_us = frame->raw.timestamp_us;
 
   taskENTER_CRITICAL();
+  modbus_imu_snapshot.frame_id = frame->frame_id;
   modbus_imu_snapshot.timestamp_us = frame_timestamp_us;
   modbus_imu_snapshot.valid_flags = frame->raw.valid_flags;
   (void)memcpy(modbus_imu_snapshot.imu,
@@ -1550,7 +1639,8 @@ ModbusResult_t Modbus_ProcessRequest(const uint8_t *rx_buf,
 
   if ((func != MB_FC_READ_HOLDING_REGS) &&
       (func != MB_FC_WRITE_SINGLE_REG) &&
-      (func != MB_FC_WRITE_MULTIPLE_REGS))
+      (func != MB_FC_WRITE_MULTIPLE_REGS) &&
+      (func != MB_FC_READ_SENSOR_SNAPSHOT))
   {
     if (request_addr == MODBUS_BROADCAST_ADDR)
     {
@@ -1563,6 +1653,28 @@ ModbusResult_t Modbus_ProcessRequest(const uint8_t *rx_buf,
                                  tx_buf,
                                  tx_buf_size,
                                  tx_len);
+  }
+
+  if (func == MB_FC_READ_SENSOR_SNAPSHOT)
+  {
+    if (request_addr == MODBUS_BROADCAST_ADDR)
+    {
+      return MODBUS_RESULT_NO_RESPONSE;
+    }
+    if (rx_len != MODBUS_SENSOR_SNAPSHOT_REQ_LEN)
+    {
+      return Modbus_BuildException(modbus_slave_address,
+                                   func,
+                                   MB_EX_ILLEGAL_DATA_VALUE,
+                                   tx_buf,
+                                   tx_buf_size,
+                                   tx_len);
+    }
+
+    return Modbus_HandleReadSensorSnapshot(request_addr,
+                                           tx_buf,
+                                           tx_buf_size,
+                                           tx_len);
   }
 
   if (func == MB_FC_READ_HOLDING_REGS)

@@ -16,9 +16,13 @@ extern "C" {
 #define MODBUS_MAX_READ_REG_COUNT      125U
 #define MODBUS_MAX_WRITE_REG_COUNT     123U
 
+/* 高频传感快照使用16位载荷长度，单帧返回IMU、关节和触觉数据。 */
+#define MODBUS_SENSOR_SNAPSHOT_REQ_LEN 4U
+
 #define MB_FC_READ_HOLDING_REGS        0x03U
 #define MB_FC_WRITE_SINGLE_REG         0x06U
 #define MB_FC_WRITE_MULTIPLE_REGS      0x10U
+#define MB_FC_READ_SENSOR_SNAPSHOT     0x41U
 
 #define MB_EX_ILLEGAL_FUNCTION         0x01U
 #define MB_EX_ILLEGAL_DATA_ADDRESS     0x02U

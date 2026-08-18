@@ -67,6 +67,46 @@ static void RS485_DirectionSwitchDelay(void)
   }
 }
 
+static void RS485_ResponseDelayUs(uint32_t delay_us)
+{
+  uint32_t delay_cycles;
+  uint32_t start_cycles;
+  volatile uint32_t fallback_loops;
+
+  if (delay_us == 0U)
+  {
+    return;
+  }
+
+  /* 使用内核周期计数器提供亚毫秒延时，避免HAL_Delay带来的整毫秒阻塞。 */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  delay_cycles = (uint32_t)((((uint64_t)SystemCoreClock * delay_us) + 999999ULL) /
+                            1000000ULL);
+  start_cycles = DWT->CYCCNT;
+  __NOP();
+  __NOP();
+  __NOP();
+  __NOP();
+  if (DWT->CYCCNT == start_cycles)
+  {
+    /* 周期计数器不可用时使用短循环兜底，避免等待逻辑卡死。 */
+    fallback_loops = delay_cycles / 5U;
+    while (fallback_loops > 0U)
+    {
+      fallback_loops--;
+      __NOP();
+    }
+    return;
+  }
+
+  start_cycles = DWT->CYCCNT;
+  while ((uint32_t)(DWT->CYCCNT - start_cycles) < delay_cycles)
+  {
+    __NOP();
+  }
+}
+
 HAL_StatusTypeDef RS485_StartReceive(void)
 {
   HAL_StatusTypeDef status;
@@ -234,8 +274,7 @@ void RS485_ProcessRxFrame(void)
       rs485_tx_from_echo_task++;
       rs485_modbus_response_ready++;
 
-      //与头部主机通讯时，延时1ms，才能和Linux主机通讯
-      HAL_Delay(1U);
+      RS485_ResponseDelayUs(RS485_RESPONSE_DELAY_US);
 		
       if (RS485_Send(rs485_response_buffer, tx_size) != HAL_OK)
       {

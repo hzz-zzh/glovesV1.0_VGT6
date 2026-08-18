@@ -13,6 +13,9 @@ extern "C" {
 #define RS485_RX_GPIO_LEVEL GPIO_PIN_RESET
 #define RS485_TX_GPIO_LEVEL GPIO_PIN_SET
 
+/* 给上位机预留发送转接收时间，过小可能丢失响应头，过大会降低轮询频率。 */
+#define RS485_RESPONSE_DELAY_US 200U
+
 typedef struct
 {
   uint32_t init_calls;
