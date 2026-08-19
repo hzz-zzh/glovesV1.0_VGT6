@@ -29,6 +29,7 @@ static volatile uint32_t rs485_modbus_frame_error = 0U;
 static volatile uint32_t rs485_tx_send_fail = 0U;
 static volatile uint32_t rs485_tx_done = 0U;
 static volatile uint32_t rs485_errors = 0U;
+static volatile uint32_t rs485_last_uart_error = HAL_UART_ERROR_NONE;
 static volatile uint16_t rs485_last_rx_size = 0U;
 static volatile uint16_t rs485_last_tx_size = 0U;
 static uint8_t rs485_last_rx_head[RS485_DEBUG_HEAD_SIZE];
@@ -221,7 +222,6 @@ uint8_t RS485_TakeRxFrame(uint8_t *data, uint16_t *size, uint16_t max_size)
   if (has_frame != 0U)
   {
     rs485_rx_taken++;
-    (void)RS485_StartReceive();
   }
 
   return has_frame;
@@ -232,6 +232,22 @@ uint8_t RS485_IsTxBusy(void)
   return rs485_tx_busy;
 }
 
+static void RS485_CompleteTransmit(void)
+{
+  if (rs485_tx_busy == 0U)
+  {
+    return;
+  }
+
+  rs485_tx_busy = 0U;
+  rs485_tx_done++;
+  /* UART TC到达时立即切回接收，避免等待任务调度期间丢失下一条主机请求。 */
+  if (RS485_StartReceive() != HAL_OK)
+  {
+    rs485_errors++;
+  }
+}
+
 void RS485_OnTxDmaIrq(void)
 {
   /* DMA complete is earlier than UART TC; do not switch DE here. */
@@ -240,14 +256,10 @@ void RS485_OnTxDmaIrq(void)
 
 void RS485_ProcessTxEvent(void)
 {
-  /* TX completion processing is driven by UART TC, then RX is armed again. */
+  /* 保留任务级兜底，正常路径已在UART TC回调中完成接收切换。 */
   if ((rs485_tx_busy != 0U) && (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) != RESET))
   {
-    rs485_tx_busy = 0U;
-    rs485_tx_done++;
-    RS485_SetReceiveMode();
-    RS485_DirectionSwitchDelay();
-    (void)RS485_StartReceive();
+    RS485_CompleteTransmit();
   }
 }
 
@@ -284,10 +296,19 @@ void RS485_ProcessRxFrame(void)
     else if (modbus_result == MODBUS_RESULT_NO_RESPONSE)
     {
       rs485_modbus_no_response++;
+      /* 无需应答时才立即恢复接收；正常应答由发送完成回调恢复接收。 */
+      if (RS485_StartReceive() != HAL_OK)
+      {
+        rs485_errors++;
+      }
     }
     else
     {
       rs485_modbus_frame_error++;
+      if (RS485_StartReceive() != HAL_OK)
+      {
+        rs485_errors++;
+      }
     }
   }
 }
@@ -323,6 +344,7 @@ void RS485_GetStatus(RS485_StatusTypeDef *status)
   status->tx_send_fail = rs485_tx_send_fail;
   status->tx_done = rs485_tx_done;
   status->errors = rs485_errors;
+  status->last_uart_error = rs485_last_uart_error;
   status->last_rx_size = rs485_last_rx_size;
   status->last_tx_size = rs485_last_tx_size;
   for (uint16_t i = 0U; i < RS485_DEBUG_HEAD_SIZE; i++)
@@ -331,6 +353,14 @@ void RS485_GetStatus(RS485_StatusTypeDef *status)
     status->last_tx_head[i] = rs485_last_tx_head[i];
   }
   status->tx_busy = rs485_tx_busy;
+  __enable_irq();
+}
+
+void RS485_ClearErrorHistory(void)
+{
+  __disable_irq();
+  /* 运行计数器继续累加，仅清除对外保留的最近UART硬件错误位。 */
+  rs485_last_uart_error = HAL_UART_ERROR_NONE;
   __enable_irq();
 }
 
@@ -374,7 +404,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     /* In DMA normal mode HAL calls this after USART TC, not just DMA TC. */
     rs485_tx_cplt_callback++;
 
-    /* The task owns post-TC processing: clear busy, switch DE, restart RX. */
+    RS485_CompleteTransmit();
     RS485_TaskNotifyTxComplete();
   }
 }
@@ -383,10 +413,17 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
   {
+    rs485_last_uart_error = HAL_UART_GetError(huart);
     rs485_errors++;
     rs485_tx_busy = 0U;
-    RS485_SetReceiveMode();
-    (void)RS485_StartReceive();
+
+    /* 出错帧可能只接收了一部分，恢复DMA前先丢弃待处理标记，避免被误报为帧覆盖。 */
+    rs485_rx_frame_ready = 0U;
+    rs485_rx_frame_size = 0U;
+    if (RS485_StartReceive() != HAL_OK)
+    {
+      rs485_errors++;
+    }
     RS485_TaskNotifyTxError();
   }
 }

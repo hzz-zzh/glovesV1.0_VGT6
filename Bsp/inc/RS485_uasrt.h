@@ -35,6 +35,7 @@ typedef struct
   uint32_t tx_send_fail;
   uint32_t tx_done;
   uint32_t errors;
+  uint32_t last_uart_error;
   uint16_t last_rx_size;
   uint16_t last_tx_size;
   uint8_t last_rx_head[RS485_DEBUG_HEAD_SIZE];
@@ -66,6 +67,7 @@ void RS485_ProcessRxFrame(void);
 void RS485_ProcessTxEvent(void);
 
 void RS485_GetStatus(RS485_StatusTypeDef *status);
+void RS485_ClearErrorHistory(void);
 
 /* Called from the GPDMA TX IRQ; only counts DMA IRQ, not UART TC completion. */
 void RS485_OnTxDmaIrq(void);

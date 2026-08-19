@@ -5,6 +5,7 @@
 #include "FreeRTOS.h"
 #include "main.h"
 #include "sd_log.h"
+#include "system_health.h"
 #include "task.h"
 #include "uart_redirect.h"
 #include <stdint.h>
@@ -42,6 +43,18 @@ static void StorageTask_UpdateStackWatermark(void)
   }
 }
 
+static void StorageTask_ReportSdResult(GloveStatus_t result)
+{
+  SdLogStatusSnapshot_t status;
+
+  SdLog_GetStatus(&status);
+  SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_SD_ERROR,
+                        SYSTEM_ERROR_SD,
+                        SYSTEM_HEALTH_SOURCE_STORAGE,
+                        status.error_code,
+                        (result == GLOVE_STATUS_OK) ? 0U : 1U);
+}
+
 static void StorageTask_ToggleRecording(void)
 {
   GloveStatus_t result;
@@ -51,6 +64,7 @@ static void StorageTask_ToggleRecording(void)
   if (SdLog_IsRecording() != 0U)
   {
     result = SdLog_Stop();
+    StorageTask_ReportSdResult(result);
     SdLog_GetStatus(&status);
     filename = (status.last_filename[0] != '\0') ?
                status.last_filename :
@@ -74,6 +88,7 @@ static void StorageTask_ToggleRecording(void)
   else
   {
     result = SdLog_Start();
+    StorageTask_ReportSdResult(result);
     SdLog_GetStatus(&status);
 
     if (result == GLOVE_STATUS_OK)
@@ -231,6 +246,7 @@ static void StorageTask_WriteSimFrameIfDue(void)
 {
   static GloveFullFrame_t sim_frame;
   static uint32_t last_sim_tick = 0U;
+  GloveStatus_t result;
 
   const uint32_t now = osKernelGetTickCount();
 
@@ -246,7 +262,9 @@ static void StorageTask_WriteSimFrameIfDue(void)
 
   last_sim_tick = now;
   StorageTask_BuildSimFrame(&sim_frame);
-  if (SdLog_WriteFullFrame(&sim_frame) == GLOVE_STATUS_OK)
+  result = SdLog_WriteFullFrame(&sim_frame);
+  StorageTask_ReportSdResult(result);
+  if (result == GLOVE_STATUS_OK)
   {
     storage_sim_write_count++;
   }
@@ -273,7 +291,7 @@ void StorageTask(void *argument)
     {
       if (SdLog_IsRecording() != 0U)
       {
-        (void)SdLog_WriteFullFrame(&full->frame);
+        StorageTask_ReportSdResult(SdLog_WriteFullFrame(&full->frame));
       }
       (void)DataManager_ReleaseFullFrame(full);
     }

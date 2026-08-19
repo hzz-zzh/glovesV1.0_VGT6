@@ -33,7 +33,9 @@ SENSOR_120HZ_PERIOD_S = 1.0 / 120.0
 SENSOR_120HZ_TIMEOUT_S = 0.008
 SENSOR_120HZ_READ_SLICE_S = 0.002
 SENSOR_120HZ_RETRIES = 1
+SENSOR_120HZ_RETRY_GAP_S = 0.001
 SENSOR_120HZ_SPIN_GUARD_S = 0.004
+MODBUS_INTER_REQUEST_GAP_S = 0.0001
 
 REG_BASIC_STATUS_START = 0x0000
 REG_BASIC_STATUS_COUNT = 14
@@ -41,8 +43,16 @@ REG_UTC_TIMESTAMP_US = 0x0002
 REG_LOCAL_UPTIME_US = 0x0006
 REG_TIME_SYNC_UTC_US = 0x000A
 MODBUS_ROS_TIME_REG_COUNT = 4
+REG_CMD_START = 0x0020
+REG_CMD_ACK_START = 0x0023
+REG_CMD_ACK_COUNT = 3
+CMD_HEALTH_CLEAR_HISTORY = 0x004A
+CMD_HEALTH_CLEAR_MAGIC = 0xC1EA
+CMD_ACK_OK = 0x0001
 REG_SYSTEM_STATUS_START = 0x0040
 REG_SYSTEM_STATUS_COUNT = 10
+REG_HEALTH_STATUS_START = 0x004A
+REG_HEALTH_STATUS_COUNT = 22
 REG_POWER_STATUS_START = 0x0060
 REG_POWER_STATUS_COUNT = 18
 REG_WORK_STATE = 0x0500
@@ -138,6 +148,126 @@ POWER_STATE_NAMES = {
     7: "RECOVERY_FAULT",
 }
 
+HEALTH_STATE_NAMES = {
+    0: "INIT",
+    1: "OK",
+    2: "WARNING",
+    3: "DEGRADED",
+    4: "RECOVERING",
+    5: "FAULT",
+    6: "OFF",
+    7: "LOCKOUT",
+}
+
+HEALTH_SOURCE_NAMES = {
+    0: "none",
+    1: "IMU",
+    2: "CAN1",
+    3: "CAN2",
+    4: "touch",
+    5: "pipeline",
+    6: "power",
+    7: "battery",
+    8: "charger",
+    9: "watchdog",
+    10: "RS485",
+    11: "time_sync",
+    12: "calibration",
+    13: "storage",
+}
+
+RECOVERY_STAGE_NAMES = {
+    0: "none",
+    1: "confirming sensor loss",
+    2: "configuring IMU node",
+    3: "verifying IMU node",
+    4: "reinitializing CAN bus",
+    5: "configuring CAN bus nodes",
+    6: "verifying CAN bus",
+    7: "stopping acquisition safely",
+    8: "peripheral power-off hold",
+    9: "starting peripheral power",
+    10: "waiting for sensors",
+    11: "verifying complete frames",
+    12: "recovery failed",
+}
+
+HEALTH_FLAG_NAMES = (
+    (1 << 0, "imu_partial"),
+    (1 << 1, "imu_all_invalid"),
+    (1 << 2, "touch_invalid"),
+    (1 << 3, "frame_stale"),
+    (1 << 4, "joint_invalid"),
+    (1 << 5, "can1_error_passive"),
+    (1 << 6, "can1_bus_off"),
+    (1 << 7, "can2_error_passive"),
+    (1 << 8, "can2_bus_off"),
+    (1 << 9, "imu_config_failed"),
+    (1 << 10, "can_reinit_failed"),
+    (1 << 11, "power_recovery_failed"),
+    (1 << 12, "low_battery"),
+    (1 << 13, "critical_battery"),
+    (1 << 14, "bq_comm"),
+    (1 << 15, "gauge_comm"),
+    (1 << 16, "voltage_mismatch"),
+    (1 << 17, "temperature_limit"),
+    (1 << 18, "charge_fault"),
+    (1 << 19, "watchdog_warning"),
+    (1 << 20, "time_unsynced"),
+    (1 << 21, "calibration_error"),
+    (1 << 22, "rs485_rx_overwrite"),
+    (1 << 23, "rs485_uart_error"),
+    (1 << 24, "rs485_tx_failed"),
+    (1 << 25, "queue_pressure"),
+    (1 << 26, "pool_exhausted"),
+    (1 << 27, "sd_error"),
+)
+
+READY_FLAG_NAMES = (
+    (1 << 0, "all_imus"),
+    (1 << 1, "touch"),
+    (1 << 2, "full_frame"),
+    (1 << 3, "joint"),
+    (1 << 4, "power"),
+    (1 << 5, "time_sync"),
+    (1 << 6, "rs485"),
+)
+
+HEALTH_ERROR_INFO = {
+    0x0000: ("no error", "No action is required."),
+    0x1001: ("IMU node data stale", "Check the indicated IMU node and CAN wiring if recovery does not finish."),
+    0x1002: ("IMU node configuration failed", "Check the indicated node, its power, and CAN wiring."),
+    0x2001: ("CAN entered error-passive", "Inspect CAN termination, wiring, and bus load."),
+    0x2002: ("CAN bus-off", "The device will reinitialize the bus automatically; inspect wiring if it repeats."),
+    0x2003: ("CAN reinitialization failed", "Power-cycle the device and inspect the indicated CAN bus."),
+    0x2004: ("CAN recovery verification failed", "Inspect all nodes on the indicated CAN bus."),
+    0x3001: ("touch sync timeout", "Check acquisition sync and peripheral power."),
+    0x3002: ("touch ADC DMA timeout", "Check ADC/DMA operation and peripheral power."),
+    0x3003: ("touch ADC DMA error", "Check ADC wiring and DMA configuration."),
+    0x4001: ("complete sensor frame stale", "Wait for recovery; then inspect IMU/touch readiness."),
+    0x4002: ("IMU/touch timestamps do not match", "Check the shared acquisition sync signal."),
+    0x4003: ("data queue full", "Reduce processing load or inspect a stalled consumer."),
+    0x4004: ("data pool exhausted", "Inspect unreleased buffers or a stalled consumer."),
+    0x4005: ("joint algorithm input invalid", "Restore all required IMU data and verify calibration."),
+    0x5001: ("acquisition pause timeout", "A producer did not stop safely; inspect IMU and touch tasks."),
+    0x5002: ("acquisition sync start failed", "Restart the device and inspect the sync timer/output."),
+    0x5003: ("peripheral recovery timeout", "Inspect peripheral power, all IMUs, touch ADC, and sync wiring."),
+    0x6001: ("battery low", "Charge the battery soon."),
+    0x6002: ("battery critical", "Charge the battery before enabling peripherals."),
+    0x6003: ("charger communication failed", "Inspect the BQ25622 and I2C bus."),
+    0x6004: ("fuel-gauge communication failed", "Inspect the MAX17043 and I2C bus."),
+    0x6005: ("battery voltage readings disagree", "Inspect battery measurement paths."),
+    0x6006: ("charging temperature limit", "Allow the battery to return to a safe temperature."),
+    0x6007: ("charging fault", "Disconnect power and inspect the charger and battery."),
+    0x7001: ("watchdog configuration warning", "Verify watchdog startup and task heartbeat configuration."),
+    0x8001: ("RS485 receive frame overwritten", "Reduce request rate or wait for each response."),
+    0x8002: ("RS485 UART error", "Inspect baud rate, grounding, termination, and cabling."),
+    0x8003: ("RS485 transmit failed", "Inspect the transceiver and request timing."),
+    0x8004: ("time synchronization lost", "Send UTC synchronization again."),
+    0x9001: ("calibration rejected", "Correct the indicated calibration entry and apply again."),
+    0xA001: ("SD logging error", "Inspect the SD card and filesystem, then retry logging."),
+}
+
 SENSOR_READY_POWER_STATES = frozenset((1, 2))
 IMU_ALL_VALID_MASK = (1 << MODBUS_IMU_COUNT) - 1
 
@@ -229,13 +359,10 @@ RESET_CAUSE_NAMES = (
     (1 << 5, "low_power_reset"),
 )
 
-WATCHDOG_TASK_NAMES = (
-    (1 << 0, "system_manager"),
-    (1 << 1, "imu"),
-    (1 << 2, "touch"),
-    (1 << 3, "frame_assembler"),
-    (1 << 4, "data_process"),
-    (1 << 5, "rs485"),
+WATCHDOG_STATUS_NAMES = (
+    (1 << 0, "running"),
+    (1 << 1, "refresh_ok"),
+    (1 << 2, "config_warning"),
 )
 
 IMU_FIELDS = (
@@ -420,6 +547,13 @@ class ModbusRtuClient:
         self.low_latency_max_request_ms = 0.0
         self.low_latency_last_timeout_start = 0
 
+    @staticmethod
+    def _wait_inter_request_gap() -> None:
+        """Leave a short silent interval before each RTU request."""
+        deadline = time.perf_counter() + MODBUS_INTER_REQUEST_GAP_S
+        while time.perf_counter() < deadline:
+            pass
+
     def open(self, port_name: str, baud: int, timeout_s: float) -> None:
         if serial is None:
             raise ModbusError("pyserial is not installed")
@@ -539,6 +673,7 @@ class ModbusRtuClient:
                 self.port.reset_input_buffer()
             self.last_tx = request
             self.last_rx = b""
+            self._wait_inter_request_gap()
             self.port.write(request)
             if not low_latency:
                 self.port.flush()
@@ -649,6 +784,8 @@ class ModbusRtuClient:
                 if attempt < retries:
                     self.low_latency_retries += 1
                     self.recover_low_latency_poll()
+                    # 给从机留出结束上一笔事务的时间，避免超时重试与迟到响应重叠。
+                    time.sleep(SENSOR_120HZ_RETRY_GAP_S)
 
         if last_error is None:
             raise ModbusError("sensor snapshot failed without error detail")
@@ -668,6 +805,7 @@ class ModbusRtuClient:
         with self.lock:
             self.last_tx = request
             self.last_rx = b""
+            self._wait_inter_request_gap()
             self.port.write(request)
 
             buffer = bytearray()
@@ -819,6 +957,7 @@ class ModbusRtuClient:
             self.port.reset_input_buffer()
             self.last_tx = request
             self.last_rx = b""
+            self._wait_inter_request_gap()
             self.port.write(request)
             self.port.flush()
 
@@ -914,6 +1053,7 @@ class ModbusRtuClient:
             self.port.reset_input_buffer()
             self.last_tx = request
             self.last_rx = b""
+            self._wait_inter_request_gap()
             self.port.write(request)
             self.port.flush()
 
@@ -996,6 +1136,7 @@ class ModbusRtuClient:
             self.port.reset_input_buffer()
             self.last_tx = frame
             self.last_rx = b""
+            self._wait_inter_request_gap()
             self.port.write(frame)
             self.port.flush()
 
@@ -1045,6 +1186,95 @@ class PowerSnapshot:
     bq_interrupt_count: int
 
 
+@dataclass
+class HealthSnapshot:
+    version: int
+    state: int
+    current_flags: int
+    current_error: int
+    current_source: int
+    current_target: int
+    recovery_stage: int
+    recovery_attempt: int
+    recovery_limit: int
+    last_error: int
+    last_source: int
+    last_target: int
+    error_seq: int
+    error_count: int
+    last_error_uptime_ms: int
+    live_imu_mask: int
+    ready_flags: int
+    snapshot_age_ms: int
+    rs485_uart_detail: int
+
+
+def decode_health(regs: list[int]) -> HealthSnapshot:
+    if len(regs) < REG_HEALTH_STATUS_COUNT:
+        raise ModbusError(f"health status needs {REG_HEALTH_STATUS_COUNT} registers")
+    attempt_word = regs[8]
+    return HealthSnapshot(
+        version=regs[0],
+        state=regs[1],
+        current_flags=regs[2] | (regs[3] << 16),
+        current_error=regs[4],
+        current_source=regs[5],
+        current_target=regs[6],
+        recovery_stage=regs[7],
+        recovery_attempt=attempt_word & 0xFF,
+        recovery_limit=(attempt_word >> 8) & 0xFF,
+        last_error=regs[9],
+        last_source=regs[10],
+        last_target=regs[11],
+        error_seq=regs[12] | (regs[13] << 16),
+        error_count=regs[14] | (regs[15] << 16),
+        last_error_uptime_ms=regs[16] | (regs[17] << 16),
+        live_imu_mask=regs[18],
+        ready_flags=regs[19],
+        snapshot_age_ms=regs[20],
+        rs485_uart_detail=regs[21],
+    )
+
+
+def health_error_text(error: int) -> tuple[str, str]:
+    return HEALTH_ERROR_INFO.get(
+        error,
+        (f"unknown error 0x{error:04X}", "Record the code and inspect the detailed status."),
+    )
+
+
+def format_uart_error_detail(detail: int) -> str:
+    if detail == 0:
+        return "none captured"
+    uart_error_names = (
+        (0x0001, "PE/parity"),
+        (0x0002, "NE/noise"),
+        (0x0004, "FE/frame"),
+        (0x0008, "ORE/overrun"),
+        (0x0010, "DMA"),
+        (0x0020, "RTO/timeout"),
+    )
+    active = [name for mask, name in uart_error_names if detail & mask]
+    names = "|".join(active) if active else "unknown"
+    return f"0x{detail:04X} ({names})"
+
+
+def format_health_target(source: int, target: int) -> str:
+    if target == 0:
+        return "not specified"
+    if source == 1:
+        return f"IMU logical node {target}"
+    if source in (2, 3):
+        return f"CAN bus {target}"
+    if source == 10:
+        return f"UART error {format_uart_error_detail(target)}"
+    if source == 12:
+        return f"calibration entry {target}"
+    if source == 13:
+        return f"SD detail 0x{target:04X}"
+    return str(target)
+
+
 def decode_power(regs: list[int]) -> PowerSnapshot:
     if len(regs) < REG_POWER_STATUS_COUNT:
         raise ModbusError(f"power status needs {REG_POWER_STATUS_COUNT} registers")
@@ -1071,6 +1301,7 @@ class GloveSnapshot:
     timestamp: float
     basic: list[int]
     system: list[int]
+    health_regs: list[int]
     power_regs: list[int]
     work_state: int
     imu_status_regs: list[int]
@@ -1127,6 +1358,9 @@ def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> Glov
         system=client.read_holding_registers(
             slave, REG_SYSTEM_STATUS_START, REG_SYSTEM_STATUS_COUNT, timeout_s
         ),
+        health_regs=client.read_holding_registers(
+            slave, REG_HEALTH_STATUS_START, REG_HEALTH_STATUS_COUNT, timeout_s
+        ),
         power_regs=client.read_holding_registers(
             slave, REG_POWER_STATUS_START, REG_POWER_STATUS_COUNT, timeout_s
         ),
@@ -1171,6 +1405,7 @@ def empty_snapshot() -> GloveSnapshot:
         timestamp=time.time(),
         basic=[0] * REG_BASIC_STATUS_COUNT,
         system=[0] * REG_SYSTEM_STATUS_COUNT,
+        health_regs=[0] * REG_HEALTH_STATUS_COUNT,
         power_regs=[0] * REG_POWER_STATUS_COUNT,
         work_state=0,
         imu_status_regs=[0] * 5,
@@ -1251,6 +1486,7 @@ def read_sensor_snapshot_120hz(
         timestamp=time.time(),
         basic=base.basic,
         system=base.system,
+        health_regs=base.health_regs,
         power_regs=power_regs,
         work_state=base.work_state,
         imu_status_regs=[*sensor_time_regs, imu_status],
@@ -1500,6 +1736,7 @@ class ModbusMonitorApp(tk.Tk):
         self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         self.summary_text = self._add_text_tab("Summary")
+        self.health_text = self._add_health_tab()
         self.power_text = self._add_text_tab("Power")
         self.imu_text = self._add_text_tab("IMU")
         self.joint_text = self._add_text_tab("Joint")
@@ -1523,6 +1760,33 @@ class ModbusMonitorApp(tk.Tk):
         ybar.grid(row=0, column=1, sticky="ns")
         xbar.grid(row=1, column=0, sticky="ew")
         self.notebook.add(frame, text=title)
+        return text
+
+    def _add_health_tab(self) -> tk.Text:
+        frame = ttk.Frame(self.notebook)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        controls = ttk.Frame(frame, padding=6)
+        controls.grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            controls,
+            text="Clear History",
+            command=self.clear_health_history,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(
+            controls,
+            text="Clears Last error and counters only; active faults remain.",
+        ).pack(side=tk.LEFT)
+
+        text = tk.Text(frame, wrap="none", font=("Consolas", 10), state="disabled")
+        ybar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        xbar = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text.xview)
+        text.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        text.grid(row=1, column=0, sticky="nsew")
+        ybar.grid(row=1, column=1, sticky="ns")
+        xbar.grid(row=2, column=0, sticky="ew")
+        self.notebook.add(frame, text="Health")
         return text
 
     def _add_calibration_tab(self) -> tk.Text:
@@ -1795,6 +2059,46 @@ class ModbusMonitorApp(tk.Tk):
             slave, timeout_s = self._ensure_connected_for_worker()
             snapshot = read_snapshot(self.client, slave, timeout_s)
             self.events.put(("snapshot", snapshot))
+        except Exception as exc:
+            self.events.put(("error", exc))
+
+    def clear_health_history(self) -> None:
+        if not messagebox.askyesno(
+            "Clear health history",
+            "Clear Last error, error sequence/count, uptime and UART detail?\n"
+            "Active faults will not be cleared.",
+        ):
+            return
+        self._start_worker(self._clear_health_history_worker)
+
+    def _clear_health_history_worker(self) -> None:
+        try:
+            slave, timeout_s = self._ensure_connected_for_worker()
+            seq = int(time.time() * 1000.0) & 0xFFFF
+            self.client.write_multiple_registers(
+                slave,
+                REG_CMD_START,
+                [CMD_HEALTH_CLEAR_HISTORY, CMD_HEALTH_CLEAR_MAGIC, seq],
+                timeout_s,
+            )
+            ack, ack_seq, error = self.client.read_holding_registers(
+                slave, REG_CMD_ACK_START, REG_CMD_ACK_COUNT, timeout_s
+            )
+            if (ack != CMD_ACK_OK) or (ack_seq != seq) or (error != 0):
+                raise ModbusError(
+                    f"clear history rejected: ack=0x{ack:04X} "
+                    f"ack_seq=0x{ack_seq:04X} expected=0x{seq:04X} "
+                    f"error=0x{error:04X}"
+                )
+            snapshot = read_snapshot(self.client, slave, timeout_s)
+            self.events.put(("snapshot", snapshot))
+            self.events.put(
+                (
+                    "log",
+                    f"[{time.strftime('%H:%M:%S')}] health history cleared "
+                    f"seq=0x{seq:04X}\n\n",
+                )
+            )
         except Exception as exc:
             self.events.put(("error", exc))
 
@@ -2132,7 +2436,11 @@ class ModbusMonitorApp(tk.Tk):
                 lambda: f"{len(self.client.read_holding_registers(slave, REG_SYSTEM_STATUS_START, REG_SYSTEM_STATUS_COUNT, timeout_s))} regs",
             )
             step(
-                "FC03 power status 0x0060+14",
+                "FC03 health status 0x004A+22",
+                lambda: self._test_read_health_status(slave, timeout_s),
+            )
+            step(
+                "FC03 power status 0x0060+18",
                 lambda: self._test_read_power_status(slave, timeout_s),
             )
             step(
@@ -2255,6 +2563,18 @@ class ModbusMonitorApp(tk.Tk):
             f"SOC={power.soc_percent:.2f}%(uncalibrated) flags=0x{power.flags:04X}"
         )
 
+    def _test_read_health_status(self, slave: int, timeout_s: float) -> str:
+        regs = self.client.read_holding_registers(
+            slave, REG_HEALTH_STATUS_START, REG_HEALTH_STATUS_COUNT, timeout_s
+        )
+        health = decode_health(regs)
+        error_name, _action = health_error_text(health.current_error)
+        return (
+            f"version=0x{health.version:04X} "
+            f"state={HEALTH_STATE_NAMES.get(health.state, health.state)} "
+            f"error=0x{health.current_error:04X}({error_name})"
+        )
+
     def _test_write_single_same(self, slave: int, timeout_s: float, addr: int) -> str:
         original = self.client.read_holding_registers(slave, addr, 1, timeout_s)[0]
         self.client.write_single_register(slave, addr, original, timeout_s)
@@ -2339,6 +2659,7 @@ class ModbusMonitorApp(tk.Tk):
         actual_hz = 0.0
         sensor_hz = 0.0
         duplicate_responses = 0
+        next_health_poll = next_deadline
 
         try:
             self.client.prepare_low_latency_poll()
@@ -2352,9 +2673,26 @@ class ModbusMonitorApp(tk.Tk):
                     snapshot = read_sensor_snapshot_120hz(
                         self.client, slave, timeout_s, previous, actual_hz
                     )
-                    previous = snapshot
                     rate_count += 1
                     now = time.perf_counter()
+
+                    if now >= next_health_poll:
+                        try:
+                            # 健康块低频读取，避免改变FC41帧并尽量不扰动120Hz采集。
+                            snapshot.health_regs = self.client.read_holding_registers(
+                                slave,
+                                REG_HEALTH_STATUS_START,
+                                REG_HEALTH_STATUS_COUNT,
+                                min(timeout_s, 0.02),
+                                low_latency=True,
+                            )
+                        except Exception:
+                            self.client.recover_low_latency_poll()
+                            snapshot.health_regs = list(previous.health_regs) if previous else [
+                                0
+                            ] * REG_HEALTH_STATUS_COUNT
+                        next_health_poll = now + 0.2
+                    previous = snapshot
 
                     if snapshot.sensor_data_valid:
                         if last_sensor_frame_id == snapshot.sensor_frame_id:
@@ -2448,6 +2786,10 @@ class ModbusMonitorApp(tk.Tk):
 
     def _render_snapshot(self, snapshot: GloveSnapshot) -> None:
         power = decode_power(snapshot.power_regs)
+        health = decode_health(snapshot.health_regs)
+        health_state = HEALTH_STATE_NAMES.get(health.state, f"UNKNOWN({health.state})")
+        current_error_name, current_action = health_error_text(health.current_error)
+        last_error_name, _last_action = health_error_text(health.last_error)
         utc_time = format_ros_time(snapshot.basic[2:6])
         local_time = format_ros_time(snapshot.basic[6:10])
         last_sync_time = format_ros_time(snapshot.basic[10:14])
@@ -2486,8 +2828,18 @@ class ModbusMonitorApp(tk.Tk):
             data_status = "DATA READY"
         else:
             data_status = f"DATA PAUSED: {snapshot.sensor_invalid_reason}"
+        if health.version == 0:
+            health_banner = "HEALTH UNAVAILABLE"
+        elif health.state == 4:
+            health_banner = (
+                f"RECOVERING: {RECOVERY_STAGE_NAMES.get(health.recovery_stage, health.recovery_stage)}"
+            )
+        elif health.current_error != 0:
+            health_banner = f"{health_state}: {current_error_name}"
+        else:
+            health_banner = health_state
         self.status_var.set(
-            f"{data_status} | {poll_text} reads={self.read_count} "
+            f"{health_banner} | {data_status} | {poll_text} reads={self.read_count} "
             f"errors={self.error_count} "
             f"host={time.strftime('%H:%M:%S', time.localtime(snapshot.timestamp))}"
         )
@@ -2509,7 +2861,15 @@ class ModbusMonitorApp(tk.Tk):
             f"Last sync UTC     : {last_sync_time}",
             f"Work state        : 0x{snapshot.work_state:04X}",
             "",
-            f"System state      : 0x{snapshot.system[0]:04X}",
+            f"Health state      : {health.state} ({health_state})",
+            f"Current error     : 0x{health.current_error:04X} ({current_error_name})",
+            f"Current source    : {HEALTH_SOURCE_NAMES.get(health.current_source, health.current_source)} "
+            f"target={format_health_target(health.current_source, health.current_target)}",
+            f"Recovery stage    : {health.recovery_stage} "
+            f"({RECOVERY_STAGE_NAMES.get(health.recovery_stage, 'unknown')})",
+            f"Recommended action: {current_action}",
+            "",
+            f"Legacy sys state  : 0x{snapshot.system[0]:04X}",
             f"Work mode         : 0x{snapshot.system[1]:04X}",
             f"Log state         : 0x{snapshot.system[2]:04X}",
             f"SD state          : 0x{snapshot.system[3]:04X}",
@@ -2517,8 +2877,8 @@ class ModbusMonitorApp(tk.Tk):
             f"Comm state        : 0x{snapshot.system[5]:04X}",
             f"Reset cause       : 0x{snapshot.system[6]:04X} "
             f"({format_flags(snapshot.system[6], RESET_CAUSE_NAMES)})",
-            f"Watchdog missing  : 0x{snapshot.system[7]:04X} "
-            f"({format_flags(snapshot.system[7], WATCHDOG_TASK_NAMES)})",
+            f"Watchdog status   : 0x{snapshot.system[7]:04X} "
+            f"({format_flags(snapshot.system[7], WATCHDOG_STATUS_NAMES)})",
             "",
             f"Battery voltage   : {power.battery_voltage_v:.3f} V",
             f"Battery current   : {power.battery_current_a:+.3f} A (+charge)",
@@ -2551,6 +2911,48 @@ class ModbusMonitorApp(tk.Tk):
             f"Touch count/cap   : {touch_count}/{touch_capacity}",
         ]
         set_text(self.summary_text, "\n".join(summary))
+
+        attempt_text = (
+            f"{health.recovery_attempt}/{health.recovery_limit}"
+            if health.recovery_limit
+            else str(health.recovery_attempt)
+        )
+        age_text = "not available" if health.snapshot_age_ms == 0xFFFF else f"{health.snapshot_age_ms} ms"
+        health_lines = [
+            "Device health and recovery",
+            "",
+            f"Protocol version    : {health.version >> 8}.{health.version & 0xFF}",
+            f"Overall state       : {health.state} ({health_state})",
+            f"Active flags        : 0x{health.current_flags:08X}",
+            f"                      {format_flags(health.current_flags, HEALTH_FLAG_NAMES)}",
+            "",
+            f"Current error       : 0x{health.current_error:04X} ({current_error_name})",
+            f"Current source      : {health.current_source} "
+            f"({HEALTH_SOURCE_NAMES.get(health.current_source, 'unknown')})",
+            f"Current target      : {format_health_target(health.current_source, health.current_target)}",
+            f"Recommended action  : {current_action}",
+            "",
+            f"Recovery stage      : {health.recovery_stage} "
+            f"({RECOVERY_STAGE_NAMES.get(health.recovery_stage, 'unknown')})",
+            f"Recovery attempt    : {attempt_text}",
+            "",
+            f"Last error          : 0x{health.last_error:04X} ({last_error_name})",
+            f"Last source/target  : {HEALTH_SOURCE_NAMES.get(health.last_source, health.last_source)}"
+            f"/{format_health_target(health.last_source, health.last_target)}",
+            f"Last error uptime   : {health.last_error_uptime_ms} ms",
+            f"Error sequence/count: {health.error_seq}/{health.error_count}",
+            f"Last UART detail    : {format_uart_error_detail(health.rs485_uart_detail)}",
+            "",
+            f"Live IMU mask       : 0x{health.live_imu_mask:04X}",
+            f"Ready flags         : 0x{health.ready_flags:04X}",
+            f"                      {format_flags(health.ready_flags, READY_FLAG_NAMES)}",
+            f"Full-frame age      : {age_text}",
+            "",
+            "Notes:",
+            "- Current error clears after verified recovery; last error remains as history.",
+            "- Target is an IMU logical node, CAN bus number, or subsystem-specific detail.",
+        ]
+        set_text(self.health_text, "\n".join(health_lines))
 
         power_lines = [
             "Battery and charger status",
@@ -2638,6 +3040,7 @@ class ModbusMonitorApp(tk.Tk):
         raw_lines = [
             self._format_regs("basic 0x0000", REG_BASIC_STATUS_START, snapshot.basic),
             self._format_regs("system 0x0040", REG_SYSTEM_STATUS_START, snapshot.system),
+            self._format_regs("health 0x004A", REG_HEALTH_STATUS_START, snapshot.health_regs),
             self._format_regs("power 0x0060", REG_POWER_STATUS_START, snapshot.power_regs),
             self._format_regs("imu status 0x1140", REG_IMU_TIMESTAMP_US, snapshot.imu_status_regs),
             self._format_regs(
@@ -2754,6 +3157,7 @@ class ModbusMonitorApp(tk.Tk):
 
         snapshot = self.last_snapshot
         power = decode_power(snapshot.power_regs)
+        health = decode_health(snapshot.health_regs)
         imus = decode_imu(snapshot.imu_regs)
         joints = decode_joint(snapshot.joint_regs)
         imu_sec, imu_nsec = regs_to_ros_time_le_words(snapshot.imu_status_regs[0:4])
@@ -2790,7 +3194,25 @@ class ModbusMonitorApp(tk.Tk):
             writer.writerow(("status", "power", "bq_fault_events", f"0x{power.bq_fault_events:02X}"))
             writer.writerow(("status", "power", "bq_interrupt_count", power.bq_interrupt_count))
             writer.writerow(("status", "system", "reset_cause", f"0x{snapshot.system[6]:04X}"))
-            writer.writerow(("status", "system", "watchdog_missing_tasks", f"0x{snapshot.system[7]:04X}"))
+            writer.writerow(("status", "system", "watchdog_status", f"0x{snapshot.system[7]:04X}"))
+            writer.writerow(("status", "health", "version", f"0x{health.version:04X}"))
+            writer.writerow(("status", "health", "state", health.state))
+            writer.writerow(("status", "health", "current_flags", f"0x{health.current_flags:08X}"))
+            writer.writerow(("status", "health", "current_error", f"0x{health.current_error:04X}"))
+            writer.writerow(("status", "health", "current_source", health.current_source))
+            writer.writerow(("status", "health", "current_target", health.current_target))
+            writer.writerow(("status", "health", "recovery_stage", health.recovery_stage))
+            writer.writerow(("status", "health", "recovery_attempt", health.recovery_attempt))
+            writer.writerow(("status", "health", "recovery_limit", health.recovery_limit))
+            writer.writerow(("status", "health", "last_error", f"0x{health.last_error:04X}"))
+            writer.writerow(("status", "health", "last_source", health.last_source))
+            writer.writerow(("status", "health", "last_target", health.last_target))
+            writer.writerow(("status", "health", "error_seq", health.error_seq))
+            writer.writerow(("status", "health", "error_count", health.error_count))
+            writer.writerow(("status", "health", "live_imu_mask", f"0x{health.live_imu_mask:04X}"))
+            writer.writerow(("status", "health", "ready_flags", f"0x{health.ready_flags:04X}"))
+            writer.writerow(("status", "health", "snapshot_age_ms", health.snapshot_age_ms))
+            writer.writerow(("status", "health", "rs485_uart_detail", f"0x{health.rs485_uart_detail:04X}"))
             writer.writerow(("status", "imu", "timestamp_datetime_utc", imu_time_text))
             writer.writerow(("status", "imu", "timestamp_us", imu_us))
             writer.writerow(("status", "imu", "timestamp_sec", imu_sec))

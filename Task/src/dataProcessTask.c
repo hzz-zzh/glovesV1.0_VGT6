@@ -12,6 +12,7 @@
 #include "data_manager.h"
 #include "glove_hand_config.h"
 #include "hand_solve.h"
+#include "system_health.h"
 
 #define DATA_PROCESS_GET_RAW_TIMEOUT_MS         (10U)
 #define DATA_PROCESS_IDLE_DELAY_MS              (1U)
@@ -20,6 +21,8 @@
 #define DATA_PROCESS_FULL_DEBUG_PRINT_PERIOD    (50U)
 #define DATA_PROCESS_FULL_DEBUG_IMU_PRINT_COUNT (2U)
 #define DATA_PROCESS_FULL_DEBUG_TOUCH_COUNT     (16U)
+#define DATA_PROCESS_HEALTH_FAILURE_LIMIT       (3U)
+#define DATA_PROCESS_HEALTH_RECOVERY_FRAMES     (3U)
 
 typedef struct
 {
@@ -519,6 +522,8 @@ void DataProcessTask(void *argument)
     GloveStatus_t release_status;
     GloveTimestampUs_t start_us;
     GloveTimestampUs_t end_us;
+    uint8_t publish_failure_count = 0U;
+    uint8_t publish_success_count = 0U;
 
     (void)argument;
     (void)memset(&s_data_process_stats, 0, sizeof(s_data_process_stats));
@@ -548,6 +553,48 @@ void DataProcessTask(void *argument)
             publish_status = DataProcess_PublishFullFrame(&raw->frame,
                                                           &processed,
                                                           process_status);
+            if (publish_status == GLOVE_STATUS_OK)
+            {
+                publish_failure_count = 0U;
+                if (publish_success_count < DATA_PROCESS_HEALTH_RECOVERY_FRAMES)
+                {
+                    publish_success_count++;
+                }
+                SystemHealth_MarkFullFrame((process_status == GLOVE_STATUS_OK) ? 1U : 0U);
+                if (publish_success_count >= DATA_PROCESS_HEALTH_RECOVERY_FRAMES)
+                {
+                    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_POOL_EXHAUSTED,
+                                          SYSTEM_ERROR_NONE,
+                                          SYSTEM_HEALTH_SOURCE_PIPELINE,
+                                          0U,
+                                          0U);
+                    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_QUEUE_PRESSURE,
+                                          SYSTEM_ERROR_NONE,
+                                          SYSTEM_HEALTH_SOURCE_PIPELINE,
+                                          0U,
+                                          0U);
+                }
+            }
+            else
+            {
+                publish_success_count = 0U;
+                if (publish_failure_count < DATA_PROCESS_HEALTH_FAILURE_LIMIT)
+                {
+                    publish_failure_count++;
+                }
+                if (publish_failure_count >= DATA_PROCESS_HEALTH_FAILURE_LIMIT)
+                {
+                    SystemHealth_SetFault((publish_status == GLOVE_STATUS_NO_MEMORY) ?
+                                          SYSTEM_HEALTH_FLAG_POOL_EXHAUSTED :
+                                          SYSTEM_HEALTH_FLAG_QUEUE_PRESSURE,
+                                          (publish_status == GLOVE_STATUS_NO_MEMORY) ?
+                                          SYSTEM_ERROR_POOL_EXHAUSTED :
+                                          SYSTEM_ERROR_QUEUE_FULL,
+                                          SYSTEM_HEALTH_SOURCE_PIPELINE,
+                                          0U,
+                                          1U);
+                }
+            }
 
             release_status = DataManager_ReleaseRawFrame(raw);
             raw = NULL;

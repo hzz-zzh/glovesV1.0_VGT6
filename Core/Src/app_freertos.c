@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "data_manager.h"
+#include "system_health.h"
 #include "watchdogTask.h"
 #include "FreeRTOS.h"
 #include <stdint.h>
@@ -156,6 +157,7 @@ const osThreadAttr_t storageTask_attributes = {
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
+  SystemHealth_Init();
   GloveStatus_t dm_status = DataManager_Init();
   printf("[RTOS] DataManager_Init status=%u\r\n", (unsigned int)dm_status);
 

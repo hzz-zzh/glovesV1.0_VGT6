@@ -1,25 +1,11 @@
-# Glove Modbus485 Register Map
+# Glove Modbus485 协议
 
-## Time Encoding Update
+本文档描述当前固件开放给主站的Modbus RTU寄存器和自定义功能码。寄存器地址均为16位Holding Register地址。
 
-All 4-register time fields now use ROS Time layout instead of a single
-`uint64` microsecond counter.
-
-Register order is little-endian by 16-bit Modbus word:
-
-| offset | field |
-|---:|---|
-| `+0` | `sec` bit15..0 |
-| `+1` | `sec` bit31..16 |
-| `+2` | `nanosec` bit15..0 |
-| `+3` | `nanosec` bit31..16 |
-
-`sec` is the number of seconds since `1970-01-01 00:00:00 UTC`.
-`nanosec` is the nanosecond offset within that second and must be
-`0..999999999`. When the master writes `0x000A..0x000D`, invalid
-`nanosec >= 1000000000` is rejected with Modbus exception `0x03`.
-
-本文档描述当前固件开放给主站的 Modbus RTU 寄存器。寄存器地址均为 16 位 Holding Register 地址。
+- 文档修订：`1.2`
+- Health协议版本：`0x0102`（主版本1，次版本2）
+- 新增：带魔数、序号和ACK的历史错误清除命令
+- 兼容性：标准`0x03/0x06/0x10`和自定义`0x41`帧格式保持不变
 
 ## 1. 通讯基础
 
@@ -41,6 +27,10 @@ Register order is little-endian by 16-bit Modbus word:
 ### U16
 
 单个 Modbus register，寄存器内按 Modbus 标准高字节在前。
+
+### U32 / U64
+
+分别占2个或4个寄存器，低16位寄存器在前；每个寄存器内部仍按Modbus标准高字节在前。
 
 ### ROS Time
 
@@ -80,28 +70,32 @@ Register order is little-endian by 16-bit Modbus word:
 
 ### 3.2 命令状态区
 
-当前命令写入尚未开放，主站可读回状态占位。
+`0x0020..0x0022`可写，`0x0023..0x0025`只读。命令采用应用层ACK，Modbus写应答成功只表示寄存器写入成功，主站仍需读取ACK区判断命令结果。
 
-| 地址 | 数量 | 类型 | 含义 |
+| 地址 | 数量 | 访问 | 含义 |
 |---:|---:|---|---|
-| `0x0020` | 1 | U16 | command，占位，当前读 `0` |
-| `0x0021` | 1 | U16 | command param，占位，当前读 `0` |
-| `0x0022` | 1 | U16 | command seq，占位，当前读 `0` |
-| `0x0023` | 1 | U16 | command ack，当前读 `0=idle` |
-| `0x0024` | 1 | U16 | command ack seq，占位，当前读 `0` |
-| `0x0025` | 1 | U16 | command error，占位，当前读 `0` |
+| `0x0020` | 1 | R/W | command；执行后自动清零 |
+| `0x0021` | 1 | R/W | command param；执行后自动清零 |
+| `0x0022` | 1 | R/W | command seq；保留最近写入值 |
+| `0x0023` | 1 | R | command ack |
+| `0x0024` | 1 | R | command ack seq |
+| `0x0025` | 1 | R | command error detail |
 | `0x0026..0x003E` | 25 | U16 | reserved，当前读 `0` |
+
+ACK定义：`0x0000=idle`、`0x0001=ok`、`0x0002=busy`、`0x8001=unknown command`、`0x8002=invalid param`、`0x8003=state denied`、`0x8004=failed`。
+
+error detail定义：`0x0000=none`、`0x0001=invalid param`、`0x0002=duplicate seq`、`0x0003=state denied`、`0x0004=resource not ready`、`0x0005=start failed`、`0x0006=stop failed`、`0x0007=timeout`。相同`seq`的重发不会重复执行命令，而是保留上一笔ACK和error结果。当前历史清除命令只会产生`none`或`invalid param`。
 
 ### 3.3 系统状态区
 
 | 地址 | 数量 | 类型 | 含义 |
 |---:|---:|---|---|
-| `0x0040` | 1 | U16 | system_state，当前 `1=ready` |
-| `0x0041` | 1 | U16 | work_mode，当前 `0=normal` |
-| `0x0042` | 1 | U16 | log_state，当前 `0=idle` |
-| `0x0043` | 1 | U16 | sd_state，当前 `0=not ready` |
+| `0x0040` | 1 | U16 | system_state，与Health overall state一致 |
+| `0x0041` | 1 | U16 | work_mode，当前`0=normal` |
+| `0x0042` | 1 | U16 | log_state：`0=idle`、`1=recording` |
+| `0x0043` | 1 | U16 | sd_state：`0=not ready`、`1=ready` |
 | `0x0044` | 1 | U16 | sensor_state，IMU 有效位，bit0 对应 IMU0 |
-| `0x0045` | 1 | U16 | comm_state，当前 `1=ok` |
+| `0x0045` | 1 | U16 | comm_state：`1=ok`、`2=degraded` |
 | `0x0046` | 1 | U16 | MCU复位原因位图 |
 | `0x0047` | 1 | U16 | MCU独立看门狗状态位图 |
 | `0x0048` | 2 | float32 | board temperature，当前占位 `25.0` |
@@ -110,7 +104,99 @@ Register order is little-endian by 16-bit Modbus word:
 
 `0x0047`：bit0=IWDG已经启动、bit1=已经执行硬件刷新、bit2=IWDG配置回读警告。正常稳定运行时通常为 `0x0003`；若为 `0x0007`，表示预分频或重装值回读不一致，但任务仍会每100毫秒刷新硬件狗。
 
-### 3.4 电源状态区
+### 3.4 统一健康状态区
+
+范围：`0x004A..0x005F`，共22个寄存器。32位量均为低16位寄存器在前。
+
+| 地址 | 数量 | 类型 | 含义 |
+|---:|---:|---|---|
+| `0x004A` | 1 | U16 | Health协议版本，当前`0x0102` |
+| `0x004B` | 1 | U16 | overall state |
+| `0x004C` | 2 | U32 | active flags，低字在前 |
+| `0x004E` | 1 | U16 | current error |
+| `0x004F` | 1 | U16 | current source |
+| `0x0050` | 1 | U16 | current target |
+| `0x0051` | 1 | U16 | recovery stage |
+| `0x0052` | 1 | U16 | 高8位=attempt limit，低8位=attempt |
+| `0x0053` | 1 | U16 | last error |
+| `0x0054` | 1 | U16 | last source |
+| `0x0055` | 1 | U16 | last target |
+| `0x0056` | 2 | U32 | error sequence，低字在前 |
+| `0x0058` | 2 | U32 | error count，低字在前 |
+| `0x005A` | 2 | U32 | last error uptime，单位ms，低字在前 |
+| `0x005C` | 1 | U16 | live IMU mask，bit0对应IMU0 |
+| `0x005D` | 1 | U16 | sensor ready flags |
+| `0x005E` | 1 | U16 | FullFrame age，单位ms；`0xFFFF`表示不可用 |
+| `0x005F` | 1 | U16 | 最近一次HAL UART错误位 |
+
+overall state：`0=INIT`、`1=OK`、`2=WARNING`、`3=DEGRADED`、`4=RECOVERING`、`5=FAULT`、`6=OFF`、`7=LOCKOUT`。
+
+source：`0=none`、`1=IMU`、`2=CAN1`、`3=CAN2`、`4=touch`、`5=pipeline`、`6=power`、`7=battery`、`8=charger`、`9=watchdog`、`10=RS485`、`11=time sync`、`12=calibration`、`13=storage`。
+
+recovery stage：`0=none`、`1=loss confirm`、`2=node config`、`3=node verify`、`4=bus reinit`、`5=bus config`、`6=bus verify`、`7=safe stop`、`8=power-off hold`、`9=power start`、`10=sensor wait`、`11=frame verify`、`12=failed`。
+
+sensor ready flags：bit0=全部IMU、bit1=触觉、bit2=FullFrame、bit3=关节、bit4=电源、bit5=时间同步、bit6=RS485。
+
+active flags：
+
+| 位 | 含义 | 位 | 含义 |
+|---:|---|---:|---|
+| 0 | IMU部分失效 | 14 | BQ通信异常 |
+| 1 | 全部IMU失效 | 15 | 电量计通信异常 |
+| 2 | 触觉无效 | 16 | 电压读数不一致 |
+| 3 | FullFrame过期 | 17 | 温度限制 |
+| 4 | 关节无效 | 18 | 充电故障 |
+| 5 | CAN1 error-passive | 19 | 看门狗警告 |
+| 6 | CAN1 bus-off | 20 | 时间未同步/失步 |
+| 7 | CAN2 error-passive | 21 | 校准错误 |
+| 8 | CAN2 bus-off | 22 | RS485接收覆盖 |
+| 9 | IMU配置失败 | 23 | RS485 UART错误 |
+| 10 | CAN重初始化失败 | 24 | RS485发送失败 |
+| 11 | 外设电源恢复失败 | 25 | 队列压力 |
+| 12 | 低电量 | 26 | 内存池耗尽 |
+| 13 | 严重低电量 | 27 | SD错误 |
+
+错误码：
+
+| 范围/值 | 含义 |
+|---:|---|
+| `0x1001` | IMU节点数据过期，target为逻辑节点 |
+| `0x1002` | IMU节点配置失败，target为逻辑节点 |
+| `0x2001` | CAN error-passive，target为总线号 |
+| `0x2002` | CAN bus-off，target为总线号 |
+| `0x2003` | CAN重新初始化失败 |
+| `0x2004` | CAN恢复验证失败 |
+| `0x3001` | 触觉同步超时 |
+| `0x3002` | 触觉ADC DMA超时 |
+| `0x3003` | 触觉ADC DMA错误 |
+| `0x4001` | FullFrame过期 |
+| `0x4002` | IMU/触觉时间戳不匹配 |
+| `0x4003` | 数据队列满 |
+| `0x4004` | 数据池耗尽 |
+| `0x4005` | 关节算法输入无效 |
+| `0x5001` | 采集暂停超时 |
+| `0x5002` | 同步启动失败 |
+| `0x5003` | 外设恢复超时 |
+| `0x6001` | 电池低电量 |
+| `0x6002` | 电池严重低电量 |
+| `0x6003` | BQ25622通信失败 |
+| `0x6004` | MAX17043通信失败 |
+| `0x6005` | 两路电压读数不一致 |
+| `0x6006` | 充电温度限制 |
+| `0x6007` | 充电故障 |
+| `0x7001` | 看门狗配置警告 |
+| `0x8001` | RS485接收帧覆盖 |
+| `0x8002` | RS485 UART错误，target为HAL UART错误位 |
+| `0x8003` | RS485发送失败 |
+| `0x8004` | 时间同步丢失 |
+| `0x9001` | 校准被拒绝，target为条目编号 |
+| `0xA001` | SD错误，target为SD错误码 |
+
+`0x005F` UART错误位：bit0=PE、bit1=NE、bit2=FE、bit3=ORE、bit4=DMA、bit5=RTO。
+
+`current_*`和active flags表示当前仍存在的问题，经过验证恢复后自动清除；`last_*`、sequence、count和last uptime为历史信息，直到主站执行历史清除命令或设备复位。
+
+### 3.5 电源状态区
 
 电源状态区由 `SystemManagerTask` 的实时快照提供。float32 继续采用本协议统一的双寄存器字节序。
 
@@ -130,7 +216,7 @@ Register order is little-endian by 16-bit Modbus word:
 | `0x0070` | 1 | U16 | 最近一次BQ故障事件：低8位为Fault Flag 0，高8位保留 |
 | `0x0071` | 1 | U16 | BQ INT下降沿累计次数低16位，溢出后回绕 |
 
-system power state：`0=INIT`、`1=ON_NORMAL`、`2=ON_LOW`、`3=USER_OFF`、`4=LOW_BAT_LOCKOUT`。
+system power state：`0=INIT`、`1=ON_NORMAL`、`2=ON_LOW`、`3=USER_OFF`、`4=LOW_BAT_LOCKOUT`、`5=STOPPING`、`6=RECOVERING`、`7=RECOVERY_FAULT`。
 
 charger state：`0=UNKNOWN`、`1=NO_INPUT`、`2=IDLE`、`3=CC`、`4=CV`、`5=TOPOFF`、`6=FULL`、`7=SUSPENDED`、`8=FAULT`。
 
@@ -163,13 +249,33 @@ charger state：`0=UNKNOWN`、`1=NO_INPUT`、`2=IDLE`、`3=CC`、`4=CV`、`5=TOP
 
 `0x0070` 低字节对应 `Fault_Flag_0`：bit0=TS changed、bit3=thermal shutdown、bit4=OTG fault、bit5=system fault、bit6=battery fault、bit7=VBUS fault。BQ硬件Flag为读清零，固件会先保存最近一次INT原因，再读取当前Status；因此这些寄存器表示最近一次成功读取的中断事件，而不是当前持续故障，当前故障仍以 `0x0069` 为准。
 
-### 3.5 工作状态
+### 3.6 SD状态区
+
+范围：`0x0081..0x00BF`。状态来自`SdLog_GetStatus()`实时快照，不是固定占位值。
 
 | 地址 | 数量 | 类型 | 含义 |
 |---:|---:|---|---|
-| `0x0500` | 1 | U16 | work_state，当前 `0=idle` |
+| `0x0081` | 1 | U16 | 文件系统状态：`0=未挂载`、`1=已挂载` |
+| `0x0082` | 1 | U16 | 记录状态：`0=idle`、`1=recording` |
+| `0x0083` | 1 | U16 | SD错误码，`0=无错误` |
+| `0x0084` | 2 | U32 | 总容量MB，低字在前 |
+| `0x0086` | 2 | U32 | 剩余容量MB，低字在前 |
+| `0x0088` | 2 | U32 | 已用容量MB，低字在前 |
+| `0x008A` | 1 | U16 | 当前文件ID |
+| `0x008C` | 4 | U64 | 当前文件大小，低字在前 |
+| `0x0090` | 2 | U32 | 当前写入次数，低字在前 |
+| `0x0092` | 1 | U16 | 创建文件控制/状态 |
+| `0x009A` | 4 | U64 | 日志长度，低字在前 |
+| `0x00A0` | 16 | text | 当前文件名，每个寄存器高字节字符在前 |
+| `0x00B0` | 16 | text | 最近文件名，每个寄存器高字节字符在前 |
 
-### 3.6 IMU 原始数据区
+### 3.7 工作状态
+
+| 地址 | 数量 | 类型 | 含义 |
+|---:|---:|---|---|
+| `0x0500` | 1 | U16 | work_state：`0=idle`、`1=acquiring`、`2=stopping`、`0x8000=error` |
+
+### 3.8 IMU 原始数据区
 
 范围：`0x1000..0x113F`，共 16 个 IMU，每个 IMU 20 个寄存器，即 10 个 float32。
 
@@ -205,7 +311,7 @@ IMU 状态：
 
 说明：`0x1140`、`0x1340`、`0x2080` 三个数据区时间戳均表示同一帧数据的同步采集时刻 UTC，因此三个值应保持一致。关节区时间戳不是解算完成时刻，而是该帧输入数据的采集时刻。UTC 未同步时读数为 `0.000000000`。
 
-### 3.7 关节解算数据区
+### 3.9 关节解算数据区
 
 范围：`0x1300..0x1335`，共 27 个 float32。
 
@@ -231,7 +337,7 @@ joint_addr = 0x1300 + j * 2, j = 0..26
 | `0x1345` | 1 | U16 | joint_valid_bits low，bit0 对应 joint0 |
 | `0x1346` | 1 | U16 | joint_valid_bits high |
 
-### 3.8 触觉矩阵数据区
+### 3.10 触觉矩阵数据区
 
 范围：`0x2000..0x207F`，容量 128 个 U16；当前有效点数为 68。
 
@@ -260,7 +366,42 @@ touch_addr = 0x2000 + k, k = 0..67
 
 当前开放 `0x10 Write Multiple Registers` 和 `0x06 Write Single Register` 写入以下区域。`0x10` 用于批量写表和推荐的 apply/reset；`0x06` 用于兼容通用 Modbus 工具的单寄存器写。
 
-### 4.1 时间同步
+### 4.1 清除历史错误
+
+命令值：`0x004A`；保护魔数：`0xC1EA`。
+
+推荐使用FC10原子写入：
+
+```text
+Write Multiple Registers
+start = 0x0020
+count = 3
+data  = 0x004A, 0xC1EA, seq
+```
+
+随后读取：
+
+```text
+Read Holding Registers
+start = 0x0023
+count = 3
+```
+
+成功条件：`ACK=0x0001`、`ACK_SEQ=seq`、`ERROR=0x0000`。
+
+也支持FC06，但必须按参数、序号、命令的顺序写，最后一笔写命令才会触发执行：
+
+```text
+Write Single Register 0x0021 = 0xC1EA
+Write Single Register 0x0022 = seq
+Write Single Register 0x0020 = 0x004A
+```
+
+清除范围：`last error/source/target`、error sequence、error count、last error uptime和最近UART错误细节。不会清除active flags、current error/source/target、恢复阶段、IMU在线掩码或Ready flags；当前故障仍存在时继续对外显示。命令不会写入Flash，设备复位同样会清空历史。
+
+主站每次发起新的命令必须更换`seq`；相同`seq`被视为重发，不会重复执行。
+
+### 4.2 时间同步
 
 | 起始地址 | 数量 | 类型 | 含义 |
 |---:|---:|---|---|
@@ -268,7 +409,7 @@ touch_addr = 0x2000 + k, k = 0..67
 
 写入后，可通过 `0x0002..0x0005` 读取当前 UTC 时间，通过 `0x000A..0x000D` 读取最近一次同步值。
 
-### 4.2 IMU 校准四元数表
+### 4.3 IMU 校准四元数表
 
 算法使用形式：
 
@@ -396,18 +537,22 @@ Write Single Register 0x1255 = 0x0002
 [slave][0x41][payload_len_H][payload_len_L][payload][CRC_L][CRC_H]
 ```
 
-当前 `payload_len` 为896字节，载荷内每个寄存器仍按Modbus大端字节序排列：
+当前`payload_len`为904字节，载荷内每个寄存器仍按Modbus大端字节序排列：
 
 | 载荷顺序 | 寄存器数 | 内容 |
 |---|---:|---|
 | 1 | 2 | FullFrame `frame_id`，低16位在前 |
 | 2 | 4 | FullFrame时间戳，ROS Time的sec/nsec各按低16位在前 |
-| 3 | 320 | IMU `0x1000..0x113F` |
-| 4 | 54 | 关节 `0x1300..0x1335` |
-| 5 | 68 | 触觉 `0x2000..0x2043` |
+| 3 | 1 | power state |
+| 4 | 1 | IMU有效位 |
+| 5 | 1 | 关节状态 |
+| 6 | 1 | 触觉状态 |
+| 7 | 320 | IMU `0x1000..0x113F` |
+| 8 | 54 | 关节 `0x1300..0x1335` |
+| 9 | 68 | 触觉 `0x2000..0x2043` |
 
 从站在构造响应前只抓取一次FullFrame快照，因此帧号、时间戳和三段传感数据
-属于同一帧。完整响应为902字节，未超过当前1024字节RS485发送缓冲区。
+属于同一帧。完整响应为910字节，未超过当前1024字节RS485发送缓冲区。
 
 上位机统计传感器更新率时，以约1秒窗口内的 `frame_id` 增量除以上位机单调
 时钟的实际窗口长度。该统计不依赖UTC是否完成同步；连续响应中的 `frame_id`
@@ -420,7 +565,11 @@ Write Single Register 0x1255 = 0x0002
 | 数据 | 地址范围 | 寄存器数 | 建议 |
 |---|---:|---:|---|
 | 基础状态 | `0x0000..0x000D` | 14 | 一次读 |
+| 命令ACK | `0x0023..0x0025` | 3 | 执行命令后读取 |
 | 系统状态 | `0x0040..0x0049` | 10 | 一次读 |
+| 统一健康状态 | `0x004A..0x005F` | 22 | 一次读 |
+| 电源状态 | `0x0060..0x0071` | 18 | 一次读 |
+| SD状态 | `0x0081..0x00BF` | 63 | 一次读 |
 | IMU 数据 | `0x1000..0x113F` | 320 | 分包读，例如 100 + 100 + 100 + 20 |
 | IMU 状态 | `0x1140..0x1144` | 5 | 一次读 |
 | 关节数据 | `0x1300..0x1335` | 54 | 一次读 |

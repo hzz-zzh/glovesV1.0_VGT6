@@ -15,6 +15,8 @@
 #include "main.h"
 #include "max17043.h"
 #include "modbus_frame.h"
+#include "system_health.h"
+#include "system_watchdog.h"
 #include "touchAdcTask.h"
 
 extern TIM_HandleTypeDef htim2;
@@ -215,6 +217,14 @@ static uint8_t SystemManager_TryFinalizePeripheralStop(void)
     s_periph_power_enabled = 0U;
     s_power_status.system_state = (uint8_t)s_power_stop_target_state;
     s_power_stop_pending = 0U;
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_POWER_RECOVERY_FAIL,
+                          SYSTEM_ERROR_ACQ_PAUSE_TIMEOUT,
+                          SYSTEM_HEALTH_SOURCE_POWER,
+                          0U,
+                          0U);
+    SystemHealth_SetPowerRecovery((s_auto_recovery_active != 0U) ?
+                                  SYSTEM_RECOVERY_POWER_OFF_HOLD :
+                                  SYSTEM_RECOVERY_NONE);
     return 1U;
 }
 
@@ -234,12 +244,19 @@ static uint8_t SystemManager_StopPeripheralPower(GlovePowerState_t target_state)
         s_power_stop_target_state = target_state;
         s_power_stop_pending = 1U;
         s_power_status.system_state = GLOVE_POWER_STATE_STOPPING;
+        SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_SAFE_STOP);
         Modbus_InvalidateSensorSnapshots();
         ImuCanTask_SetAcquisitionEnabled(0U);
         TouchAdcTask_SetAcquisitionEnabled(0U);
         if (SystemManager_WaitAcquisitionPaused(SYSTEM_MANAGER_POWER_STOP_TIMEOUT_MS) == 0U)
         {
             /* 未安全暂停时保持供电，由主循环继续等待，禁止强制切断外设电源。 */
+            SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_POWER_RECOVERY_FAIL,
+                                  SYSTEM_ERROR_ACQ_PAUSE_TIMEOUT,
+                                  SYSTEM_HEALTH_SOURCE_POWER,
+                                  0U,
+                                  1U);
+            SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_FAILED);
             return 0U;
         }
         return SystemManager_TryFinalizePeripheralStop();
@@ -252,6 +269,7 @@ static void SystemManager_StartPeripheralPower(void)
 {
     if (s_periph_power_enabled == 0U)
     {
+        SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_POWER_START);
         Modbus_InvalidateSensorSnapshots();
         HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_SET);
         HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_RESET);
@@ -266,6 +284,12 @@ static void SystemManager_StartPeripheralPower(void)
             HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_RESET);
             s_periph_power_enabled = 0U;
             s_power_status.system_state = GLOVE_POWER_STATE_RECOVERY_FAULT;
+            SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_POWER_RECOVERY_FAIL,
+                                  SYSTEM_ERROR_SYNC_START_FAILED,
+                                  SYSTEM_HEALTH_SOURCE_POWER,
+                                  0U,
+                                  1U);
+            SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_FAILED);
             printf("[Power] acquisition sync start failed\r\n");
             return;
         }
@@ -275,6 +299,7 @@ static void SystemManager_StartPeripheralPower(void)
         s_recovery_started_ms = SystemManager_GetTimestampMs();
         s_recovery_producers_ready = 0U;
         s_power_status.system_state = GLOVE_POWER_STATE_RECOVERING;
+        SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_SENSOR_WAIT);
         return;
     }
     s_power_status.system_state =
@@ -305,12 +330,19 @@ static void SystemManager_ServicePeripheralRecovery(void)
             /* 从两个采集源均就绪之后开始等待新的FullFrame，排除旧队列数据。 */
             s_recovery_full_frame_baseline = stats.full_frames_published;
             s_recovery_producers_ready = 1U;
+            SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_FRAME_VERIFY);
         }
         else if (stats.full_frames_published != s_recovery_full_frame_baseline)
         {
             s_power_status.system_state =
                 (s_power_status.battery_level == GLOVE_BATTERY_LEVEL_NORMAL) ?
                 GLOVE_POWER_STATE_ON_NORMAL : GLOVE_POWER_STATE_ON_LOW;
+            SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_POWER_RECOVERY_FAIL,
+                                  SYSTEM_ERROR_POWER_RECOVERY_TIMEOUT,
+                                  SYSTEM_HEALTH_SOURCE_POWER,
+                                  0U,
+                                  0U);
+            SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_NONE);
             printf("[Power] peripheral recovery ready imu=0x%04X full=%lu\r\n",
                    (unsigned int)ImuCanTask_GetFreshMask(),
                    (unsigned long)stats.full_frames_published);
@@ -327,6 +359,12 @@ static void SystemManager_ServicePeripheralRecovery(void)
         (s_power_status.system_state == GLOVE_POWER_STATE_RECOVERING))
     {
         s_power_status.system_state = GLOVE_POWER_STATE_RECOVERY_FAULT;
+        SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_POWER_RECOVERY_FAIL,
+                              SYSTEM_ERROR_POWER_RECOVERY_TIMEOUT,
+                              SYSTEM_HEALTH_SOURCE_POWER,
+                              0U,
+                              1U);
+        SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_FAILED);
         printf("[Power] peripheral recovery timeout imu_ready=%u touch_ready=%u mask=0x%04X\r\n",
                (unsigned int)imu_ready,
                (unsigned int)touch_ready,
@@ -421,6 +459,7 @@ static void SystemManager_CancelAutomaticRecovery(void)
     taskEXIT_CRITICAL();
     s_auto_recovery_waiting_power_on = 0U;
     s_auto_recovery_power_off_ms = 0U;
+    SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_NONE);
 }
 
 static void SystemManager_ServiceAutomaticRecovery(void)
@@ -436,6 +475,7 @@ static void SystemManager_ServiceAutomaticRecovery(void)
             s_auto_recovery_active = 1U;
             s_auto_recovery_waiting_power_on = 0U;
             s_auto_recovery_power_off_ms = 0U;
+            SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_SAFE_STOP);
             printf("[Power] IMU recovery requests peripheral power cycle\r\n");
             (void)SystemManager_StopPeripheralPower(GLOVE_POWER_STATE_USER_OFF);
         }
@@ -469,6 +509,7 @@ static void SystemManager_ServiceAutomaticRecovery(void)
     {
         s_auto_recovery_waiting_power_on = 1U;
         s_auto_recovery_power_off_ms = now_ms;
+        SystemHealth_SetPowerRecovery(SYSTEM_RECOVERY_POWER_OFF_HOLD);
         return;
     }
     if ((uint32_t)(now_ms - s_auto_recovery_power_off_ms) <
@@ -1031,6 +1072,42 @@ static void SystemManager_UpdatePublicStatus(void)
     if (s_gauge_failures != 0U) s_power_status.fault_code |= 0x0200U;
     if (mismatch != 0U) s_power_status.fault_code |= 0x0400U;
     taskEXIT_CRITICAL();
+
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_LOW_BATTERY,
+                          SYSTEM_ERROR_BATTERY_LOW,
+                          SYSTEM_HEALTH_SOURCE_BATTERY,
+                          0U,
+                          ((flags & GLOVE_POWER_FLAG_LOW) != 0U) ? 1U : 0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CRITICAL_BATTERY,
+                          SYSTEM_ERROR_BATTERY_CRITICAL,
+                          SYSTEM_HEALTH_SOURCE_BATTERY,
+                          0U,
+                          ((flags & GLOVE_POWER_FLAG_CRITICAL) != 0U) ? 1U : 0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_BQ_COMM,
+                          SYSTEM_ERROR_BQ_COMM,
+                          SYSTEM_HEALTH_SOURCE_CHARGER,
+                          s_bq_diagnostic_stage,
+                          ((flags & GLOVE_POWER_FLAG_BQ_COMM_FAULT) != 0U) ? 1U : 0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_GAUGE_COMM,
+                          SYSTEM_ERROR_GAUGE_COMM,
+                          SYSTEM_HEALTH_SOURCE_BATTERY,
+                          0U,
+                          ((flags & GLOVE_POWER_FLAG_GAUGE_COMM_FAULT) != 0U) ? 1U : 0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_VOLTAGE_MISMATCH,
+                          SYSTEM_ERROR_VOLTAGE_MISMATCH,
+                          SYSTEM_HEALTH_SOURCE_BATTERY,
+                          0U,
+                          ((flags & GLOVE_POWER_FLAG_VOLTAGE_MISMATCH) != 0U) ? 1U : 0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_TEMP_LIMIT,
+                          SYSTEM_ERROR_TEMPERATURE_LIMIT,
+                          SYSTEM_HEALTH_SOURCE_CHARGER,
+                          0U,
+                          ((flags & GLOVE_POWER_FLAG_TEMP_LIMITED) != 0U) ? 1U : 0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CHARGE_FAULT,
+                          SYSTEM_ERROR_CHARGE_FAULT,
+                          SYSTEM_HEALTH_SOURCE_CHARGER,
+                          0U,
+                          ((flags & GLOVE_POWER_FLAG_CHARGE_FAULT) != 0U) ? 1U : 0U);
 }
 
 void SystemManagerTask_GetPowerStatus(GlovePowerStatus_t *status)
@@ -1081,6 +1158,7 @@ void SystemManagerTask(void *argument)
     uint8_t charge_status_edge_pending;
     Bq25622InterruptFlags_t interrupt_events;
     GloveStatus_t status;
+    SystemWatchdogStatus_t watchdog_status;
 
     (void)argument;
     (void)memset(&s_battery_status, 0, sizeof(s_battery_status));
@@ -1102,6 +1180,15 @@ void SystemManagerTask(void *argument)
         (void)SystemManager_TryFinalizePeripheralStop();
         SystemManager_ServiceAutomaticRecovery();
         SystemManager_ServicePeripheralRecovery();
+        SystemHealth_SetPowerState(s_power_status.system_state);
+        SystemHealth_Service();
+        SystemWatchdog_GetStatus(&watchdog_status);
+        SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_WATCHDOG_WARNING,
+                              SYSTEM_ERROR_WATCHDOG_CONFIG,
+                              SYSTEM_HEALTH_SOURCE_WATCHDOG,
+                              0U,
+                              ((watchdog_status.status_flags &
+                                SYSTEM_WATCHDOG_STATUS_CONFIG_WARNING) != 0U) ? 1U : 0U);
 
         if ((s_periph_power_enabled != 0U) &&
             (s_power_key_last_raw_pressed != 0U) &&
@@ -1197,6 +1284,14 @@ void SystemManagerTask(void *argument)
         startup_elapsed += SYSTEM_MANAGER_LOOP_PERIOD_MS;
         if (startup_elapsed >= SYSTEM_MANAGER_BATTERY_STARTUP_DELAY_MS)
         {
+            if ((s_periph_power_enabled != 0U) &&
+                (s_power_status.system_state == GLOVE_POWER_STATE_INIT))
+            {
+                /* 电量芯片异常时也要结束INIT，并通过健康告警单独说明采样失败。 */
+                s_power_status.system_state =
+                    (s_power_status.battery_level == GLOVE_BATTERY_LEVEL_LOW) ?
+                    GLOVE_POWER_STATE_ON_LOW : GLOVE_POWER_STATE_ON_NORMAL;
+            }
             gauge_elapsed += SYSTEM_MANAGER_LOOP_PERIOD_MS;
             if (gauge_elapsed >= SYSTEM_MANAGER_GAUGE_READ_PERIOD_MS)
             {

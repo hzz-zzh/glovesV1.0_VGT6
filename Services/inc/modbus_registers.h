@@ -59,6 +59,38 @@ extern "C" {
 #define REG_SYSTEM_STATUS_END          0x0049U
 #define REG_SYSTEM_STATUS_COUNT        10U
 
+/* 统一健康状态寄存器：0x004A ~ 0x005F，32位量均为低字在前。 */
+#define REG_HEALTH_VERSION             0x004AU
+#define REG_HEALTH_STATE               0x004BU
+#define REG_HEALTH_FLAGS_LOW           0x004CU
+#define REG_HEALTH_FLAGS_HIGH          0x004DU
+#define REG_HEALTH_CURRENT_ERROR       0x004EU
+#define REG_HEALTH_CURRENT_SOURCE      0x004FU
+#define REG_HEALTH_CURRENT_TARGET      0x0050U
+#define REG_HEALTH_RECOVERY_STAGE      0x0051U
+#define REG_HEALTH_RECOVERY_ATTEMPT    0x0052U
+#define REG_HEALTH_LAST_ERROR          0x0053U
+#define REG_HEALTH_LAST_SOURCE         0x0054U
+#define REG_HEALTH_LAST_TARGET         0x0055U
+#define REG_HEALTH_ERROR_SEQ_LOW       0x0056U
+#define REG_HEALTH_ERROR_SEQ_HIGH      0x0057U
+#define REG_HEALTH_ERROR_COUNT_LOW     0x0058U
+#define REG_HEALTH_ERROR_COUNT_HIGH    0x0059U
+#define REG_HEALTH_LAST_UPTIME_LOW     0x005AU
+#define REG_HEALTH_LAST_UPTIME_HIGH    0x005BU
+#define REG_HEALTH_LIVE_IMU_MASK       0x005CU
+#define REG_HEALTH_READY_FLAGS         0x005DU
+#define REG_HEALTH_SNAPSHOT_AGE_MS     0x005EU
+#define REG_HEALTH_RS485_UART_DETAIL   0x005FU
+
+#define REG_HEALTH_STATUS_START        REG_HEALTH_VERSION
+#define REG_HEALTH_STATUS_END          REG_HEALTH_RS485_UART_DETAIL
+#define REG_HEALTH_STATUS_COUNT        22U
+
+#if REG_HEALTH_STATUS_END >= 0x0060U
+#error "Health status registers overlap power status registers"
+#endif
+
 /* System status values. */
 #define SYSTEM_STATE_READY             0x0001U
 #define WORK_MODE_NORMAL               0x0000U
@@ -67,6 +99,7 @@ extern "C" {
 #define SD_STATE_READY                 0x0001U
 #define SENSOR_STATE_ALL_OK            0xFFFFU
 #define COMM_STATE_OK                  0x0001U
+#define COMM_STATE_DEGRADED            0x0002U
 
 /* Power status registers: 0x0060 ~ 0x0071. */
 #define REG_BAT_VOLTAGE                0x0060U
@@ -232,10 +265,14 @@ extern "C" {
 
 /* Command values written to REG_CMD. */
 #define CMD_NONE                       0x0000U
+#define CMD_HEALTH_CLEAR_HISTORY       0x004AU
 #define CMD_LOG_START                  0x0094U
 #define CMD_LOG_STOP                   0x0096U
 #define CMD_ACQ_START                  0x0501U
 #define CMD_ACQ_STOP                   0x0502U
+
+/* 防止普通寄存器误写触发历史错误清除。 */
+#define CMD_HEALTH_CLEAR_MAGIC         0xC1EAU
 
 /* Command ACK values returned by REG_CMD_ACK. */
 #define CMD_ACK_IDLE                   0x0000U

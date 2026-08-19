@@ -544,6 +544,11 @@
               <FilePath>..\Services\src\system_watchdog.c</FilePath>
             </File>
             <File>
+              <FileName>system_health.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Services\src\system_health.c</FilePath>
+            </File>
+            <File>
               <FileName>sd_log.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Services\src\sd_log.c</FilePath>

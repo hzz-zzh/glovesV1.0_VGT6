@@ -7,6 +7,7 @@
 #include "cmsis_os2.h"
 #include "data_manager.h"
 #include "main.h"
+#include "system_health.h"
 
 #define TOUCH_ADC_DEBUG_ENABLE         (0U)
 #define TOUCH_ADC_DEBUG_PRINT_PERIOD   (1U)
@@ -42,6 +43,8 @@
 #define TOUCH_ADC_FINGER_BASE_COUNT     (TOUCH_ADC_FINGER_COUNT * TOUCH_ADC_POINTS_PER_FINGER)
 #define TOUCH_ADC_INVALID_INDEX         (0xFFFFU)
 #define TOUCH_ADC_MUX_SETTLE_NOP_COUNT  (64U)
+#define TOUCH_ADC_HEALTH_FAILURE_LIMIT   (5U)
+#define TOUCH_ADC_HEALTH_RECOVERY_FRAMES (3U)
 
 #if GLOVE_TOUCH_COUNT != (TOUCH_ADC_FINGER_BASE_COUNT + \
     ((TOUCH_ADC_PALM_LAST_COLUMN - TOUCH_ADC_PALM_FIRST_COLUMN + 1U) * TOUCH_ADC_PALM_ROWS))
@@ -672,6 +675,7 @@ void TouchAdcTask(void *argument)
   uint32_t error_count = 0U;
   uint32_t alloc_fail_count = 0U;
   uint32_t publish_fail_count = 0U;
+  uint8_t health_success_count = 0U;
   AcqSyncSnapshot_t sync;
   GloveStatus_t status;
   GloveStatus_t publish_status;
@@ -693,6 +697,13 @@ void TouchAdcTask(void *argument)
     {
       TouchAdcTask_DisableColumns();
       s_touch_acquisition_paused = 1U;
+      health_success_count = 0U;
+      SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_TOUCH, 0U);
+      SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_TOUCH_INVALID,
+                            SYSTEM_ERROR_TOUCH_SYNC_TIMEOUT,
+                            SYSTEM_HEALTH_SOURCE_TOUCH,
+                            0U,
+                            0U);
       osDelay(10U);
       continue;
     }
@@ -708,7 +719,17 @@ void TouchAdcTask(void *argument)
       if (s_touch_acquisition_enabled != 0U)
       {
         error_count++;
+        health_success_count = 0U;
         TouchAdcTask_PrintError(seq, GLOVE_STATUS_TIMEOUT, error_count);
+        if (error_count >= TOUCH_ADC_HEALTH_FAILURE_LIMIT)
+        {
+          SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_TOUCH_INVALID,
+                                SYSTEM_ERROR_TOUCH_SYNC_TIMEOUT,
+                                SYSTEM_HEALTH_SOURCE_TOUCH,
+                                0U,
+                                1U);
+          SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_TOUCH, 0U);
+        }
       }
       continue;
     }
@@ -733,11 +754,34 @@ void TouchAdcTask(void *argument)
         if (publish_status != GLOVE_STATUS_OK)
         {
           publish_fail_count++;
+          health_success_count = 0U;
           TouchAdcTask_PrintPublishError(seq, publish_status, publish_fail_count);
+          if (publish_fail_count >= TOUCH_ADC_HEALTH_FAILURE_LIMIT)
+          {
+            SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_TOUCH_INVALID,
+                                  SYSTEM_ERROR_QUEUE_FULL,
+                                  SYSTEM_HEALTH_SOURCE_TOUCH,
+                                  0U,
+                                  1U);
+            SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_TOUCH, 0U);
+          }
         }
         else
         {
           publish_fail_count = 0U;
+          if (health_success_count < TOUCH_ADC_HEALTH_RECOVERY_FRAMES)
+          {
+            health_success_count++;
+          }
+          if (health_success_count >= TOUCH_ADC_HEALTH_RECOVERY_FRAMES)
+          {
+            SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_TOUCH_INVALID,
+                                  SYSTEM_ERROR_NONE,
+                                  SYSTEM_HEALTH_SOURCE_TOUCH,
+                                  0U,
+                                  0U);
+            SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_TOUCH, 1U);
+          }
           /* 成功发布重新上电后的第一帧，触摸采集才算真正恢复。 */
           s_touch_recovery_ready = 1U;
         }
@@ -747,7 +791,19 @@ void TouchAdcTask(void *argument)
         if (s_touch_acquisition_enabled != 0U)
         {
           error_count++;
+          health_success_count = 0U;
           TouchAdcTask_PrintError(seq, status, error_count);
+          if (error_count >= TOUCH_ADC_HEALTH_FAILURE_LIMIT)
+          {
+            SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_TOUCH_INVALID,
+                                  (status == GLOVE_STATUS_TIMEOUT) ?
+                                  SYSTEM_ERROR_TOUCH_DMA_TIMEOUT :
+                                  SYSTEM_ERROR_TOUCH_DMA_ERROR,
+                                  SYSTEM_HEALTH_SOURCE_TOUCH,
+                                  0U,
+                                  1U);
+            SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_TOUCH, 0U);
+          }
         }
         (void)DataManager_ReleaseTouchSensor(touch);
       }
@@ -755,7 +811,17 @@ void TouchAdcTask(void *argument)
     else
     {
       alloc_fail_count++;
+      health_success_count = 0U;
       TouchAdcTask_PrintAllocError(alloc_fail_count);
+      if (alloc_fail_count >= TOUCH_ADC_HEALTH_FAILURE_LIMIT)
+      {
+        SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_TOUCH_INVALID,
+                              SYSTEM_ERROR_POOL_EXHAUSTED,
+                              SYSTEM_HEALTH_SOURCE_TOUCH,
+                              0U,
+                              1U);
+        SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_TOUCH, 0U);
+      }
     }
   }
 }

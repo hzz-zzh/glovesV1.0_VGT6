@@ -10,6 +10,7 @@
 #include "task.h"
 #include "acq_sync.h"
 #include "data_manager.h"
+#include "system_health.h"
 
 #define FRAME_ASSEMBLER_GET_TIMEOUT_MS          (10U)
 #define FRAME_ASSEMBLER_IDLE_DELAY_MS           (1U)
@@ -21,6 +22,7 @@
 #define FRAME_ASSEMBLER_DEBUG_PRINT_FULL        (0U)
 #define FRAME_ASSEMBLER_DEBUG_IMU_PRINT_COUNT   (2U)
 #define FRAME_ASSEMBLER_DEBUG_TOUCH_PRINT_COUNT (16U)
+#define FRAME_ASSEMBLER_HEALTH_FAILURE_LIMIT    (3U)
 
 static FrameAssemblerStats_t s_frame_assembler_stats;
 static uint32_t s_next_frame_id;
@@ -360,6 +362,7 @@ void FrameAssemblerTask(void *argument)
     uint32_t pending_imu_tick = 0U;
     uint32_t pending_touch_tick = 0U;
     GloveStatus_t status;
+    uint8_t assemble_failure_count = 0U;
 
     (void)argument;
     (void)memset(&s_frame_assembler_stats, 0, sizeof(s_frame_assembler_stats));
@@ -404,6 +407,29 @@ void FrameAssemblerTask(void *argument)
         {
             status = FrameAssembler_TryAssemble(&pending_imu, &pending_touch);
             FrameAssembler_SetStatus(status);
+            if (status == GLOVE_STATUS_OK)
+            {
+                assemble_failure_count = 0U;
+            }
+            else
+            {
+                if (assemble_failure_count < FRAME_ASSEMBLER_HEALTH_FAILURE_LIMIT)
+                {
+                    assemble_failure_count++;
+                }
+                if (assemble_failure_count == FRAME_ASSEMBLER_HEALTH_FAILURE_LIMIT)
+                {
+                    /* 当前故障由FullFrame超时表示，这里保留更具体的最近根因。 */
+                    SystemHealth_RecordEvent((status == GLOVE_STATUS_TIMEOUT) ?
+                                             SYSTEM_ERROR_FRAME_TIME_MISMATCH :
+                                             ((status == GLOVE_STATUS_NO_MEMORY) ?
+                                              SYSTEM_ERROR_POOL_EXHAUSTED :
+                                              SYSTEM_ERROR_QUEUE_FULL),
+                                             SYSTEM_HEALTH_SOURCE_PIPELINE,
+                                             0U);
+                    assemble_failure_count++;
+                }
+            }
         }
         else
         {

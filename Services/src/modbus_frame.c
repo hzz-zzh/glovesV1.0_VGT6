@@ -9,9 +9,12 @@
 
 #include "dataProcessTask.h"
 #include "imuCanTask.h"
+#include "RS485_uasrt.h"
 #include "modbus_registers.h"
 #include "modbus_time_sync.h"
+#include "sd_log.h"
 #include "systemManagerTask.h"
+#include "system_health.h"
 #include "system_watchdog.h"
 
 #if MODBUS_JOINT_COUNT != GLOVE_JOINT_DOF_COUNT
@@ -61,6 +64,8 @@ typedef struct
   ModbusTouchSnapshot_t touch;
   GlovePowerStatus_t power;
   SystemWatchdogStatus_t watchdog;
+  SystemHealthSnapshot_t health;
+  SdLogStatusSnapshot_t sd;
   GloveTimestampUs_t utc_timestamp_us;
   GloveTimestampUs_t local_uptime_us;
   GloveTimestampUs_t last_sync_utc_us;
@@ -85,6 +90,12 @@ static uint16_t modbus_calib_seq;
 static uint16_t modbus_calib_status = IMU_CALIB_STATUS_IDLE;
 static uint16_t modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
 static uint16_t modbus_calib_last_applied_seq;
+static uint16_t modbus_cmd_command = CMD_NONE;
+static uint16_t modbus_cmd_param;
+static uint16_t modbus_cmd_seq;
+static uint16_t modbus_cmd_ack = CMD_ACK_IDLE;
+static uint16_t modbus_cmd_ack_seq;
+static uint16_t modbus_cmd_error = CMD_ERROR_NONE;
 
 static uint8_t Modbus_IsSensorOutputReady(uint8_t power_state)
 {
@@ -103,7 +114,7 @@ static uint32_t Modbus_MsToTicks(uint32_t timeout_ms)
   return (ticks > 0xFFFFFFFEULL) ? 0xFFFFFFFEUL : (uint32_t)ticks;
 }
 
-static void Modbus_CaptureReadSnapshot(void)
+static void Modbus_CaptureReadSnapshot(uint8_t capture_diagnostics)
 {
   uint32_t now_tick;
   uint32_t snapshot_timeout_ticks;
@@ -111,6 +122,11 @@ static void Modbus_CaptureReadSnapshot(void)
   /* 这些接口各自负责并发保护，避免在临界区内嵌套调用。 */
   SystemManagerTask_GetPowerStatus(&modbus_read_snapshot.power);
   SystemWatchdog_GetStatus(&modbus_read_snapshot.watchdog);
+  if (capture_diagnostics != 0U)
+  {
+    SystemHealth_GetSnapshot(&modbus_read_snapshot.health);
+    SdLog_GetStatus(&modbus_read_snapshot.sd);
+  }
   modbus_read_snapshot.utc_timestamp_us = ModbusTimeSync_GetUtcTimestampUs();
   modbus_read_snapshot.local_uptime_us = ModbusTimeSync_GetLocalUptimeUs();
   modbus_read_snapshot.last_sync_utc_us = ModbusTimeSync_GetLastSyncUtcUs();
@@ -198,6 +214,11 @@ static uint8_t Modbus_IsReadableRegister(uint16_t reg_addr)
   }
 
   if ((reg_addr >= REG_SYSTEM_STATUS_START) && (reg_addr <= REG_SYSTEM_STATUS_END))
+  {
+    return 1U;
+  }
+
+  if ((reg_addr >= REG_HEALTH_STATUS_START) && (reg_addr <= REG_HEALTH_STATUS_END))
   {
     return 1U;
   }
@@ -358,6 +379,73 @@ static uint8_t Modbus_IsWritableCalibrationReg(uint16_t reg_addr)
   }
 
   return 0U;
+}
+
+static uint8_t Modbus_IsWritableCommandReg(uint16_t reg_addr)
+{
+  return ((reg_addr >= REG_CMD) && (reg_addr <= REG_CMD_SEQ)) ? 1U : 0U;
+}
+
+static uint8_t Modbus_WriteCommandReg(uint16_t reg_addr, uint16_t value)
+{
+  switch (reg_addr)
+  {
+    case REG_CMD:
+      modbus_cmd_command = value;
+      return 1U;
+    case REG_CMD_PARAM:
+      modbus_cmd_param = value;
+      break;
+    case REG_CMD_SEQ:
+      modbus_cmd_seq = value;
+      break;
+    default:
+      break;
+  }
+  return 0U;
+}
+
+static void Modbus_ProcessCommand(void)
+{
+  if (modbus_cmd_command == CMD_NONE)
+  {
+    return;
+  }
+
+  /* 相同序号视为主站重发，保持上一次ACK且不重复执行有副作用的命令。 */
+  if ((modbus_cmd_ack != CMD_ACK_IDLE) &&
+      (modbus_cmd_seq == modbus_cmd_ack_seq))
+  {
+    modbus_cmd_command = CMD_NONE;
+    modbus_cmd_param = 0U;
+    return;
+  }
+
+  modbus_cmd_ack_seq = modbus_cmd_seq;
+  modbus_cmd_error = CMD_ERROR_NONE;
+
+  if (modbus_cmd_command == CMD_HEALTH_CLEAR_HISTORY)
+  {
+    if (modbus_cmd_param == CMD_HEALTH_CLEAR_MAGIC)
+    {
+      RS485_ClearErrorHistory();
+      SystemHealth_ClearHistory();
+      modbus_cmd_ack = CMD_ACK_OK;
+    }
+    else
+    {
+      modbus_cmd_ack = CMD_ACK_INVALID_PARAM;
+      modbus_cmd_error = CMD_ERROR_INVALID_PARAM;
+    }
+  }
+  else
+  {
+    modbus_cmd_ack = CMD_ACK_UNKNOWN_CMD;
+  }
+
+  /* 命令和参数为一次性门控值，执行完成后自动清零；序号保留供主站核对。 */
+  modbus_cmd_command = CMD_NONE;
+  modbus_cmd_param = 0U;
 }
 
 static void Modbus_CalibrationEnsureInitialized(void)
@@ -628,6 +716,11 @@ static void Modbus_ProcessCalibrationCommand(void)
   {
     modbus_calib_status = IMU_CALIB_STATUS_BAD_MAGIC;
     modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CALIBRATION_ERROR,
+                          SYSTEM_ERROR_CALIBRATION,
+                          SYSTEM_HEALTH_SOURCE_CALIBRATION,
+                          0U,
+                          1U);
     Modbus_ClearCalibrationCommandLatch();
     return;
   }
@@ -640,6 +733,12 @@ static void Modbus_ProcessCalibrationCommand(void)
     {
       modbus_calib_status = IMU_CALIB_STATUS_BAD_QUAT;
       modbus_calib_error_index = error_index;
+      SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CALIBRATION_ERROR,
+                            SYSTEM_ERROR_CALIBRATION,
+                            SYSTEM_HEALTH_SOURCE_CALIBRATION,
+                            (error_index == IMU_CALIB_ERROR_NONE) ? 0U :
+                            (uint16_t)(error_index + 1U),
+                            1U);
       Modbus_ClearCalibrationCommandLatch();
       return;
     }
@@ -650,6 +749,11 @@ static void Modbus_ProcessCalibrationCommand(void)
     {
       modbus_calib_status = IMU_CALIB_STATUS_BAD_QUAT;
       modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
+      SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CALIBRATION_ERROR,
+                            SYSTEM_ERROR_CALIBRATION,
+                            SYSTEM_HEALTH_SOURCE_CALIBRATION,
+                            0U,
+                            1U);
       Modbus_ClearCalibrationCommandLatch();
       return;
     }
@@ -663,6 +767,11 @@ static void Modbus_ProcessCalibrationCommand(void)
     modbus_calib_status = IMU_CALIB_STATUS_APPLIED;
     modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
     modbus_calib_last_applied_seq = modbus_calib_seq;
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CALIBRATION_ERROR,
+                          SYSTEM_ERROR_NONE,
+                          SYSTEM_HEALTH_SOURCE_CALIBRATION,
+                          0U,
+                          0U);
     Modbus_ClearCalibrationCommandLatch();
     return;
   }
@@ -675,12 +784,22 @@ static void Modbus_ProcessCalibrationCommand(void)
     modbus_calib_status = IMU_CALIB_STATUS_RESET_DONE;
     modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
     modbus_calib_last_applied_seq = modbus_calib_seq;
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CALIBRATION_ERROR,
+                          SYSTEM_ERROR_NONE,
+                          SYSTEM_HEALTH_SOURCE_CALIBRATION,
+                          0U,
+                          0U);
     Modbus_ClearCalibrationCommandLatch();
     return;
   }
 
   modbus_calib_status = IMU_CALIB_STATUS_BAD_CMD;
   modbus_calib_error_index = IMU_CALIB_ERROR_NONE;
+  SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CALIBRATION_ERROR,
+                        SYSTEM_ERROR_CALIBRATION,
+                        SYSTEM_HEALTH_SOURCE_CALIBRATION,
+                        0U,
+                        1U);
   Modbus_ClearCalibrationCommandLatch();
 }
 
@@ -935,6 +1054,57 @@ static GloveTimestampUs_t Modbus_GetTouchTimestampUs(void)
   return timestamp_us;
 }
 
+static uint16_t Modbus_ReadHealthRegister(uint16_t reg_addr)
+{
+  const SystemHealthSnapshot_t *health = &modbus_read_snapshot.health;
+
+  switch (reg_addr)
+  {
+    case REG_HEALTH_VERSION: return health->version;
+    case REG_HEALTH_STATE: return health->state;
+    case REG_HEALTH_FLAGS_LOW: return (uint16_t)(health->current_flags & 0xFFFFUL);
+    case REG_HEALTH_FLAGS_HIGH: return (uint16_t)(health->current_flags >> 16U);
+    case REG_HEALTH_CURRENT_ERROR: return health->current_error;
+    case REG_HEALTH_CURRENT_SOURCE: return health->current_source;
+    case REG_HEALTH_CURRENT_TARGET: return health->current_target;
+    case REG_HEALTH_RECOVERY_STAGE: return health->recovery_stage;
+    case REG_HEALTH_RECOVERY_ATTEMPT: return health->recovery_attempt;
+    case REG_HEALTH_LAST_ERROR: return health->last_error;
+    case REG_HEALTH_LAST_SOURCE: return health->last_source;
+    case REG_HEALTH_LAST_TARGET: return health->last_target;
+    case REG_HEALTH_ERROR_SEQ_LOW: return (uint16_t)(health->error_seq & 0xFFFFUL);
+    case REG_HEALTH_ERROR_SEQ_HIGH: return (uint16_t)(health->error_seq >> 16U);
+    case REG_HEALTH_ERROR_COUNT_LOW: return (uint16_t)(health->error_count & 0xFFFFUL);
+    case REG_HEALTH_ERROR_COUNT_HIGH: return (uint16_t)(health->error_count >> 16U);
+    case REG_HEALTH_LAST_UPTIME_LOW: return (uint16_t)(health->last_error_uptime_ms & 0xFFFFUL);
+    case REG_HEALTH_LAST_UPTIME_HIGH: return (uint16_t)(health->last_error_uptime_ms >> 16U);
+    case REG_HEALTH_LIVE_IMU_MASK: return health->live_imu_mask;
+    case REG_HEALTH_READY_FLAGS: return health->sensor_ready_flags;
+    case REG_HEALTH_SNAPSHOT_AGE_MS: return health->snapshot_age_ms;
+    case REG_HEALTH_RS485_UART_DETAIL: return health->rs485_uart_detail;
+    default: return 0U;
+  }
+}
+
+static uint16_t Modbus_ReadU32Reg(uint32_t value, uint16_t word_offset)
+{
+  return (word_offset == 0U) ? (uint16_t)(value & 0xFFFFUL) :
+                              (uint16_t)(value >> 16U);
+}
+
+static uint16_t Modbus_ReadU64Reg(uint64_t value, uint16_t word_offset)
+{
+  return (uint16_t)((value >> ((uint32_t)word_offset * 16U)) & 0xFFFFULL);
+}
+
+static uint16_t Modbus_ReadTextReg(const char *text, uint16_t word_offset)
+{
+  uint32_t byte_offset = (uint32_t)word_offset * 2U;
+
+  return (uint16_t)(((uint16_t)(uint8_t)text[byte_offset] << 8U) |
+                    (uint16_t)(uint8_t)text[byte_offset + 1U]);
+}
+
 static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 {
   if (reg_addr == REG_SLAVE_ADDR)
@@ -967,33 +1137,34 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 
   switch (reg_addr)
   {
-    case REG_CMD:
-    case REG_CMD_PARAM:
-    case REG_CMD_SEQ:
-    case REG_CMD_ACK_SEQ:
-    case REG_CMD_ERROR:
-      return 0U;
-
-    case REG_CMD_ACK:
-      return CMD_ACK_IDLE;
+    case REG_CMD: return modbus_cmd_command;
+    case REG_CMD_PARAM: return modbus_cmd_param;
+    case REG_CMD_SEQ: return modbus_cmd_seq;
+    case REG_CMD_ACK: return modbus_cmd_ack;
+    case REG_CMD_ACK_SEQ: return modbus_cmd_ack_seq;
+    case REG_CMD_ERROR: return modbus_cmd_error;
 
     case REG_SYSTEM_STATE:
-      return SYSTEM_STATE_READY;
+      return modbus_read_snapshot.health.state;
 
     case REG_WORK_MODE:
       return WORK_MODE_NORMAL;
 
     case REG_LOG_STATE:
-      return LOG_STATE_IDLE;
+      return modbus_read_snapshot.sd.log_status;
 
     case REG_SD_STATE:
-      return SD_STATE_NOT_READY;
+      return modbus_read_snapshot.sd.fs_status;
 
     case REG_SENSOR_STATE:
       return Modbus_ReadImuStatusBits();
 
     case REG_COMM_STATE:
-      return COMM_STATE_OK;
+      return ((modbus_read_snapshot.health.current_flags &
+               (SYSTEM_HEALTH_FLAG_RS485_RX_OVERWRITE |
+                SYSTEM_HEALTH_FLAG_RS485_UART_ERROR |
+                SYSTEM_HEALTH_FLAG_RS485_TX_FAILED)) != 0UL) ?
+             COMM_STATE_DEGRADED : COMM_STATE_OK;
 
     case REG_RESET_CAUSE:
       return modbus_read_snapshot.watchdog.reset_cause;
@@ -1002,19 +1173,34 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
       return modbus_read_snapshot.watchdog.status_flags;
 
     case REG_WORK_STATE:
+      if (modbus_read_snapshot.power.system_state == GLOVE_POWER_STATE_STOPPING)
+      {
+        return WORK_STATE_STOPPING;
+      }
+      if ((modbus_read_snapshot.health.state == SYSTEM_HEALTH_FAULT) ||
+          (modbus_read_snapshot.health.state == SYSTEM_HEALTH_LOCKOUT))
+      {
+        return WORK_STATE_ERROR;
+      }
+      if ((Modbus_IsSensorOutputReady(modbus_read_snapshot.power.system_state) != 0U) &&
+          ((modbus_read_snapshot.health.sensor_ready_flags &
+            SYSTEM_SENSOR_READY_FULL_FRAME) != 0U))
+      {
+        return WORK_STATE_ACQUIRING;
+      }
       return WORK_STATE_IDLE;
 
     case REG_SD_FS_STATUS:
-      return SD_FS_STATUS_NOT_MOUNTED;
+      return modbus_read_snapshot.sd.fs_status;
 
     case REG_SD_LOG_STATUS:
-      return SD_LOG_STATUS_IDLE;
+      return modbus_read_snapshot.sd.log_status;
 
     case REG_SD_ERROR_CODE:
-      return SD_ERROR_NONE;
+      return modbus_read_snapshot.sd.error_code;
 
     case REG_SD_CURRENT_FILE_ID:
-      return 0U;
+      return modbus_read_snapshot.sd.current_file_id;
 
     case REG_IMU_STATUS_BITS:
       return Modbus_ReadImuStatusBits();
@@ -1042,6 +1228,11 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 
     default:
       break;
+  }
+
+  if ((reg_addr >= REG_HEALTH_STATUS_START) && (reg_addr <= REG_HEALTH_STATUS_END))
+  {
+    return Modbus_ReadHealthRegister(reg_addr);
   }
 
   if ((reg_addr >= REG_SYSTEM_RESERVED_START) && (reg_addr <= REG_SYSTEM_RESERVED_END))
@@ -1102,6 +1293,51 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
                                (uint16_t)(reg_addr - REG_INPUT_CURRENT));
   }
 
+  if ((reg_addr >= REG_SD_TOTAL_SIZE_MB) && (reg_addr < (REG_SD_TOTAL_SIZE_MB + 2U)))
+  {
+    return Modbus_ReadU32Reg(modbus_read_snapshot.sd.total_size_mb,
+                             (uint16_t)(reg_addr - REG_SD_TOTAL_SIZE_MB));
+  }
+  if ((reg_addr >= REG_SD_FREE_SIZE_MB) && (reg_addr < (REG_SD_FREE_SIZE_MB + 2U)))
+  {
+    return Modbus_ReadU32Reg(modbus_read_snapshot.sd.free_size_mb,
+                             (uint16_t)(reg_addr - REG_SD_FREE_SIZE_MB));
+  }
+  if ((reg_addr >= REG_SD_USED_SIZE_MB) && (reg_addr < (REG_SD_USED_SIZE_MB + 2U)))
+  {
+    return Modbus_ReadU32Reg(modbus_read_snapshot.sd.used_size_mb,
+                             (uint16_t)(reg_addr - REG_SD_USED_SIZE_MB));
+  }
+  if ((reg_addr >= REG_SD_CURRENT_FILE_SIZE) &&
+      (reg_addr < (REG_SD_CURRENT_FILE_SIZE + MODBUS_REGS_U64)))
+  {
+    return Modbus_ReadU64Reg(modbus_read_snapshot.sd.current_file_size,
+                             (uint16_t)(reg_addr - REG_SD_CURRENT_FILE_SIZE));
+  }
+  if ((reg_addr >= REG_SD_CURRENT_WRITE_CNT) &&
+      (reg_addr < (REG_SD_CURRENT_WRITE_CNT + MODBUS_REGS_U32)))
+  {
+    return Modbus_ReadU32Reg(modbus_read_snapshot.sd.current_write_count,
+                             (uint16_t)(reg_addr - REG_SD_CURRENT_WRITE_CNT));
+  }
+  if ((reg_addr >= REG_SD_LOG_LENGTH) &&
+      (reg_addr < (REG_SD_LOG_LENGTH + MODBUS_REGS_U64)))
+  {
+    return Modbus_ReadU64Reg(modbus_read_snapshot.sd.current_file_size,
+                             (uint16_t)(reg_addr - REG_SD_LOG_LENGTH));
+  }
+  if ((reg_addr >= REG_SD_CURRENT_FILENAME) &&
+      (reg_addr < (REG_SD_CURRENT_FILENAME + REG_SD_FILENAME_REG_COUNT)))
+  {
+    return Modbus_ReadTextReg(modbus_read_snapshot.sd.current_filename,
+                              (uint16_t)(reg_addr - REG_SD_CURRENT_FILENAME));
+  }
+  if ((reg_addr >= REG_SD_LAST_FILENAME) &&
+      (reg_addr < (REG_SD_LAST_FILENAME + REG_SD_FILENAME_REG_COUNT)))
+  {
+    return Modbus_ReadTextReg(modbus_read_snapshot.sd.last_filename,
+                              (uint16_t)(reg_addr - REG_SD_LAST_FILENAME));
+  }
   if ((reg_addr >= REG_SD_TOTAL_SIZE_MB) && (reg_addr <= REG_SD_STATUS_END))
   {
     return 0U;
@@ -1225,7 +1461,7 @@ static ModbusResult_t Modbus_HandleReadHoldingRegs(uint8_t response_addr,
                                  tx_len);
   }
 
-  Modbus_CaptureReadSnapshot();
+  Modbus_CaptureReadSnapshot(1U);
 
   tx_buf[0] = response_addr;
   tx_buf[1] = MB_FC_READ_HOLDING_REGS;
@@ -1282,7 +1518,7 @@ static ModbusResult_t Modbus_HandleReadSensorSnapshot(uint8_t response_addr,
   }
 
   /* 整个大帧只抓取一次快照，保证三类数据来自同一个FullFrame。 */
-  Modbus_CaptureReadSnapshot();
+  Modbus_CaptureReadSnapshot(0U);
   tx_buf[0] = response_addr;
   tx_buf[1] = MB_FC_READ_SENSOR_SNAPSHOT;
   tx_buf[2] = (uint8_t)(MODBUS_SENSOR_SNAPSHOT_DATA_SIZE >> 8);
@@ -1449,6 +1685,58 @@ static ModbusResult_t Modbus_HandleCalibrationWrite(uint8_t response_addr,
                                       tx_len);
 }
 
+static ModbusResult_t Modbus_HandleCommandWrite(uint8_t response_addr,
+                                                uint16_t start_reg,
+                                                uint16_t reg_count,
+                                                const uint8_t *data_buf,
+                                                uint8_t *tx_buf,
+                                                uint16_t tx_buf_size,
+                                                uint16_t *tx_len)
+{
+  uint8_t command_written = 0U;
+
+  if (data_buf == 0)
+  {
+    return MODBUS_RESULT_FRAME_ERROR;
+  }
+
+  for (uint16_t index = 0U; index < reg_count; index++)
+  {
+    uint16_t reg_addr = (uint16_t)(start_reg + index);
+    if (Modbus_IsWritableCommandReg(reg_addr) == 0U)
+    {
+      return Modbus_BuildException(response_addr,
+                                   MB_FC_WRITE_MULTIPLE_REGS,
+                                   MB_EX_ILLEGAL_DATA_ADDRESS,
+                                   tx_buf,
+                                   tx_buf_size,
+                                   tx_len);
+    }
+  }
+
+  for (uint16_t index = 0U; index < reg_count; index++)
+  {
+    uint16_t reg_addr = (uint16_t)(start_reg + index);
+    uint16_t value = Modbus_ReadU16(&data_buf[index * 2U]);
+    if (Modbus_WriteCommandReg(reg_addr, value) != 0U)
+    {
+      command_written = 1U;
+    }
+  }
+
+  if (command_written != 0U)
+  {
+    Modbus_ProcessCommand();
+  }
+
+  return Modbus_BuildWriteMultipleAck(response_addr,
+                                      start_reg,
+                                      reg_count,
+                                      tx_buf,
+                                      tx_buf_size,
+                                      tx_len);
+}
+
 static ModbusResult_t Modbus_HandleWriteSingleReg(uint8_t response_addr,
                                                   uint16_t reg_addr,
                                                   uint16_t value,
@@ -1459,6 +1747,20 @@ static ModbusResult_t Modbus_HandleWriteSingleReg(uint8_t response_addr,
   if ((tx_buf == 0) || (tx_len == 0) || (tx_buf_size < 8U))
   {
     return MODBUS_RESULT_FRAME_ERROR;
+  }
+
+  if (Modbus_IsWritableCommandReg(reg_addr) != 0U)
+  {
+    if (Modbus_WriteCommandReg(reg_addr, value) != 0U)
+    {
+      Modbus_ProcessCommand();
+    }
+    return Modbus_BuildWriteSingleAck(response_addr,
+                                      reg_addr,
+                                      value,
+                                      tx_buf,
+                                      tx_buf_size,
+                                      tx_len);
   }
 
   if ((reg_addr < REG_IMU_CALIB_START) ||
@@ -1534,6 +1836,20 @@ static ModbusResult_t Modbus_HandleWriteMultipleRegs(uint8_t response_addr,
                                         tx_buf,
                                         tx_buf_size,
                                         tx_len);
+  }
+
+  if (Modbus_IsRegRangeWithin(start_reg,
+                              reg_count,
+                              REG_CMD,
+                              REG_CMD_SEQ) != 0U)
+  {
+    return Modbus_HandleCommandWrite(response_addr,
+                                     start_reg,
+                                     reg_count,
+                                     data_buf,
+                                     tx_buf,
+                                     tx_buf_size,
+                                     tx_len);
   }
 
   if (Modbus_IsRegRangeWithin(start_reg,

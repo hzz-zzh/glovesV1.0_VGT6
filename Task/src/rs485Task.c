@@ -5,11 +5,13 @@
 #include "data_manager.h"
 #include "modbus_frame.h"
 #include "modbus_time_sync.h"
+#include "system_health.h"
 
 #define RS485_TASK_EVT_RX_FRAME (1UL << 0)
 #define RS485_TASK_EVT_TX_EVENT (1UL << 1)
 #define RS485_TASK_POLL_TIMEOUT_MS (10U)
 #define RS485_TASK_FULL_DRAIN_LIMIT (4U)
+#define RS485_TASK_HEALTH_RECOVERY_TX (10U)
 
 static osThreadId_t rs485_task_id = NULL;
 
@@ -101,9 +103,94 @@ static void RS485_TaskDrainFullFrames(void)
   }
 }
 
+static void RS485_TaskServiceHealth(void)
+{
+  static RS485_StatusTypeDef previous;
+  static uint8_t recovery_tx_count;
+  RS485_StatusTypeDef current;
+  uint8_t new_error;
+
+  RS485_GetStatus(&current);
+  SystemHealth_SetRs485UartDetail((uint16_t)(current.last_uart_error & 0xFFFFU));
+  new_error = ((current.rx_overwrite != previous.rx_overwrite) ||
+               (current.errors != previous.errors) ||
+               (current.tx_send_fail != previous.tx_send_fail)) ? 1U : 0U;
+
+  if (current.rx_overwrite != previous.rx_overwrite)
+  {
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_RS485_RX_OVERWRITE,
+                          SYSTEM_ERROR_RS485_RX_OVERWRITE,
+                          SYSTEM_HEALTH_SOURCE_RS485,
+                          0U,
+                          1U);
+  }
+  if (current.errors != previous.errors)
+  {
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_RS485_UART_ERROR,
+                          SYSTEM_ERROR_RS485_UART,
+                          SYSTEM_HEALTH_SOURCE_RS485,
+                          (uint16_t)(current.last_uart_error & 0xFFFFU),
+                          1U);
+  }
+  if (current.tx_send_fail != previous.tx_send_fail)
+  {
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_RS485_TX_FAILED,
+                          SYSTEM_ERROR_RS485_TX,
+                          SYSTEM_HEALTH_SOURCE_RS485,
+                          0U,
+                          1U);
+  }
+
+  if (new_error != 0U)
+  {
+    recovery_tx_count = 0U;
+    SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_RS485, 0U);
+  }
+  else if (current.tx_done != previous.tx_done)
+  {
+    uint32_t completed = current.tx_done - previous.tx_done;
+    recovery_tx_count = (completed >= RS485_TASK_HEALTH_RECOVERY_TX) ?
+                        RS485_TASK_HEALTH_RECOVERY_TX :
+                        (uint8_t)(recovery_tx_count + completed);
+    if (recovery_tx_count >= RS485_TASK_HEALTH_RECOVERY_TX)
+    {
+      recovery_tx_count = RS485_TASK_HEALTH_RECOVERY_TX;
+      SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_RS485_RX_OVERWRITE,
+                            SYSTEM_ERROR_NONE,
+                            SYSTEM_HEALTH_SOURCE_RS485,
+                            0U,
+                            0U);
+      SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_RS485_UART_ERROR,
+                            SYSTEM_ERROR_NONE,
+                            SYSTEM_HEALTH_SOURCE_RS485,
+                            0U,
+                            0U);
+      SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_RS485_TX_FAILED,
+                            SYSTEM_ERROR_NONE,
+                            SYSTEM_HEALTH_SOURCE_RS485,
+                            0U,
+                            0U);
+      SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_RS485, 1U);
+    }
+  }
+
+  if (ModbusTimeSync_GetLastSyncUtcUs() != 0ULL)
+  {
+    uint8_t synced = ModbusTimeSync_IsSynced();
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_TIME_UNSYNCED,
+                          SYSTEM_ERROR_TIME_UNSYNCED,
+                          SYSTEM_HEALTH_SOURCE_TIME_SYNC,
+                          0U,
+                          (synced == 0U) ? 1U : 0U);
+    SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_TIME_SYNC, synced);
+  }
+  previous = current;
+}
+
 void Rs485Task(void *argument)
 {
   uint32_t flags;
+  uint32_t init_failure_count = 0U;
 
   (void)argument;
   rs485_task_id = osThreadGetId();
@@ -111,12 +198,21 @@ void Rs485Task(void *argument)
   (void)ModbusTimeSync_Init();
   while (RS485_Init() != HAL_OK)
   {
+    init_failure_count++;
     osDelay(100U);
   }
+  if (init_failure_count != 0U)
+  {
+    SystemHealth_RecordEvent(SYSTEM_ERROR_RS485_UART,
+                             SYSTEM_HEALTH_SOURCE_RS485,
+                             0U);
+  }
+  SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_RS485, 1U);
 
   for (;;)
   {
     RS485_TaskDrainFullFrames();
+    RS485_TaskServiceHealth();
 
     flags = osThreadFlagsWait(RS485_TASK_EVT_RX_FRAME | RS485_TASK_EVT_TX_EVENT,
                               osFlagsWaitAny,

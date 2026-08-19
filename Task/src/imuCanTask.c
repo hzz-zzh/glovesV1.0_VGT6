@@ -14,6 +14,7 @@
 #include "hi04_fdcan_stm32h563.h"
 #include "main.h"
 #include "systemManagerTask.h"
+#include "system_health.h"
 
 extern FDCAN_HandleTypeDef hfdcan1;
 extern FDCAN_HandleTypeDef hfdcan2;
@@ -1191,6 +1192,37 @@ static void ImuCanTask_ResetConfigurationMonitor(void)
     (void)memset(&s_active_recovery, 0, sizeof(s_active_recovery));
     s_imu_can_stats.recovery_state = IMU_CAN_RECOVERY_IDLE;
     s_imu_can_stats.recovery_target_node = 0U;
+    SystemHealth_SetRecovery(SYSTEM_RECOVERY_NONE, 0U, 0U, 0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_IMU_CONFIG_FAILED,
+                          SYSTEM_ERROR_NONE,
+                          SYSTEM_HEALTH_SOURCE_IMU,
+                          0U,
+                          0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CAN_REINIT_FAILED,
+                          SYSTEM_ERROR_NONE,
+                          SYSTEM_HEALTH_SOURCE_NONE,
+                          0U,
+                          0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CAN1_ERROR_PASSIVE,
+                          SYSTEM_ERROR_NONE,
+                          SYSTEM_HEALTH_SOURCE_CAN1,
+                          1U,
+                          0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CAN1_BUS_OFF,
+                          SYSTEM_ERROR_NONE,
+                          SYSTEM_HEALTH_SOURCE_CAN1,
+                          1U,
+                          0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CAN2_ERROR_PASSIVE,
+                          SYSTEM_ERROR_NONE,
+                          SYSTEM_HEALTH_SOURCE_CAN2,
+                          2U,
+                          0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CAN2_BUS_OFF,
+                          SYSTEM_ERROR_NONE,
+                          SYSTEM_HEALTH_SOURCE_CAN2,
+                          2U,
+                          0U);
 }
 
 static void ImuCanTask_GetQuaternion(const hi04_sample_t *sample,
@@ -1303,11 +1335,90 @@ static uint8_t ImuCanTask_RecoveryActionDue(uint32_t now_ms)
 
 static void ImuCanTask_SetRecoveryState(ImuCanTaskRecoveryState_t state)
 {
+    SystemRecoveryStage_t health_stage = SYSTEM_RECOVERY_NONE;
+    uint16_t target = s_imu_can_stats.recovery_target_node;
+    uint8_t attempt = 0U;
+    uint8_t attempt_limit = 0U;
+
     s_active_recovery.state = state;
     s_imu_can_stats.recovery_state = (uint32_t)state;
     if (state == IMU_CAN_RECOVERY_IDLE)
     {
         s_imu_can_stats.recovery_target_node = 0U;
+    }
+
+    switch (state)
+    {
+        case IMU_CAN_RECOVERY_NODE_CONFIG:
+            health_stage = SYSTEM_RECOVERY_NODE_CONFIG;
+            attempt = s_active_recovery.node_attempt;
+            attempt_limit = IMU_CAN_TASK_CONFIG_RETRY_LIMIT;
+            break;
+        case IMU_CAN_RECOVERY_NODE_VERIFY:
+            health_stage = SYSTEM_RECOVERY_NODE_VERIFY;
+            attempt = s_active_recovery.node_attempt;
+            attempt_limit = IMU_CAN_TASK_CONFIG_RETRY_LIMIT;
+            break;
+        case IMU_CAN_RECOVERY_BUS_REINIT:
+            health_stage = SYSTEM_RECOVERY_BUS_REINIT;
+            target = (uint16_t)s_active_recovery.bus_index + 1U;
+            break;
+        case IMU_CAN_RECOVERY_BUS_CONFIG:
+            health_stage = SYSTEM_RECOVERY_BUS_CONFIG;
+            target = (uint16_t)s_active_recovery.bus_index + 1U;
+            break;
+        case IMU_CAN_RECOVERY_BUS_VERIFY:
+            health_stage = SYSTEM_RECOVERY_BUS_VERIFY;
+            target = (uint16_t)s_active_recovery.bus_index + 1U;
+            break;
+        case IMU_CAN_RECOVERY_POWER_CYCLE:
+            health_stage = SYSTEM_RECOVERY_SAFE_STOP;
+            target = 0U;
+            break;
+        default:
+            break;
+    }
+    SystemHealth_SetRecovery(health_stage,
+                             target,
+                             attempt,
+                             attempt_limit);
+}
+
+static void ImuCanTask_UpdateCanHealth(void)
+{
+    for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
+    {
+        ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
+        FDCAN_ProtocolStatusTypeDef protocol_status;
+        uint32_t passive_flag = (bus_i == 0U) ?
+                                SYSTEM_HEALTH_FLAG_CAN1_ERROR_PASSIVE :
+                                SYSTEM_HEALTH_FLAG_CAN2_ERROR_PASSIVE;
+        uint32_t bus_off_flag = (bus_i == 0U) ?
+                                SYSTEM_HEALTH_FLAG_CAN1_BUS_OFF :
+                                SYSTEM_HEALTH_FLAG_CAN2_BUS_OFF;
+        SystemHealthSource_t source = (bus_i == 0U) ?
+                                      SYSTEM_HEALTH_SOURCE_CAN1 :
+                                      SYSTEM_HEALTH_SOURCE_CAN2;
+        uint8_t status_valid = 0U;
+
+        (void)memset(&protocol_status, 0, sizeof(protocol_status));
+        if ((bus->fdcan_started != false) && (bus->port.hfdcan != NULL) &&
+            (HAL_FDCAN_GetProtocolStatus(bus->port.hfdcan, &protocol_status) == HAL_OK))
+        {
+            status_valid = 1U;
+        }
+        SystemHealth_SetFault(passive_flag,
+                              SYSTEM_ERROR_CAN_ERROR_PASSIVE,
+                              source,
+                              (uint16_t)bus_i + 1U,
+                              ((status_valid != 0U) &&
+                               (protocol_status.ErrorPassive != 0U)) ? 1U : 0U);
+        SystemHealth_SetFault(bus_off_flag,
+                              SYSTEM_ERROR_CAN_BUS_OFF,
+                              source,
+                              (uint16_t)bus_i + 1U,
+                              ((status_valid != 0U) &&
+                               (protocol_status.BusOff != 0U)) ? 1U : 0U);
     }
 }
 
@@ -1487,6 +1598,29 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
     ImuCanTaskBusRuntime_t *bus;
     uint8_t bus_off_index;
     uint8_t node_id;
+    uint8_t missing_bus = 0U;
+    uint8_t missing_local = 0U;
+    uint16_t missing_target = 0U;
+
+    SystemHealth_SetLiveImuMask(fresh_mask);
+    if ((fresh_mask != expected_mask) &&
+        (ImuCanTask_FindMissingNode((uint16_t)(expected_mask & ~fresh_mask),
+                                    &missing_bus,
+                                    &missing_local) != false))
+    {
+        missing_target = ImuCanTask_BusLogicalNodeId(&s_buses[missing_bus], missing_local);
+    }
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_IMU_ALL_INVALID,
+                          SYSTEM_ERROR_IMU_NODE_STALE,
+                          SYSTEM_HEALTH_SOURCE_IMU,
+                          0U,
+                          (fresh_mask == 0U) ? 1U : 0U);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_IMU_PARTIAL,
+                          SYSTEM_ERROR_IMU_NODE_STALE,
+                          SYSTEM_HEALTH_SOURCE_IMU,
+                          missing_target,
+                          ((fresh_mask != 0U) && (fresh_mask != expected_mask)) ? 1U : 0U);
+    ImuCanTask_UpdateCanHealth();
 
     s_imu_can_stats.cfg_verified_node_mask = fresh_mask;
     s_imu_can_stats.cfg_failed_node_mask = (uint16_t)(expected_mask & ~fresh_mask);
@@ -1518,12 +1652,27 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
                 {
                     s_imu_can_stats.last_error = 0U;
                 }
+                SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_IMU_CONFIG_FAILED,
+                                      SYSTEM_ERROR_IMU_CONFIG_FAILED,
+                                      SYSTEM_HEALTH_SOURCE_IMU,
+                                      0U,
+                                      0U);
+                SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CAN_REINIT_FAILED,
+                                      SYSTEM_ERROR_CAN_REINIT_FAILED,
+                                      SYSTEM_HEALTH_SOURCE_NONE,
+                                      0U,
+                                      0U);
+                SystemHealth_SetRecovery(SYSTEM_RECOVERY_NONE, 0U, 0U, 0U);
                 return;
             }
             if (missing_mask != s_active_recovery.last_missing_mask)
             {
                 s_active_recovery.last_missing_mask = missing_mask;
                 s_active_recovery.missing_since_ms = now_ms;
+                SystemHealth_SetRecovery(SYSTEM_RECOVERY_LOSS_CONFIRM,
+                                         missing_target,
+                                         0U,
+                                         0U);
                 return;
             }
             if ((uint32_t)(now_ms - s_active_recovery.missing_since_ms) <
@@ -1600,6 +1749,11 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
                 return;
             }
             s_imu_can_stats.last_error = 90U;
+            SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_IMU_CONFIG_FAILED,
+                                  SYSTEM_ERROR_IMU_CONFIG_FAILED,
+                                  SYSTEM_HEALTH_SOURCE_IMU,
+                                  s_imu_can_stats.recovery_target_node,
+                                  1U);
             ImuCanTask_StartBusRecovery(s_active_recovery.bus_index, now_ms);
             return;
 
@@ -1614,6 +1768,13 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
                 (ImuCanTask_ResetBusDevices(bus) == false))
             {
                 s_imu_can_stats.last_error = 92U;
+                SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CAN_REINIT_FAILED,
+                                      SYSTEM_ERROR_CAN_REINIT_FAILED,
+                                      (s_active_recovery.bus_index == 0U) ?
+                                      SYSTEM_HEALTH_SOURCE_CAN1 :
+                                      SYSTEM_HEALTH_SOURCE_CAN2,
+                                      (uint16_t)s_active_recovery.bus_index + 1U,
+                                      1U);
                 ImuCanTask_RequestFullPowerRecovery(now_ms);
                 return;
             }
@@ -1675,6 +1836,13 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
                 IMU_CAN_TASK_ACTIVE_VERIFY_MS)
             {
                 s_imu_can_stats.last_error = 92U;
+                SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_CAN_REINIT_FAILED,
+                                      SYSTEM_ERROR_CAN_VERIFY_FAILED,
+                                      (s_active_recovery.bus_index == 0U) ?
+                                      SYSTEM_HEALTH_SOURCE_CAN1 :
+                                      SYSTEM_HEALTH_SOURCE_CAN2,
+                                      (uint16_t)s_active_recovery.bus_index + 1U,
+                                      1U);
                 ImuCanTask_RequestFullPowerRecovery(now_ms);
             }
             return;
@@ -1707,6 +1875,8 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
 
 static void ImuCanTask_PublishSnapshot(void)
 {
+    static uint8_t alloc_failure_count;
+    static uint8_t queue_failure_count;
     GloveImuSensorBlock_t *block;
     AcqSyncSnapshot_t sync;
     GloveTimestampUs_t block_sync_timestamp_us = 0ULL;
@@ -1719,8 +1889,20 @@ static void ImuCanTask_PublishSnapshot(void)
     if (block == NULL)
     {
         s_imu_can_stats.publish_drop_count++;
+        if (alloc_failure_count < 3U)
+        {
+            alloc_failure_count++;
+        }
+        if (alloc_failure_count == 3U)
+        {
+            SystemHealth_RecordEvent(SYSTEM_ERROR_POOL_EXHAUSTED,
+                                     SYSTEM_HEALTH_SOURCE_PIPELINE,
+                                     0U);
+            alloc_failure_count++;
+        }
         return;
     }
+    alloc_failure_count = 0U;
 
     for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
     {
@@ -1802,6 +1984,7 @@ static void ImuCanTask_PublishSnapshot(void)
             GLOVE_STATUS_OK)
         {
             s_imu_can_stats.published_count++;
+            queue_failure_count = 0U;
             if (s_imu_fresh_mask == (uint16_t)GLOVE_IMU_VALID_ALL_MASK)
             {
                 /* 16个节点均产生完整新数据并成功发布后，才确认IMU恢复。 */
@@ -1810,6 +1993,17 @@ static void ImuCanTask_PublishSnapshot(void)
             return;
         }
         s_imu_can_stats.publish_drop_count++;
+        if (queue_failure_count < 3U)
+        {
+            queue_failure_count++;
+        }
+        if (queue_failure_count == 3U)
+        {
+            SystemHealth_RecordEvent(SYSTEM_ERROR_QUEUE_FULL,
+                                     SYSTEM_HEALTH_SOURCE_PIPELINE,
+                                     0U);
+            queue_failure_count++;
+        }
     }
 
     (void)DataManager_ReleaseImuSensor(block);
@@ -2120,6 +2314,17 @@ void ImuCanTask(void *argument)
             }
             s_imu_recovery_pending = 1U;
             s_imu_fresh_mask = 0U;
+            SystemHealth_SetLiveImuMask(0U);
+            SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_IMU_PARTIAL,
+                                  SYSTEM_ERROR_IMU_NODE_STALE,
+                                  SYSTEM_HEALTH_SOURCE_IMU,
+                                  0U,
+                                  0U);
+            SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_IMU_ALL_INVALID,
+                                  SYSTEM_ERROR_IMU_NODE_STALE,
+                                  SYSTEM_HEALTH_SOURCE_IMU,
+                                  0U,
+                                  0U);
             osDelay(10U);
             continue;
         }
