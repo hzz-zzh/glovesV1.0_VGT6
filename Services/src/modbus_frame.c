@@ -7,6 +7,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "app_version.h"
 #include "dataProcessTask.h"
 #include "imuCanTask.h"
 #include "RS485_uasrt.h"
@@ -204,6 +205,11 @@ static void Modbus_AppendCrc(uint8_t *frame, uint16_t len_without_crc)
 static uint8_t Modbus_IsReadableRegister(uint16_t reg_addr)
 {
   if ((reg_addr >= REG_BASIC_STATUS_START) && (reg_addr <= REG_BASIC_STATUS_END))
+  {
+    return 1U;
+  }
+
+  if ((reg_addr >= REG_FW_INFO_START) && (reg_addr <= REG_FW_INFO_END))
   {
     return 1U;
   }
@@ -1137,6 +1143,10 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 
   switch (reg_addr)
   {
+    case REG_FW_VERSION_MAJOR: return (uint16_t)GLOVE_FW_VERSION_MAJOR;
+    case REG_FW_VERSION_MINOR: return (uint16_t)GLOVE_FW_VERSION_MINOR;
+    case REG_FW_VERSION_PATCH: return (uint16_t)GLOVE_FW_VERSION_PATCH;
+
     case REG_CMD: return modbus_cmd_command;
     case REG_CMD_PARAM: return modbus_cmd_param;
     case REG_CMD_SEQ: return modbus_cmd_seq;

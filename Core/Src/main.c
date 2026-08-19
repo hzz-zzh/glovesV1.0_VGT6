@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "acq_sync.h"
+#include "app_version.h"
 #include "data_manager.h"
 #include "glove_hand_config.h"
 #include "modbus_time_sync.h"
@@ -163,6 +164,7 @@ int main(void)
   MX_TIM5_Init();
   MX_SDMMC1_SD_Init();
   /* USER CODE BEGIN 2 */
+  printf("[FW] version=%s\r\n", GLOVE_FW_VERSION_STRING);
   GloveHandConfig_InitFromGpio();
   printf("[Hand] side=%s\r\n",
          (GloveHandConfig_GetHandSide() == GLOVE_HAND_RIGHT) ? "RIGHT" : "LEFT");

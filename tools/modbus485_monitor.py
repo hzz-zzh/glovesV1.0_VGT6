@@ -43,6 +43,9 @@ REG_UTC_TIMESTAMP_US = 0x0002
 REG_LOCAL_UPTIME_US = 0x0006
 REG_TIME_SYNC_UTC_US = 0x000A
 MODBUS_ROS_TIME_REG_COUNT = 4
+REG_FW_VERSION_START = 0x000E
+REG_FW_VERSION_COUNT = 3
+REG_BASIC_AND_FW_COUNT = REG_FW_VERSION_START + REG_FW_VERSION_COUNT
 REG_CMD_START = 0x0020
 REG_CMD_ACK_START = 0x0023
 REG_CMD_ACK_COUNT = 3
@@ -1259,6 +1262,13 @@ def format_uart_error_detail(detail: int) -> str:
     return f"0x{detail:04X} ({names})"
 
 
+def format_firmware_version(regs: list[int]) -> str:
+    """将固件版本寄存器格式化为 V主版本.次版本.修订版本。"""
+    if len(regs) < REG_FW_VERSION_COUNT:
+        return "unavailable"
+    return f"V{regs[0]}.{regs[1]}.{regs[2]}"
+
+
 def format_health_target(source: int, target: int) -> str:
     if target == 0:
         return "not specified"
@@ -1300,6 +1310,7 @@ def decode_power(regs: list[int]) -> PowerSnapshot:
 class GloveSnapshot:
     timestamp: float
     basic: list[int]
+    firmware_regs: list[int]
     system: list[int]
     health_regs: list[int]
     power_regs: list[int]
@@ -1350,11 +1361,14 @@ def evaluate_sensor_validity(
 
 
 def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> GloveSnapshot:
+    # 基础状态和固件版本地址连续，合并读取可避免增加一次Modbus请求。
+    basic_and_firmware = client.read_holding_registers(
+        slave, REG_BASIC_STATUS_START, REG_BASIC_AND_FW_COUNT, timeout_s
+    )
     snapshot = GloveSnapshot(
         timestamp=time.time(),
-        basic=client.read_holding_registers(
-            slave, REG_BASIC_STATUS_START, REG_BASIC_STATUS_COUNT, timeout_s
-        ),
+        basic=basic_and_firmware[:REG_BASIC_STATUS_COUNT],
+        firmware_regs=basic_and_firmware[REG_BASIC_STATUS_COUNT:],
         system=client.read_holding_registers(
             slave, REG_SYSTEM_STATUS_START, REG_SYSTEM_STATUS_COUNT, timeout_s
         ),
@@ -1404,6 +1418,7 @@ def empty_snapshot() -> GloveSnapshot:
     return GloveSnapshot(
         timestamp=time.time(),
         basic=[0] * REG_BASIC_STATUS_COUNT,
+        firmware_regs=[],
         system=[0] * REG_SYSTEM_STATUS_COUNT,
         health_regs=[0] * REG_HEALTH_STATUS_COUNT,
         power_regs=[0] * REG_POWER_STATUS_COUNT,
@@ -1485,6 +1500,7 @@ def read_sensor_snapshot_120hz(
     return GloveSnapshot(
         timestamp=time.time(),
         basic=base.basic,
+        firmware_regs=base.firmware_regs,
         system=base.system,
         health_regs=base.health_regs,
         power_regs=power_regs,
@@ -1655,6 +1671,7 @@ class ModbusMonitorApp(tk.Tk):
         self.timeout_var = tk.StringVar(value=str(DEFAULT_TIMEOUT_S))
         self.poll_var = tk.StringVar(value=str(DEFAULT_POLL_MS))
         self.status_var = tk.StringVar(value="Disconnected")
+        self.firmware_var = tk.StringVar(value="Firmware: unavailable")
         self.manual_start_var = tk.StringVar(value="0x0000")
         self.manual_count_var = tk.StringVar(value="1")
         self.manual_single_addr_var = tk.StringVar(value="0x1256")
@@ -1729,8 +1746,16 @@ class ModbusMonitorApp(tk.Tk):
             row=0, column=17, padx=(10, 0)
         )
 
-        status = ttk.Label(self, textvariable=self.status_var, anchor=tk.W, padding=(8, 0))
-        status.pack(side=tk.TOP, fill=tk.X)
+        status_bar = ttk.Frame(self, padding=(8, 0))
+        status_bar.pack(side=tk.TOP, fill=tk.X)
+        status = ttk.Label(status_bar, textvariable=self.status_var, anchor=tk.W)
+        status.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(
+            status_bar,
+            textvariable=self.firmware_var,
+            anchor=tk.E,
+            style="Header.TLabel",
+        ).pack(side=tk.RIGHT, padx=(12, 0))
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -1982,16 +2007,29 @@ class ModbusMonitorApp(tk.Tk):
 
     def connect(self) -> None:
         try:
-            port_name, baud, _slave, timeout_s, _poll_ms = self._read_settings()
+            port_name, baud, slave, timeout_s, _poll_ms = self._read_settings()
             self.client.open(port_name, baud, timeout_s)
             self.status_var.set(f"Connected {port_name} @ {baud} 8N1")
         except Exception as exc:
             messagebox.showerror("Connect failed", str(exc))
+            return
+
+        try:
+            firmware_regs = self.client.read_holding_registers(
+                slave, REG_FW_VERSION_START, REG_FW_VERSION_COUNT, timeout_s
+            )
+            self.firmware_var.set(
+                f"Firmware: {format_firmware_version(firmware_regs)}"
+            )
+        except Exception:
+            # 连接仍保持可用，版本读取可在后续轮询时再次尝试。
+            self.firmware_var.set("Firmware: unavailable")
 
     def disconnect(self) -> None:
         self.stop_poll()
         self.client.close()
         self.status_var.set("Disconnected")
+        self.firmware_var.set("Firmware: unavailable")
 
     def read_once(self) -> None:
         if self.worker is not None and self.worker.is_alive():
@@ -2428,6 +2466,10 @@ class ModbusMonitorApp(tk.Tk):
                 lambda: f"{len(self.client.read_holding_registers(slave, REG_BASIC_STATUS_START, REG_BASIC_STATUS_COUNT, timeout_s))} regs",
             )
             step(
+                "FC03 firmware version 0x000E+3",
+                lambda: self._test_read_firmware_version(slave, timeout_s),
+            )
+            step(
                 "FC03 ROS time block 0x0002+12",
                 lambda: self._test_read_time_block(slave, timeout_s),
             )
@@ -2575,6 +2617,12 @@ class ModbusMonitorApp(tk.Tk):
             f"error=0x{health.current_error:04X}({error_name})"
         )
 
+    def _test_read_firmware_version(self, slave: int, timeout_s: float) -> str:
+        regs = self.client.read_holding_registers(
+            slave, REG_FW_VERSION_START, REG_FW_VERSION_COUNT, timeout_s
+        )
+        return format_firmware_version(regs)
+
     def _test_write_single_same(self, slave: int, timeout_s: float, addr: int) -> str:
         original = self.client.read_holding_registers(slave, addr, 1, timeout_s)[0]
         self.client.write_single_register(slave, addr, original, timeout_s)
@@ -2648,7 +2696,15 @@ class ModbusMonitorApp(tk.Tk):
                 self.stop_event.wait(0.5)
 
     def _sensor_120hz_worker(self, slave: int, timeout_s: float) -> None:
-        previous = self.last_snapshot
+        previous = self.last_snapshot if self.last_snapshot is not None else empty_snapshot()
+        if not previous.firmware_regs:
+            try:
+                # 固件版本在高速采集开始前读取一次，避免占用120Hz采集周期。
+                previous.firmware_regs = self.client.read_holding_registers(
+                    slave, REG_FW_VERSION_START, REG_FW_VERSION_COUNT, timeout_s
+                )
+            except Exception as exc:
+                self.events.put(("error", exc))
         next_deadline = time.perf_counter()
         rate_started = next_deadline
         sensor_rate_start_frame_id: int | None = None
@@ -2691,6 +2747,18 @@ class ModbusMonitorApp(tk.Tk):
                             snapshot.health_regs = list(previous.health_regs) if previous else [
                                 0
                             ] * REG_HEALTH_STATUS_COUNT
+                        if not snapshot.firmware_regs:
+                            try:
+                                # 启动时读取失败则随健康状态低频轮询重试，成功后不再重复读取。
+                                snapshot.firmware_regs = self.client.read_holding_registers(
+                                    slave,
+                                    REG_FW_VERSION_START,
+                                    REG_FW_VERSION_COUNT,
+                                    min(timeout_s, 0.02),
+                                    low_latency=True,
+                                )
+                            except Exception:
+                                self.client.recover_low_latency_poll()
                         next_health_poll = now + 0.2
                     previous = snapshot
 
@@ -2787,6 +2855,8 @@ class ModbusMonitorApp(tk.Tk):
     def _render_snapshot(self, snapshot: GloveSnapshot) -> None:
         power = decode_power(snapshot.power_regs)
         health = decode_health(snapshot.health_regs)
+        firmware_version = format_firmware_version(snapshot.firmware_regs)
+        self.firmware_var.set(f"Firmware: {firmware_version}")
         health_state = HEALTH_STATE_NAMES.get(health.state, f"UNKNOWN({health.state})")
         current_error_name, current_action = health_error_text(health.current_error)
         last_error_name, _last_action = health_error_text(health.last_error)
@@ -2846,6 +2916,7 @@ class ModbusMonitorApp(tk.Tk):
 
         summary = [
             f"Read count        : {self.read_count}",
+            f"Firmware version  : {firmware_version}",
             f"Host time         : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(snapshot.timestamp))}",
             f"Communication Hz  : {snapshot.actual_hz:.3f}",
             f"Sensor frame Hz   : {snapshot.sensor_hz:.3f}",
@@ -3039,6 +3110,9 @@ class ModbusMonitorApp(tk.Tk):
 
         raw_lines = [
             self._format_regs("basic 0x0000", REG_BASIC_STATUS_START, snapshot.basic),
+            self._format_regs(
+                "firmware 0x000E", REG_FW_VERSION_START, snapshot.firmware_regs
+            ),
             self._format_regs("system 0x0040", REG_SYSTEM_STATUS_START, snapshot.system),
             self._format_regs("health 0x004A", REG_HEALTH_STATUS_START, snapshot.health_regs),
             self._format_regs("power 0x0060", REG_POWER_STATUS_START, snapshot.power_regs),
@@ -3158,6 +3232,7 @@ class ModbusMonitorApp(tk.Tk):
         snapshot = self.last_snapshot
         power = decode_power(snapshot.power_regs)
         health = decode_health(snapshot.health_regs)
+        firmware_version = format_firmware_version(snapshot.firmware_regs)
         imus = decode_imu(snapshot.imu_regs)
         joints = decode_joint(snapshot.joint_regs)
         imu_sec, imu_nsec = regs_to_ros_time_le_words(snapshot.imu_status_regs[0:4])
@@ -3174,6 +3249,7 @@ class ModbusMonitorApp(tk.Tk):
             writer = csv.writer(handle)
             writer.writerow(("section", "index", "field", "value"))
             writer.writerow(("meta", "host_time", "unix", snapshot.timestamp))
+            writer.writerow(("meta", "firmware", "version", firmware_version))
             writer.writerow(("meta", "sensor", "communication_hz", snapshot.actual_hz))
             writer.writerow(("meta", "sensor", "frame_hz", snapshot.sensor_hz))
             writer.writerow(("meta", "sensor", "frame_id", snapshot.sensor_frame_id))

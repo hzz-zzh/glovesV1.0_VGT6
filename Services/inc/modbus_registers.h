@@ -27,6 +27,15 @@ extern "C" {
 #define REG_BASIC_STATUS_END           0x000DU
 #define REG_BASIC_STATUS_COUNT         14U
 
+/* 固件版本信息寄存器：0x000E ~ 0x0010，只读。 */
+#define REG_FW_VERSION_MAJOR           0x000EU
+#define REG_FW_VERSION_MINOR           0x000FU
+#define REG_FW_VERSION_PATCH           0x0010U
+
+#define REG_FW_INFO_START              REG_FW_VERSION_MAJOR
+#define REG_FW_INFO_END                REG_FW_VERSION_PATCH
+#define REG_FW_INFO_COUNT              3U
+
 /* Command registers: 0x0020 ~ 0x003E. */
 #define REG_CMD                        0x0020U
 #define REG_CMD_PARAM                  0x0021U
@@ -41,6 +50,10 @@ extern "C" {
 #define REG_CMD_AREA_END               REG_CMD_RESERVED_END
 #define REG_CMD_ACK_START              REG_CMD_ACK
 #define REG_CMD_ACK_COUNT              3U
+
+#if REG_FW_INFO_END >= REG_CMD_AREA_START
+#error "Firmware information registers overlap command registers"
+#endif
 
 /* System status registers: 0x0040 ~ 0x0049. */
 #define REG_SYSTEM_STATE               0x0040U
