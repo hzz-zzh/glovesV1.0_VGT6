@@ -191,7 +191,7 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
            (unsigned long)frame_stats.last_time_diff_us,
            (unsigned long)frame_stats.last_frame_id);
 
-    printf("[IMU_CAN] irq=%lu rx=%lu parsed=%lu unparsed=%lu rejected=%lu pub=%lu drop=%lu init_err=%lu err=%lu last=0x%08lx ext=%lu dlc=%lu cfg_tx=%lu cfg_reply=%lu cfg_ok=0x%04lx cfg_fail=0x%04lx cfg_retry=%lu fresh=0x%04x first_node=%lu seen=0x%08lx\r\n",
+    printf("[IMU_CAN] irq=%lu rx=%lu parsed=%lu unparsed=%lu rejected=%lu pub=%lu drop=%lu init_err=%lu err=%lu last=0x%08lx ext=%lu dlc=%lu cfg_tx=%lu cfg_reply=%lu cfg_ok=0x%04lx cfg_fail=0x%04lx cfg_retry=%lu rec_state=%lu rec_node=%lu bus_reinit=%lu pwr_cycle=%lu fresh=0x%04x first_node=%lu seen=0x%08lx\r\n",
            (unsigned long)imu_stats.rx_irq_count,
            (unsigned long)imu_stats.rx_frame_count,
            (unsigned long)imu_stats.parsed_frame_count,
@@ -209,6 +209,10 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
            (unsigned long)imu_stats.cfg_verified_node_mask,
            (unsigned long)imu_stats.cfg_failed_node_mask,
            (unsigned long)imu_stats.cfg_retry_count,
+           (unsigned long)imu_stats.recovery_state,
+           (unsigned long)imu_stats.recovery_target_node,
+           (unsigned long)imu_stats.recovery_bus_reinit_count,
+           (unsigned long)imu_stats.recovery_power_cycle_count,
            (unsigned int)ImuCanTask_GetFreshMask(),
            (unsigned long)imu_stats.first_valid_node_id,
            (unsigned long)imu_stats.first_valid_seen_mask);

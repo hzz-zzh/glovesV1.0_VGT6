@@ -13,6 +13,7 @@
 #include "hi04_driver.h"
 #include "hi04_fdcan_stm32h563.h"
 #include "main.h"
+#include "systemManagerTask.h"
 
 extern FDCAN_HandleTypeDef hfdcan1;
 extern FDCAN_HandleTypeDef hfdcan2;
@@ -66,6 +67,12 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define IMU_CAN_TASK_ENABLE_PUBLISH             (1U)
 #define IMU_CAN_TASK_CONFIG_RETRY_LIMIT         (3U)
 #define IMU_CAN_TASK_CONFIG_RETRY_INTERVAL_MS   (500U)
+#define IMU_CAN_TASK_ACTIVE_LOSS_CONFIRM_MS     (200U)
+#define IMU_CAN_TASK_ACTIVE_CONFIG_STEP_MS      (50U)
+#define IMU_CAN_TASK_ACTIVE_VERIFY_MS           (500U)
+#define IMU_CAN_TASK_ACTIVE_TX_RETRY_LIMIT      (3U)
+#define IMU_CAN_TASK_ACTIVE_CONFIG_STEP_COUNT   (7U)
+#define IMU_CAN_TASK_ACTIVE_POWER_RETRY_MS      (500U)
 #define IMU_CAN_TASK_QUAT_SOURCE_NONE           (0U)
 #define IMU_CAN_TASK_QUAT_SOURCE_RAW            (1U)
 #define IMU_CAN_TASK_IRQ_PRIORITY               (configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY)
@@ -102,6 +109,31 @@ typedef struct
     bool fdcan_started;
 } ImuCanTaskBusRuntime_t;
 
+typedef enum
+{
+    IMU_CAN_RECOVERY_IDLE = 0,
+    IMU_CAN_RECOVERY_NODE_CONFIG = 1,
+    IMU_CAN_RECOVERY_NODE_VERIFY = 2,
+    IMU_CAN_RECOVERY_BUS_REINIT = 3,
+    IMU_CAN_RECOVERY_BUS_CONFIG = 4,
+    IMU_CAN_RECOVERY_BUS_VERIFY = 5,
+    IMU_CAN_RECOVERY_POWER_CYCLE = 6
+} ImuCanTaskRecoveryState_t;
+
+typedef struct
+{
+    ImuCanTaskRecoveryState_t state;
+    uint8_t bus_index;
+    uint8_t local_index;
+    uint8_t config_step;
+    uint8_t node_attempt;
+    uint8_t tx_failure_count;
+    uint16_t last_missing_mask;
+    uint32_t missing_since_ms;
+    uint32_t next_action_ms;
+    uint32_t verify_started_ms;
+} ImuCanTaskRecoveryContext_t;
+
 typedef struct
 {
     volatile uint32_t rx_irq_count;
@@ -131,6 +163,10 @@ typedef struct
     volatile uint32_t cfg_verified_node_mask;
     volatile uint32_t cfg_failed_node_mask;
     volatile uint32_t cfg_retry_count;
+    volatile uint32_t recovery_state;
+    volatile uint32_t recovery_target_node;
+    volatile uint32_t recovery_bus_reinit_count;
+    volatile uint32_t recovery_power_cycle_count;
     uint32_t cfg_step_ack_count[6];
     uint32_t cfg_step_ack_id[6];
     uint8_t cfg_step_ack_data[6][8];
@@ -154,7 +190,7 @@ static uint8_t s_imu_recovery_pending;
 static volatile uint16_t s_imu_fresh_mask = 0U;
 static ImuCanTaskStats_t s_imu_can_stats;
 static uint32_t s_sensor_seq;
-static uint32_t s_config_next_retry_ms;
+static ImuCanTaskRecoveryContext_t s_active_recovery;
 
 static const uint8_t s_left_bus1_output_index[IMU_CAN_TASK_MAX_NODES_PER_BUS] =
 {
@@ -576,6 +612,34 @@ static bool ImuCanTask_ReinitializeAllFdcans(void)
     return all_ready;
 }
 
+static bool ImuCanTask_ReinitializeFdcanBus(ImuCanTaskBusRuntime_t *bus)
+{
+    FDCAN_HandleTypeDef *hfdcan;
+
+    if ((bus == NULL) || (bus->port.hfdcan == NULL))
+    {
+        return false;
+    }
+
+    hfdcan = bus->port.hfdcan;
+    /* 单路恢复不能复位共享FDCAN时钟，否则会打断另一条仍在工作的总线。 */
+    ImuCanTask_ShutdownFdcan(bus);
+    if (HAL_FDCAN_Init(hfdcan) != HAL_OK)
+    {
+        (void)HAL_FDCAN_DeInit(hfdcan);
+        s_imu_can_stats.init_error_count++;
+        return false;
+    }
+    bus->fdcan_initialized = true;
+    if (ImuCanTask_ConfigFdcan(bus) == false)
+    {
+        s_imu_can_stats.init_error_count++;
+        ImuCanTask_ShutdownFdcan(bus);
+        return false;
+    }
+    return true;
+}
+
 static void ImuCanTask_UpdateLastRx(const hi04_can_frame_t *frame)
 {
     uint32_t raw_id;
@@ -684,13 +748,12 @@ static bool ImuCanTask_WaitWhileAcquisitionEnabled(uint32_t delay_ms)
     return true;
 }
 
-static bool ImuCanTask_SendJ1939ConfigU32(ImuCanTaskBusRuntime_t *bus,
-                                          uint8_t dest_node_id,
-                                          uint16_t reg_addr,
-                                          uint32_t value)
+static bool ImuCanTask_QueueJ1939ConfigU32(ImuCanTaskBusRuntime_t *bus,
+                                           uint8_t dest_node_id,
+                                           uint16_t reg_addr,
+                                           uint32_t value)
 {
     hi04_can_frame_t frame;
-    uint32_t start_ms = HAL_GetTick();
 
     if ((bus == NULL) || (bus->fdcan_started == false) ||
         (s_imu_acquisition_enabled == 0U))
@@ -698,17 +761,9 @@ static bool ImuCanTask_SendJ1939ConfigU32(ImuCanTaskBusRuntime_t *bus,
         return false;
     }
 
-    while (HAL_FDCAN_GetTxFifoFreeLevel(bus->port.hfdcan) == 0U)
+    if (HAL_FDCAN_GetTxFifoFreeLevel(bus->port.hfdcan) == 0U)
     {
-        if (s_imu_acquisition_enabled == 0U)
-        {
-            return false;
-        }
-        if ((HAL_GetTick() - start_ms) >= 20U)
-        {
-            return false;
-        }
-        osDelay(1U);
+        return false;
     }
 
     (void)memset(&frame, 0, sizeof(frame));
@@ -747,6 +802,31 @@ static bool ImuCanTask_SendJ1939ConfigU32(ImuCanTaskBusRuntime_t *bus,
     }
 
     s_imu_can_stats.cfg_tx_count++;
+    return true;
+}
+
+static bool ImuCanTask_SendJ1939ConfigU32(ImuCanTaskBusRuntime_t *bus,
+                                          uint8_t dest_node_id,
+                                          uint16_t reg_addr,
+                                          uint32_t value)
+{
+    uint32_t start_ms = HAL_GetTick();
+
+    while ((bus != NULL) && (bus->fdcan_started != false) &&
+           (s_imu_acquisition_enabled != 0U) &&
+           (HAL_FDCAN_GetTxFifoFreeLevel(bus->port.hfdcan) == 0U))
+    {
+        if ((HAL_GetTick() - start_ms) >= 20U)
+        {
+            return false;
+        }
+        osDelay(1U);
+    }
+
+    if (ImuCanTask_QueueJ1939ConfigU32(bus, dest_node_id, reg_addr, value) == false)
+    {
+        return false;
+    }
     return ImuCanTask_ConfigDelayMs(50U);
 }
 
@@ -967,10 +1047,9 @@ static bool ImuCanTask_ConfigJ1939SyncOnce(ImuCanTaskBusRuntime_t *bus, uint8_t 
 #endif
 }
 
-static bool ImuCanTask_InitHi04Devices(ImuCanTaskBusRuntime_t *bus)
+static bool ImuCanTask_ResetBusDevices(ImuCanTaskBusRuntime_t *bus)
 {
     hi04_bus_t hi04_bus;
-    bool success = true;
 
     if ((bus == NULL) || (bus->config == NULL))
     {
@@ -980,11 +1059,37 @@ static bool ImuCanTask_InitHi04Devices(ImuCanTaskBusRuntime_t *bus)
     hi04_bus.send = hi04_fdcan_stm32h563_send;
     hi04_bus.ctx = &bus->port;
 
+    (void)memset(bus->node_last_rx_id, 0, sizeof(bus->node_last_rx_id));
+    (void)memset(bus->node_last_rx_dlc, 0, sizeof(bus->node_last_rx_dlc));
+    (void)memset(bus->node_last_rx_data, 0, sizeof(bus->node_last_rx_data));
+    (void)memset(bus->node_sync_seq, 0, sizeof(bus->node_sync_seq));
+    (void)memset(bus->node_sync_timestamp_us, 0, sizeof(bus->node_sync_timestamp_us));
+    (void)memset(bus->node_sync_seen_mask, 0, sizeof(bus->node_sync_seen_mask));
+    (void)memset(bus->node_sync_valid, 0, sizeof(bus->node_sync_valid));
+    (void)memset(bus->node_accel_rx_ms, 0, sizeof(bus->node_accel_rx_ms));
+    (void)memset(bus->node_gyro_rx_ms, 0, sizeof(bus->node_gyro_rx_ms));
+    (void)memset(bus->node_quat_rx_ms, 0, sizeof(bus->node_quat_rx_ms));
+
     for (uint32_t i = 0U; i < bus->config->node_count; i++)
     {
         uint8_t node_id = (uint8_t)(bus->config->first_node_id + i);
         hi04_device_init(&bus->devices[i], hi04_bus, node_id);
+    }
+    return true;
+}
 
+static bool ImuCanTask_InitHi04Devices(ImuCanTaskBusRuntime_t *bus)
+{
+    bool success = true;
+
+    if (ImuCanTask_ResetBusDevices(bus) == false)
+    {
+        return false;
+    }
+
+    for (uint32_t i = 0U; i < bus->config->node_count; i++)
+    {
+        uint8_t node_id = (uint8_t)(bus->config->first_node_id + i);
         if (i < bus->config->config_node_count)
         {
             ImuCanTask_ConfigJ1939Outputs(bus, node_id);
@@ -1083,90 +1188,9 @@ static void ImuCanTask_ResetConfigurationMonitor(void)
     s_imu_can_stats.cfg_verified_node_mask = 0U;
     s_imu_can_stats.cfg_failed_node_mask = (uint16_t)GLOVE_IMU_VALID_ALL_MASK;
     s_imu_can_stats.cfg_retry_count = 0U;
-    s_config_next_retry_ms = HAL_GetTick() + IMU_CAN_TASK_CONFIG_RETRY_INTERVAL_MS;
-}
-
-static uint16_t ImuCanTask_BuildObservedNodeMask(void)
-{
-    uint16_t mask = 0U;
-
-    for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
-    {
-        ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
-
-        if (bus->config == NULL)
-        {
-            continue;
-        }
-
-        for (uint32_t local_i = 0U; local_i < bus->config->node_count; local_i++)
-        {
-            uint32_t output_index;
-
-            if (((bus->devices[local_i].seen_mask & IMU_CAN_TASK_VALID_FLAGS_REQUIRED) ==
-                 IMU_CAN_TASK_VALID_FLAGS_REQUIRED) &&
-                (ImuCanTask_BusOutputIndex(bus, local_i, &output_index) != false))
-            {
-                mask |= (uint16_t)(1U << output_index);
-            }
-        }
-    }
-
-    return mask;
-}
-
-static void ImuCanTask_RetryMissingNodeConfigs(uint16_t configured_mask)
-{
-    for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
-    {
-        ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
-
-        if ((bus->config == NULL) || (bus->fdcan_started == false))
-        {
-            continue;
-        }
-
-        for (uint32_t local_i = 0U; local_i < bus->config->config_node_count; local_i++)
-        {
-            uint32_t output_index;
-
-            if ((ImuCanTask_BusOutputIndex(bus, local_i, &output_index) != false) &&
-                ((configured_mask & (uint16_t)(1U << output_index)) == 0U))
-            {
-                uint8_t node_id = (uint8_t)(bus->config->first_node_id + local_i);
-                ImuCanTask_ConfigJ1939Outputs(bus, node_id);
-                ImuCanTask_ConfigJ1939SyncOnce(bus, node_id);
-            }
-        }
-    }
-}
-
-static void ImuCanTask_UpdateConfigurationMonitor(uint16_t observed_mask)
-{
-    const uint16_t expected_mask = (uint16_t)GLOVE_IMU_VALID_ALL_MASK;
-    uint32_t now_ms = HAL_GetTick();
-
-    s_imu_can_stats.cfg_verified_node_mask = observed_mask;
-    s_imu_can_stats.cfg_failed_node_mask = (uint16_t)(expected_mask & ~observed_mask);
-
-    if ((observed_mask != expected_mask) &&
-        (s_imu_can_stats.cfg_retry_count < IMU_CAN_TASK_CONFIG_RETRY_LIMIT) &&
-        ((int32_t)(now_ms - s_config_next_retry_ms) >= 0))
-    {
-        /* 正常采集循环不中断，仅对持续缺失的节点重新下发配置。 */
-        ImuCanTask_RetryMissingNodeConfigs(observed_mask);
-        s_imu_can_stats.cfg_retry_count++;
-        s_config_next_retry_ms = now_ms + IMU_CAN_TASK_CONFIG_RETRY_INTERVAL_MS;
-    }
-    else if ((observed_mask != expected_mask) &&
-             (s_imu_can_stats.cfg_retry_count >= IMU_CAN_TASK_CONFIG_RETRY_LIMIT))
-    {
-        s_imu_can_stats.last_error = 90U;
-    }
-    else if ((observed_mask == expected_mask) && (s_imu_can_stats.last_error == 90U))
-    {
-        s_imu_can_stats.last_error = 0U;
-    }
+    (void)memset(&s_active_recovery, 0, sizeof(s_active_recovery));
+    s_imu_can_stats.recovery_state = IMU_CAN_RECOVERY_IDLE;
+    s_imu_can_stats.recovery_target_node = 0U;
 }
 
 static void ImuCanTask_GetQuaternion(const hi04_sample_t *sample,
@@ -1270,6 +1294,415 @@ static uint16_t ImuCanTask_BuildFreshMask(uint32_t now_ms)
     }
 
     return valid_mask;
+}
+
+static uint8_t ImuCanTask_RecoveryActionDue(uint32_t now_ms)
+{
+    return ((int32_t)(now_ms - s_active_recovery.next_action_ms) >= 0) ? 1U : 0U;
+}
+
+static void ImuCanTask_SetRecoveryState(ImuCanTaskRecoveryState_t state)
+{
+    s_active_recovery.state = state;
+    s_imu_can_stats.recovery_state = (uint32_t)state;
+    if (state == IMU_CAN_RECOVERY_IDLE)
+    {
+        s_imu_can_stats.recovery_target_node = 0U;
+    }
+}
+
+static uint16_t ImuCanTask_BusExpectedMask(uint32_t bus_index)
+{
+    uint16_t mask = 0U;
+    ImuCanTaskBusRuntime_t *bus;
+
+    if (bus_index >= IMU_CAN_TASK_BUS_COUNT)
+    {
+        return 0U;
+    }
+    bus = &s_buses[bus_index];
+    if (bus->config == NULL)
+    {
+        return 0U;
+    }
+
+    for (uint32_t local_i = 0U; local_i < bus->config->config_node_count; local_i++)
+    {
+        uint32_t output_index;
+        if (ImuCanTask_BusOutputIndex(bus, local_i, &output_index) != false)
+        {
+            mask |= (uint16_t)(1U << output_index);
+        }
+    }
+    return mask;
+}
+
+static bool ImuCanTask_FindMissingNode(uint16_t missing_mask,
+                                       uint8_t *bus_index,
+                                       uint8_t *local_index)
+{
+    if ((bus_index == NULL) || (local_index == NULL))
+    {
+        return false;
+    }
+
+    for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
+    {
+        ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
+        if (bus->config == NULL)
+        {
+            continue;
+        }
+        for (uint32_t local_i = 0U; local_i < bus->config->config_node_count; local_i++)
+        {
+            uint32_t output_index;
+            if ((ImuCanTask_BusOutputIndex(bus, local_i, &output_index) != false) &&
+                ((missing_mask & (uint16_t)(1U << output_index)) != 0U))
+            {
+                *bus_index = (uint8_t)bus_i;
+                *local_index = (uint8_t)local_i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool ImuCanTask_QueueRecoveryConfigStep(ImuCanTaskBusRuntime_t *bus,
+                                                uint8_t node_id,
+                                                uint8_t step)
+{
+    uint16_t reg_addr;
+    uint32_t value;
+
+    switch (step)
+    {
+        case 0U:
+            reg_addr = IMU_CAN_TASK_J1939_REG_OUTPUT_EN;
+            value = 1UL;
+            break;
+        case 1U:
+            reg_addr = IMU_CAN_TASK_J1939_OUTPUT_ACCEL;
+            value = IMU_CAN_TASK_J1939_SYNC_TRIGGER_VAL;
+            break;
+        case 2U:
+            reg_addr = IMU_CAN_TASK_J1939_OUTPUT_GYRO;
+            value = IMU_CAN_TASK_J1939_SYNC_TRIGGER_VAL;
+            break;
+        case 3U:
+            reg_addr = IMU_CAN_TASK_J1939_OUTPUT_QUAT;
+            value = IMU_CAN_TASK_J1939_SYNC_TRIGGER_VAL;
+            break;
+        case 4U:
+            reg_addr = IMU_CAN_TASK_J1939_OUTPUT_RPY;
+            value = 0UL;
+            break;
+        case 5U:
+            reg_addr = IMU_CAN_TASK_J1939_OUTPUT_YAW;
+            value = 0UL;
+            break;
+        case 6U:
+            reg_addr = IMU_CAN_TASK_J1939_REG_CONTROL;
+            value = 0UL;
+            break;
+        default:
+            return false;
+    }
+
+    s_imu_can_stats.cfg_active_step = (uint32_t)step + 1U;
+    if (ImuCanTask_QueueJ1939ConfigU32(bus, node_id, reg_addr, value) == false)
+    {
+        s_imu_can_stats.cfg_active_step = 0U;
+        return false;
+    }
+    s_imu_can_stats.cfg_active_step = 0U;
+    return true;
+}
+
+static void ImuCanTask_StartNodeRecovery(uint8_t bus_index,
+                                         uint8_t local_index,
+                                         uint32_t now_ms)
+{
+    ImuCanTaskBusRuntime_t *bus = &s_buses[bus_index];
+
+    s_active_recovery.bus_index = bus_index;
+    s_active_recovery.local_index = local_index;
+    s_active_recovery.config_step = 0U;
+    s_active_recovery.node_attempt = 1U;
+    s_active_recovery.tx_failure_count = 0U;
+    s_active_recovery.next_action_ms = now_ms;
+    s_imu_can_stats.cfg_retry_count++;
+    s_imu_can_stats.recovery_target_node =
+        ImuCanTask_BusLogicalNodeId(bus, local_index);
+    ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_NODE_CONFIG);
+}
+
+static void ImuCanTask_StartBusRecovery(uint8_t bus_index, uint32_t now_ms)
+{
+    s_active_recovery.bus_index = bus_index;
+    s_active_recovery.local_index = 0U;
+    s_active_recovery.config_step = 0U;
+    s_active_recovery.tx_failure_count = 0U;
+    s_active_recovery.next_action_ms = now_ms;
+    s_imu_can_stats.recovery_target_node = 0U;
+    ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_BUS_REINIT);
+}
+
+static void ImuCanTask_RequestFullPowerRecovery(uint32_t now_ms)
+{
+    s_imu_can_stats.last_error = 93U;
+    s_active_recovery.next_action_ms = now_ms;
+    ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_POWER_CYCLE);
+}
+
+static uint8_t ImuCanTask_FindBusOff(uint8_t *bus_index)
+{
+    FDCAN_ProtocolStatusTypeDef protocol_status;
+
+    if (bus_index == NULL)
+    {
+        return 0U;
+    }
+    for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
+    {
+        ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
+        if ((bus->fdcan_started == false) || (bus->port.hfdcan == NULL))
+        {
+            continue;
+        }
+        (void)memset(&protocol_status, 0, sizeof(protocol_status));
+        if ((HAL_FDCAN_GetProtocolStatus(bus->port.hfdcan, &protocol_status) == HAL_OK) &&
+            (protocol_status.BusOff != 0U))
+        {
+            *bus_index = (uint8_t)bus_i;
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_ms)
+{
+    const uint16_t expected_mask = (uint16_t)GLOVE_IMU_VALID_ALL_MASK;
+    ImuCanTaskBusRuntime_t *bus;
+    uint8_t bus_off_index;
+    uint8_t node_id;
+
+    s_imu_can_stats.cfg_verified_node_mask = fresh_mask;
+    s_imu_can_stats.cfg_failed_node_mask = (uint16_t)(expected_mask & ~fresh_mask);
+
+    if ((s_active_recovery.state != IMU_CAN_RECOVERY_BUS_REINIT) &&
+        (s_active_recovery.state != IMU_CAN_RECOVERY_BUS_CONFIG) &&
+        (s_active_recovery.state != IMU_CAN_RECOVERY_BUS_VERIFY) &&
+        (s_active_recovery.state != IMU_CAN_RECOVERY_POWER_CYCLE) &&
+        (ImuCanTask_FindBusOff(&bus_off_index) != 0U))
+    {
+        s_imu_can_stats.last_error = 91U;
+        ImuCanTask_StartBusRecovery(bus_off_index, now_ms);
+    }
+
+    switch (s_active_recovery.state)
+    {
+        case IMU_CAN_RECOVERY_IDLE:
+        {
+            uint16_t missing_mask = (uint16_t)(expected_mask & ~fresh_mask);
+            uint8_t bus_index;
+            uint8_t local_index;
+
+            if (missing_mask == 0U)
+            {
+                s_active_recovery.last_missing_mask = 0U;
+                s_active_recovery.missing_since_ms = 0U;
+                if ((s_imu_can_stats.last_error >= 90U) &&
+                    (s_imu_can_stats.last_error <= 93U))
+                {
+                    s_imu_can_stats.last_error = 0U;
+                }
+                return;
+            }
+            if (missing_mask != s_active_recovery.last_missing_mask)
+            {
+                s_active_recovery.last_missing_mask = missing_mask;
+                s_active_recovery.missing_since_ms = now_ms;
+                return;
+            }
+            if ((uint32_t)(now_ms - s_active_recovery.missing_since_ms) <
+                IMU_CAN_TASK_ACTIVE_LOSS_CONFIRM_MS)
+            {
+                return;
+            }
+            if (ImuCanTask_FindMissingNode(missing_mask, &bus_index, &local_index) != false)
+            {
+                ImuCanTask_StartNodeRecovery(bus_index, local_index, now_ms);
+            }
+            return;
+        }
+
+        case IMU_CAN_RECOVERY_NODE_CONFIG:
+            bus = &s_buses[s_active_recovery.bus_index];
+            if (ImuCanTask_IsNodeFresh(bus, s_active_recovery.local_index, now_ms) != 0U)
+            {
+                ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_IDLE);
+                s_active_recovery.last_missing_mask = 0U;
+                return;
+            }
+            if (ImuCanTask_RecoveryActionDue(now_ms) == 0U)
+            {
+                return;
+            }
+            node_id = (uint8_t)(bus->config->first_node_id + s_active_recovery.local_index);
+            if (ImuCanTask_QueueRecoveryConfigStep(bus,
+                                                    node_id,
+                                                    s_active_recovery.config_step) == false)
+            {
+                s_active_recovery.tx_failure_count++;
+                s_active_recovery.next_action_ms =
+                    now_ms + IMU_CAN_TASK_ACTIVE_CONFIG_STEP_MS;
+                if (s_active_recovery.tx_failure_count >=
+                    IMU_CAN_TASK_ACTIVE_TX_RETRY_LIMIT)
+                {
+                    s_imu_can_stats.last_error = 91U;
+                    ImuCanTask_StartBusRecovery(s_active_recovery.bus_index, now_ms);
+                }
+                return;
+            }
+            s_active_recovery.tx_failure_count = 0U;
+            s_active_recovery.config_step++;
+            s_active_recovery.next_action_ms = now_ms + IMU_CAN_TASK_ACTIVE_CONFIG_STEP_MS;
+            if (s_active_recovery.config_step >= IMU_CAN_TASK_ACTIVE_CONFIG_STEP_COUNT)
+            {
+                s_active_recovery.verify_started_ms = now_ms;
+                ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_NODE_VERIFY);
+            }
+            return;
+
+        case IMU_CAN_RECOVERY_NODE_VERIFY:
+            bus = &s_buses[s_active_recovery.bus_index];
+            if (ImuCanTask_IsNodeFresh(bus, s_active_recovery.local_index, now_ms) != 0U)
+            {
+                ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_IDLE);
+                s_active_recovery.last_missing_mask = 0U;
+                return;
+            }
+            if ((uint32_t)(now_ms - s_active_recovery.verify_started_ms) <
+                IMU_CAN_TASK_ACTIVE_VERIFY_MS)
+            {
+                return;
+            }
+            if (s_active_recovery.node_attempt < IMU_CAN_TASK_CONFIG_RETRY_LIMIT)
+            {
+                s_active_recovery.node_attempt++;
+                s_active_recovery.config_step = 0U;
+                s_active_recovery.tx_failure_count = 0U;
+                s_active_recovery.next_action_ms = now_ms;
+                s_imu_can_stats.cfg_retry_count++;
+                ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_NODE_CONFIG);
+                return;
+            }
+            s_imu_can_stats.last_error = 90U;
+            ImuCanTask_StartBusRecovery(s_active_recovery.bus_index, now_ms);
+            return;
+
+        case IMU_CAN_RECOVERY_BUS_REINIT:
+            if (ImuCanTask_RecoveryActionDue(now_ms) == 0U)
+            {
+                return;
+            }
+            bus = &s_buses[s_active_recovery.bus_index];
+            s_imu_can_stats.recovery_bus_reinit_count++;
+            if ((ImuCanTask_ReinitializeFdcanBus(bus) == false) ||
+                (ImuCanTask_ResetBusDevices(bus) == false))
+            {
+                s_imu_can_stats.last_error = 92U;
+                ImuCanTask_RequestFullPowerRecovery(now_ms);
+                return;
+            }
+            /* 总线重建后逐节点、逐寄存器恢复，另一条CAN总线继续正常采集。 */
+            s_active_recovery.local_index = 0U;
+            s_active_recovery.config_step = 0U;
+            s_active_recovery.tx_failure_count = 0U;
+            s_active_recovery.next_action_ms = now_ms;
+            ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_BUS_CONFIG);
+            return;
+
+        case IMU_CAN_RECOVERY_BUS_CONFIG:
+            if (ImuCanTask_RecoveryActionDue(now_ms) == 0U)
+            {
+                return;
+            }
+            bus = &s_buses[s_active_recovery.bus_index];
+            if (s_active_recovery.local_index >= bus->config->config_node_count)
+            {
+                s_active_recovery.verify_started_ms = now_ms;
+                ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_BUS_VERIFY);
+                return;
+            }
+            node_id = (uint8_t)(bus->config->first_node_id + s_active_recovery.local_index);
+            if (ImuCanTask_QueueRecoveryConfigStep(bus,
+                                                    node_id,
+                                                    s_active_recovery.config_step) == false)
+            {
+                s_active_recovery.tx_failure_count++;
+                s_active_recovery.next_action_ms =
+                    now_ms + IMU_CAN_TASK_ACTIVE_CONFIG_STEP_MS;
+                if (s_active_recovery.tx_failure_count >=
+                    IMU_CAN_TASK_ACTIVE_TX_RETRY_LIMIT)
+                {
+                    ImuCanTask_RequestFullPowerRecovery(now_ms);
+                }
+                return;
+            }
+            s_active_recovery.tx_failure_count = 0U;
+            s_active_recovery.config_step++;
+            if (s_active_recovery.config_step >= IMU_CAN_TASK_ACTIVE_CONFIG_STEP_COUNT)
+            {
+                s_active_recovery.config_step = 0U;
+                s_active_recovery.local_index++;
+            }
+            s_active_recovery.next_action_ms = now_ms + IMU_CAN_TASK_ACTIVE_CONFIG_STEP_MS;
+            return;
+
+        case IMU_CAN_RECOVERY_BUS_VERIFY:
+        {
+            uint16_t bus_mask = ImuCanTask_BusExpectedMask(s_active_recovery.bus_index);
+            if ((fresh_mask & bus_mask) == bus_mask)
+            {
+                ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_IDLE);
+                s_active_recovery.last_missing_mask = 0U;
+                return;
+            }
+            if ((uint32_t)(now_ms - s_active_recovery.verify_started_ms) >=
+                IMU_CAN_TASK_ACTIVE_VERIFY_MS)
+            {
+                s_imu_can_stats.last_error = 92U;
+                ImuCanTask_RequestFullPowerRecovery(now_ms);
+            }
+            return;
+        }
+
+        case IMU_CAN_RECOVERY_POWER_CYCLE:
+            if (fresh_mask == expected_mask)
+            {
+                ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_IDLE);
+                s_active_recovery.last_missing_mask = 0U;
+                s_imu_can_stats.last_error = 0U;
+                return;
+            }
+            if (ImuCanTask_RecoveryActionDue(now_ms) == 0U)
+            {
+                return;
+            }
+            if (SystemManagerTask_RequestPeripheralRecovery() != 0U)
+            {
+                s_imu_can_stats.recovery_power_cycle_count++;
+            }
+            s_active_recovery.next_action_ms = now_ms + IMU_CAN_TASK_ACTIVE_POWER_RETRY_MS;
+            return;
+
+        default:
+            ImuCanTask_ResetConfigurationMonitor();
+            return;
+    }
 }
 
 static void ImuCanTask_PublishSnapshot(void)
@@ -1473,6 +1906,10 @@ static void ImuCanTask_CopyStatsToSnapshot(ImuCanTaskDebugSnapshot_t *snapshot)
     snapshot->cfg_verified_node_mask = s_imu_can_stats.cfg_verified_node_mask;
     snapshot->cfg_failed_node_mask = s_imu_can_stats.cfg_failed_node_mask;
     snapshot->cfg_retry_count = s_imu_can_stats.cfg_retry_count;
+    snapshot->recovery_state = s_imu_can_stats.recovery_state;
+    snapshot->recovery_target_node = s_imu_can_stats.recovery_target_node;
+    snapshot->recovery_bus_reinit_count = s_imu_can_stats.recovery_bus_reinit_count;
+    snapshot->recovery_power_cycle_count = s_imu_can_stats.recovery_power_cycle_count;
     (void)memcpy(snapshot->cfg_last_reply_data,
                  s_imu_can_stats.cfg_last_reply_data,
                  sizeof(snapshot->cfg_last_reply_data));
@@ -1674,9 +2111,13 @@ void ImuCanTask(void *argument)
     {
         if (s_imu_acquisition_enabled == 0U)
         {
-            /* FDCAN完全释放后再确认暂停，保证跨电源周期不保留错误和待发送帧。 */
-            ImuCanTask_ShutdownAllFdcans();
-            s_imu_acquisition_paused = 1U;
+            if (s_imu_acquisition_paused == 0U)
+            {
+                /* FDCAN完全释放后再确认暂停，保证跨电源周期不保留错误和待发送帧。 */
+                ImuCanTask_ShutdownAllFdcans();
+                ImuCanTask_ResetConfigurationMonitor();
+                s_imu_acquisition_paused = 1U;
+            }
             s_imu_recovery_pending = 1U;
             s_imu_fresh_mask = 0U;
             osDelay(10U);
@@ -1738,8 +2179,11 @@ void ImuCanTask(void *argument)
                                 osFlagsWaitAny,
                                 IMU_CAN_TASK_PUBLISH_PERIOD_MS);
         ImuCanTask_DrainAllRxFifos();
-        s_imu_fresh_mask = ImuCanTask_BuildFreshMask(HAL_GetTick());
-        ImuCanTask_UpdateConfigurationMonitor(ImuCanTask_BuildObservedNodeMask());
+        {
+            uint32_t now_ms = HAL_GetTick();
+            s_imu_fresh_mask = ImuCanTask_BuildFreshMask(now_ms);
+            ImuCanTask_ServiceActiveRecovery(s_imu_fresh_mask, now_ms);
+        }
 
 #if IMU_CAN_TASK_ENABLE_PUBLISH
         if ((HAL_GetTick() - last_publish_ms) >= IMU_CAN_TASK_PUBLISH_PERIOD_MS)

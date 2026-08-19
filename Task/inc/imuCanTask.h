@@ -40,6 +40,10 @@ typedef struct
     uint32_t cfg_verified_node_mask;
     uint32_t cfg_failed_node_mask;
     uint32_t cfg_retry_count;
+    uint32_t recovery_state;
+    uint32_t recovery_target_node;
+    uint32_t recovery_bus_reinit_count;
+    uint32_t recovery_power_cycle_count;
     uint32_t cfg_step_ack_count[6];
     uint32_t cfg_step_ack_id[6];
     uint8_t cfg_step_ack_data[6][8];

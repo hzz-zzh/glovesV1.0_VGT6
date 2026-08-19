@@ -120,6 +120,7 @@ void SystemManagerTask_OnPowerKeyEdgeFromIsr(void);
 void SystemManagerTask_OnChargeStatusEdgeFromIsr(void);
 void SystemManagerTask_OnBqInterruptFromIsr(void);
 uint8_t SystemManagerTask_IsPeripheralPowerEnabled(void);
+uint8_t SystemManagerTask_RequestPeripheralRecovery(void);
 
 #ifdef __cplusplus
 }
