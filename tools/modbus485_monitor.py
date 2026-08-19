@@ -86,7 +86,11 @@ MODBUS_TOUCH_COUNT = 68
 MODBUS_TOUCH_DATA_REG_COUNT = 68
 
 MB_FC_READ_SENSOR_SNAPSHOT = 0x41
-SENSOR_SNAPSHOT_METADATA_REG_COUNT = 6
+SENSOR_SNAPSHOT_METADATA_REG_COUNT = 10
+SENSOR_SNAPSHOT_POWER_STATE_INDEX = 6
+SENSOR_SNAPSHOT_IMU_STATUS_INDEX = 7
+SENSOR_SNAPSHOT_JOINT_STATUS_INDEX = 8
+SENSOR_SNAPSHOT_TOUCH_STATUS_INDEX = 9
 SENSOR_SNAPSHOT_SENSOR_REG_COUNT = (
     MODBUS_IMU_DATA_REG_COUNT
     + MODBUS_JOINT_DATA_REG_COUNT
@@ -129,7 +133,13 @@ POWER_STATE_NAMES = {
     2: "ON_LOW",
     3: "USER_OFF",
     4: "LOW_BAT_LOCKOUT",
+    5: "STOPPING",
+    6: "RECOVERING",
+    7: "RECOVERY_FAULT",
 }
+
+SENSOR_READY_POWER_STATES = frozenset((1, 2))
+IMU_ALL_VALID_MASK = (1 << MODBUS_IMU_COUNT) - 1
 
 CHARGE_STATE_NAMES = {
     0: "UNKNOWN",
@@ -1081,10 +1091,35 @@ class GloveSnapshot:
     comm_retries: int = 0
     comm_max_request_ms: float = 0.0
     comm_last_timeout_start: int = 0
+    sensor_data_valid: bool = False
+    sensor_invalid_reason: str = "sensor snapshot not received"
+
+
+def evaluate_sensor_validity(
+    power_state: int,
+    sensor_timestamp_us: int,
+    imu_status: int,
+    joint_status: int,
+    touch_status: int,
+) -> tuple[bool, str]:
+    if power_state not in SENSOR_READY_POWER_STATES:
+        state_name = POWER_STATE_NAMES.get(power_state, f"UNKNOWN({power_state})")
+        return False, f"power state {state_name}"
+    if sensor_timestamp_us <= 0:
+        return False, "sensor snapshot timestamp is invalid"
+    if (imu_status & IMU_ALL_VALID_MASK) != IMU_ALL_VALID_MASK:
+        return False, f"IMU valid mask 0x{imu_status:04X} is incomplete"
+    if (joint_status & (JOINT_STATUS_SNAPSHOT_VALID | JOINT_STATUS_ALGORITHM_VALID)) != (
+        JOINT_STATUS_SNAPSHOT_VALID | JOINT_STATUS_ALGORITHM_VALID
+    ):
+        return False, f"joint status 0x{joint_status:04X} is invalid"
+    if (touch_status & 0x0003) != 0x0003:
+        return False, f"touch status 0x{touch_status:04X} is invalid"
+    return True, "ready"
 
 
 def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> GloveSnapshot:
-    return GloveSnapshot(
+    snapshot = GloveSnapshot(
         timestamp=time.time(),
         basic=client.read_holding_registers(
             slave, REG_BASIC_STATUS_START, REG_BASIC_STATUS_COUNT, timeout_s
@@ -1118,6 +1153,17 @@ def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> Glov
             slave, REG_TOUCH_DATA_START, MODBUS_TOUCH_DATA_REG_COUNT, timeout_s
         ),
     )
+    power_state = decode_power(snapshot.power_regs).system_state
+    sensor_timestamp_us = ros_time_to_us(snapshot.imu_status_regs[0:4])
+    snapshot.sensor_data_valid, snapshot.sensor_invalid_reason = evaluate_sensor_validity(
+        power_state,
+        sensor_timestamp_us,
+        snapshot.imu_status_regs[4],
+        snapshot.joint_status_regs[4],
+        snapshot.touch_status_regs[4],
+    )
+    snapshot.sensor_timestamp_us = sensor_timestamp_us
+    return snapshot
 
 
 def empty_snapshot() -> GloveSnapshot:
@@ -1152,37 +1198,90 @@ def read_sensor_snapshot_120hz(
         slave, fast_timeout_s, retries=SENSOR_120HZ_RETRIES
     )
     sensor_frame_id = snapshot_regs[0] | (snapshot_regs[1] << 16)
-    sensor_timestamp_us = ros_time_to_us(snapshot_regs[2:6])
+    sensor_time_regs = snapshot_regs[2:6]
+    sensor_timestamp_us = ros_time_to_us(sensor_time_regs)
+    power_state = snapshot_regs[SENSOR_SNAPSHOT_POWER_STATE_INDEX]
+    imu_status = snapshot_regs[SENSOR_SNAPSHOT_IMU_STATUS_INDEX]
+    joint_status = snapshot_regs[SENSOR_SNAPSHOT_JOINT_STATUS_INDEX]
+    touch_status = snapshot_regs[SENSOR_SNAPSHOT_TOUCH_STATUS_INDEX]
     sensor_regs = snapshot_regs[SENSOR_SNAPSHOT_METADATA_REG_COUNT:]
     imu_end = MODBUS_IMU_DATA_REG_COUNT
     joint_end = imu_end + MODBUS_JOINT_DATA_REG_COUNT
-    imu_regs = sensor_regs[:imu_end]
-    joint_regs = sensor_regs[imu_end:joint_end]
-    touch_regs = sensor_regs[joint_end:]
+    received_imu_regs = sensor_regs[:imu_end]
+    received_joint_regs = sensor_regs[imu_end:joint_end]
+    received_touch_regs = sensor_regs[joint_end:]
+
+    sensor_data_valid, invalid_reason = evaluate_sensor_validity(
+        power_state,
+        sensor_timestamp_us,
+        imu_status,
+        joint_status,
+        touch_status,
+    )
+
+    power_regs = list(base.power_regs)
+    power_regs[6] = power_state
+
+    joint_valid_bits = 0
+    if sensor_data_valid:
+        for index in range(MODBUS_JOINT_COUNT):
+            pos = index * 2
+            value = regs_to_f32_le_words(
+                received_joint_regs[pos], received_joint_regs[pos + 1]
+            )
+            if math.isfinite(value) and -999999936.0 < value < 999999936.0:
+                joint_valid_bits |= 1 << index
+
+    if sensor_data_valid:
+        imu_regs = received_imu_regs
+        joint_regs = received_joint_regs
+        touch_regs = received_touch_regs
+        displayed_frame_id = sensor_frame_id
+        displayed_timestamp_us = sensor_timestamp_us
+    else:
+        # 无效响应只更新状态，不让固件返回的占位0覆盖最后一帧有效数据。
+        imu_regs = base.imu_regs
+        joint_regs = base.joint_regs
+        touch_regs = base.touch_regs
+        displayed_frame_id = base.sensor_frame_id
+        displayed_timestamp_us = base.sensor_timestamp_us
 
     comm_stats = client.get_low_latency_stats()
     return GloveSnapshot(
         timestamp=time.time(),
         basic=base.basic,
         system=base.system,
-        power_regs=base.power_regs,
+        power_regs=power_regs,
         work_state=base.work_state,
-        imu_status_regs=base.imu_status_regs,
+        imu_status_regs=[*sensor_time_regs, imu_status],
         calib_ctrl_regs=base.calib_ctrl_regs,
-        joint_status_regs=base.joint_status_regs,
-        touch_status_regs=base.touch_status_regs,
+        joint_status_regs=[
+            *sensor_time_regs,
+            joint_status,
+            joint_valid_bits & 0xFFFF,
+            (joint_valid_bits >> 16) & 0xFFFF,
+        ],
+        touch_status_regs=[
+            *sensor_time_regs,
+            touch_status,
+            MODBUS_TOUCH_COUNT if sensor_data_valid else 0,
+            MODBUS_TOUCH_DATA_REG_COUNT,
+            0,
+        ],
         imu_regs=imu_regs,
         joint_regs=joint_regs,
         touch_regs=touch_regs,
         poll_mode="sensors120",
         actual_hz=actual_hz,
-        sensor_frame_id=sensor_frame_id,
-        sensor_timestamp_us=sensor_timestamp_us,
+        sensor_frame_id=displayed_frame_id,
+        sensor_timestamp_us=displayed_timestamp_us,
         comm_requests=comm_stats.requests,
         comm_timeouts=comm_stats.timeouts,
         comm_retries=comm_stats.retries,
         comm_max_request_ms=comm_stats.max_request_ms,
         comm_last_timeout_start=comm_stats.last_timeout_start,
+        sensor_data_valid=sensor_data_valid,
+        sensor_invalid_reason=invalid_reason,
     )
 
 
@@ -2257,29 +2356,35 @@ class ModbusMonitorApp(tk.Tk):
                     rate_count += 1
                     now = time.perf_counter()
 
-                    if last_sensor_frame_id == snapshot.sensor_frame_id:
-                        duplicate_responses += 1
-                    else:
-                        last_new_sensor_frame_time = now
-                    last_sensor_frame_id = snapshot.sensor_frame_id
-
-                    if sensor_rate_start_frame_id is None:
-                        sensor_rate_start_frame_id = snapshot.sensor_frame_id
-                        sensor_rate_started = now
-
-                    sensor_rate_elapsed = now - sensor_rate_started
-                    if sensor_rate_elapsed >= 1.0:
-                        frame_delta = (
-                            snapshot.sensor_frame_id - sensor_rate_start_frame_id
-                        ) & 0xFFFFFFFF
-                        if frame_delta <= 0x7FFFFFFF:
-                            # 用帧号增量统计完整传感器帧率，避免依赖尚未初始化的设备时间戳。
-                            sensor_hz = frame_delta / sensor_rate_elapsed
+                    if snapshot.sensor_data_valid:
+                        if last_sensor_frame_id == snapshot.sensor_frame_id:
+                            duplicate_responses += 1
                         else:
-                            # 从机复位导致帧号回退时重新建立统计窗口。
-                            sensor_hz = 0.0
-                        sensor_rate_start_frame_id = snapshot.sensor_frame_id
-                        sensor_rate_started = now
+                            last_new_sensor_frame_time = now
+                        last_sensor_frame_id = snapshot.sensor_frame_id
+
+                        if sensor_rate_start_frame_id is None:
+                            sensor_rate_start_frame_id = snapshot.sensor_frame_id
+                            sensor_rate_started = now
+
+                        sensor_rate_elapsed = now - sensor_rate_started
+                        if sensor_rate_elapsed >= 1.0:
+                            frame_delta = (
+                                snapshot.sensor_frame_id - sensor_rate_start_frame_id
+                            ) & 0xFFFFFFFF
+                            if frame_delta <= 0x7FFFFFFF:
+                                # 用帧号增量统计完整传感器帧率，避免依赖设备时间戳精度。
+                                sensor_hz = frame_delta / sensor_rate_elapsed
+                            else:
+                                # 从机复位导致帧号回退时重新建立统计窗口。
+                                sensor_hz = 0.0
+                            sensor_rate_start_frame_id = snapshot.sensor_frame_id
+                            sensor_rate_started = now
+                    else:
+                        sensor_hz = 0.0
+                        last_sensor_frame_id = None
+                        sensor_rate_start_frame_id = None
+
                     if (now - last_new_sensor_frame_time) >= 1.0:
                         sensor_hz = 0.0
 
@@ -2377,8 +2482,13 @@ class ModbusMonitorApp(tk.Tk):
             )
         else:
             poll_text = "Full poll"
+        if snapshot.sensor_data_valid:
+            data_status = "DATA READY"
+        else:
+            data_status = f"DATA PAUSED: {snapshot.sensor_invalid_reason}"
         self.status_var.set(
-            f"OK {poll_text} reads={self.read_count} errors={self.error_count} "
+            f"{data_status} | {poll_text} reads={self.read_count} "
+            f"errors={self.error_count} "
             f"host={time.strftime('%H:%M:%S', time.localtime(snapshot.timestamp))}"
         )
 
@@ -2389,6 +2499,8 @@ class ModbusMonitorApp(tk.Tk):
             f"Sensor frame Hz   : {snapshot.sensor_hz:.3f}",
             f"Sensor frame id   : {snapshot.sensor_frame_id}",
             f"Sensor timestamp  : {snapshot.sensor_timestamp_us} us",
+            f"Sensor data       : {'VALID' if snapshot.sensor_data_valid else 'INVALID'}",
+            f"Data reason       : {snapshot.sensor_invalid_reason}",
             f"Duplicate replies : {snapshot.duplicate_responses}",
             f"Slave addr reg    : {snapshot.basic[0]}",
             f"Baud code reg     : {snapshot.basic[1]}",
@@ -2468,38 +2580,59 @@ class ModbusMonitorApp(tk.Tk):
         set_text(self.power_text, "\n".join(power_lines))
 
         imus = decode_imu(snapshot.imu_regs)
-        imu_lines = ["idx " + " ".join(f"{name:>13}" for name in IMU_FIELDS)]
-        for index, values in enumerate(imus):
-            imu_lines.append(
-                f"{index:02d}  " + " ".join(f"{value:13.6f}" for value in values)
-            )
+        if snapshot.sensor_data_valid:
+            imu_lines = ["idx " + " ".join(f"{name:>13}" for name in IMU_FIELDS)]
+            for index, values in enumerate(imus):
+                imu_lines.append(
+                    f"{index:02d}  " + " ".join(f"{value:13.6f}" for value in values)
+                )
+        else:
+            imu_lines = [
+                "IMU data unavailable",
+                f"reason: {snapshot.sensor_invalid_reason}",
+                "The last valid frame is retained internally and is not displayed as current data.",
+            ]
         set_text(self.imu_text, "\n".join(imu_lines))
 
         joints = decode_joint(snapshot.joint_regs)
-        joint_lines = [
-            "Joint angles deg",
-            f"flags=0x{joint_flags:04X} ({format_flags(joint_flags, JOINT_FLAG_NAMES)}) "
-            f"valid_bits=0x{joint_valid:08X}",
-            "",
-        ]
-        for index in range(0, MODBUS_JOINT_COUNT, 3):
-            row = []
-            for joint_index in range(index, min(index + 3, MODBUS_JOINT_COUNT)):
-                row.append(f"J{joint_index:02d}={joints[joint_index]:9.3f}")
-            joint_lines.append("  ".join(row))
+        if snapshot.sensor_data_valid:
+            joint_lines = [
+                "Joint angles deg",
+                f"flags=0x{joint_flags:04X} ({format_flags(joint_flags, JOINT_FLAG_NAMES)}) "
+                f"valid_bits=0x{joint_valid:08X}",
+                "",
+            ]
+            for index in range(0, MODBUS_JOINT_COUNT, 3):
+                row = []
+                for joint_index in range(index, min(index + 3, MODBUS_JOINT_COUNT)):
+                    row.append(f"J{joint_index:02d}={joints[joint_index]:9.3f}")
+                joint_lines.append("  ".join(row))
+        else:
+            joint_lines = [
+                "Joint data unavailable",
+                f"reason: {snapshot.sensor_invalid_reason}",
+                "Joint processing is paused until a complete valid sensor frame arrives.",
+            ]
         set_text(self.joint_text, "\n".join(joint_lines))
 
-        touch_lines = [
-            "Touch raw values",
-            f"flags=0x{touch_flags:04X} ({format_flags(touch_flags, TOUCH_FLAG_NAMES)}) "
-            f"count={touch_count} capacity={touch_capacity}",
-            "",
-        ]
-        for index in range(0, MODBUS_TOUCH_COUNT, 17):
-            row = snapshot.touch_regs[index : index + 17]
-            touch_lines.append(
-                f"{index:02d}: " + " ".join(f"{value:5d}" for value in row)
-            )
+        if snapshot.sensor_data_valid:
+            touch_lines = [
+                "Touch raw values",
+                f"flags=0x{touch_flags:04X} ({format_flags(touch_flags, TOUCH_FLAG_NAMES)}) "
+                f"count={touch_count} capacity={touch_capacity}",
+                "",
+            ]
+            for index in range(0, MODBUS_TOUCH_COUNT, 17):
+                row = snapshot.touch_regs[index : index + 17]
+                touch_lines.append(
+                    f"{index:02d}: " + " ".join(f"{value:5d}" for value in row)
+                )
+        else:
+            touch_lines = [
+                "Touch data unavailable",
+                f"reason: {snapshot.sensor_invalid_reason}",
+                "The last valid touch frame is retained internally and is not displayed as current data.",
+            ]
         set_text(self.touch_text, "\n".join(touch_lines))
 
         raw_lines = [
@@ -2604,6 +2737,12 @@ class ModbusMonitorApp(tk.Tk):
     def save_csv(self) -> None:
         if self.last_snapshot is None:
             messagebox.showinfo("Save CSV", "No snapshot to save")
+            return
+        if not self.last_snapshot.sensor_data_valid:
+            messagebox.showwarning(
+                "Save CSV",
+                f"Sensor data is invalid: {self.last_snapshot.sensor_invalid_reason}",
+            )
             return
         path = filedialog.asksaveasfilename(
             title="Save snapshot",

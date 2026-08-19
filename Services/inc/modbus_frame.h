@@ -38,6 +38,7 @@ typedef enum
 void Modbus_SetSlaveAddress(uint8_t address);
 uint8_t Modbus_GetSlaveAddress(void);
 uint16_t Modbus_Crc16(const uint8_t *data, uint16_t len);
+void Modbus_InvalidateSensorSnapshots(void);
 void Modbus_UpdateFullFrameSnapshot(const GloveFullFrame_t *frame);
 
 ModbusResult_t Modbus_ProcessRequest(const uint8_t *rx_buf,

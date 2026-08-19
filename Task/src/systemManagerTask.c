@@ -14,7 +14,10 @@
 #include "imuCanTask.h"
 #include "main.h"
 #include "max17043.h"
+#include "modbus_frame.h"
 #include "touchAdcTask.h"
+
+extern TIM_HandleTypeDef htim2;
 
 #define SYSTEM_MANAGER_LOOP_PERIOD_MS                (10U)
 #define SYSTEM_MANAGER_BQ_READ_PERIOD_MS             (250U)
@@ -120,6 +123,51 @@ static uint16_t SystemManager_AbsDiffU16(uint16_t left, uint16_t right)
     return (left >= right) ? (uint16_t)(left - right) : (uint16_t)(right - left);
 }
 
+static void SystemManager_SetImuSyncPinAnalog(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    gpio.Pin = IMU_SYNC_Pin;
+    gpio.Mode = GPIO_MODE_ANALOG;
+    gpio.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(IMU_SYNC_GPIO_Port, &gpio);
+}
+
+static void SystemManager_StopAcquisitionSync(void)
+{
+    __HAL_TIM_DISABLE_IT(&htim2, TIM_IT_UPDATE);
+    (void)HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_2);
+    __HAL_TIM_SET_COUNTER(&htim2, 0U);
+    __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
+    HAL_NVIC_ClearPendingIRQ(TIM2_IRQn);
+    SystemManager_SetImuSyncPinAnalog();
+    AcqSync_Reset();
+}
+
+static uint8_t SystemManager_StartAcquisitionSync(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    gpio.Pin = IMU_SYNC_Pin;
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Pull = GPIO_PULLDOWN;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    gpio.Alternate = GPIO_AF1_TIM2;
+    HAL_GPIO_Init(IMU_SYNC_GPIO_Port, &gpio);
+
+    __HAL_TIM_SET_COUNTER(&htim2, 0U);
+    __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
+    HAL_NVIC_ClearPendingIRQ(TIM2_IRQn);
+    if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
+    {
+        SystemManager_SetImuSyncPinAnalog();
+        return 0U;
+    }
+    __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
+    __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_UPDATE);
+    return 1U;
+}
+
 static void SystemManager_SetChargeAllowed(uint8_t allowed)
 {
     s_charge_allowed = (allowed != 0U) ? 1U : 0U;
@@ -155,6 +203,7 @@ static uint8_t SystemManager_TryFinalizePeripheralStop(void)
         return 0U;
     }
 
+    SystemManager_StopAcquisitionSync();
     DataManager_FlushAcquisitionQueues();
     HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_RESET);
@@ -180,6 +229,7 @@ static uint8_t SystemManager_StopPeripheralPower(GlovePowerState_t target_state)
         s_power_stop_target_state = target_state;
         s_power_stop_pending = 1U;
         s_power_status.system_state = GLOVE_POWER_STATE_STOPPING;
+        Modbus_InvalidateSensorSnapshots();
         ImuCanTask_SetAcquisitionEnabled(0U);
         TouchAdcTask_SetAcquisitionEnabled(0U);
         if (SystemManager_WaitAcquisitionPaused(SYSTEM_MANAGER_POWER_STOP_TIMEOUT_MS) == 0U)
@@ -197,12 +247,23 @@ static void SystemManager_StartPeripheralPower(void)
 {
     if (s_periph_power_enabled == 0U)
     {
+        Modbus_InvalidateSensorSnapshots();
         HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_SET);
         HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_RESET);
         osDelay(SystemManager_MsToTicks(10U));
         HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_SET);
         osDelay(SystemManager_MsToTicks(100U));
         AcqSync_Reset();
+        if (SystemManager_StartAcquisitionSync() == 0U)
+        {
+            /* 同步时钟启动失败时重新关闭电源，禁止无同步条件下进入采集。 */
+            HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_RESET);
+            s_periph_power_enabled = 0U;
+            s_power_status.system_state = GLOVE_POWER_STATE_RECOVERY_FAULT;
+            printf("[Power] acquisition sync start failed\r\n");
+            return;
+        }
         TouchAdcTask_SetAcquisitionEnabled(1U);
         ImuCanTask_SetAcquisitionEnabled(1U);
         s_periph_power_enabled = 1U;
