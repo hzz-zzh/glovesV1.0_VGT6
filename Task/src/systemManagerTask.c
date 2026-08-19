@@ -9,6 +9,7 @@
 #include "acq_sync.h"
 #include "bq25622.h"
 #include "data_manager.h"
+#include "dataProcessTask.h"
 #include "i2c_bus.h"
 #include "imuCanTask.h"
 #include "main.h"
@@ -31,7 +32,8 @@
 #define SYSTEM_MANAGER_POWER_KEY_DEBOUNCE_MS         (20U)
 #define SYSTEM_MANAGER_POWER_KEY_LONG_PRESS_MS       (600U)
 #define SYSTEM_MANAGER_POWER_KEY_PRESSED_LEVEL       GPIO_PIN_RESET
-#define SYSTEM_MANAGER_POWER_STOP_TIMEOUT_MS         (100U)
+#define SYSTEM_MANAGER_POWER_STOP_TIMEOUT_MS         (500U)
+#define SYSTEM_MANAGER_RECOVERY_TIMEOUT_MS           (30000U)
 #define SYSTEM_MANAGER_LOW_VOLTAGE_MV                (3300U)
 #define SYSTEM_MANAGER_LOW_RELEASE_VOLTAGE_MV        (3650U)
 #define SYSTEM_MANAGER_CRITICAL_VOLTAGE_MV           (3200U)
@@ -93,6 +95,11 @@ static uint8_t s_low_release_count;
 static uint8_t s_critical_count;
 static uint8_t s_critical_release_count;
 static uint8_t s_lockout_release_count;
+static uint8_t s_power_stop_pending;
+static GlovePowerState_t s_power_stop_target_state;
+static uint32_t s_recovery_started_ms;
+static uint32_t s_recovery_full_frame_baseline;
+static uint8_t s_recovery_producers_ready;
 
 static uint32_t SystemManager_MsToTicks(uint32_t timeout_ms)
 {
@@ -136,18 +143,54 @@ static uint8_t SystemManager_WaitAcquisitionPaused(uint32_t timeout_ms)
     return 1U;
 }
 
-static void SystemManager_StopPeripheralPower(GlovePowerState_t target_state)
+static uint8_t SystemManager_TryFinalizePeripheralStop(void)
 {
+    if (s_power_stop_pending == 0U)
+    {
+        return 1U;
+    }
+    if ((ImuCanTask_IsAcquisitionPaused() == 0U) ||
+        (TouchAdcTask_IsAcquisitionPaused() == 0U))
+    {
+        return 0U;
+    }
+
+    DataManager_FlushAcquisitionQueues();
+    HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_RESET);
+    s_periph_power_enabled = 0U;
+    s_power_status.system_state = (uint8_t)s_power_stop_target_state;
+    s_power_stop_pending = 0U;
+    return 1U;
+}
+
+static uint8_t SystemManager_StopPeripheralPower(GlovePowerState_t target_state)
+{
+    if (s_power_stop_pending != 0U)
+    {
+        if (target_state == GLOVE_POWER_STATE_LOW_BAT_LOCKOUT)
+        {
+            s_power_stop_target_state = target_state;
+        }
+        return SystemManager_TryFinalizePeripheralStop();
+    }
+
     if (s_periph_power_enabled != 0U)
     {
+        s_power_stop_target_state = target_state;
+        s_power_stop_pending = 1U;
+        s_power_status.system_state = GLOVE_POWER_STATE_STOPPING;
         ImuCanTask_SetAcquisitionEnabled(0U);
         TouchAdcTask_SetAcquisitionEnabled(0U);
-        (void)SystemManager_WaitAcquisitionPaused(SYSTEM_MANAGER_POWER_STOP_TIMEOUT_MS);
-        DataManager_FlushAcquisitionQueues();
-        HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_RESET);
-        s_periph_power_enabled = 0U;
+        if (SystemManager_WaitAcquisitionPaused(SYSTEM_MANAGER_POWER_STOP_TIMEOUT_MS) == 0U)
+        {
+            /* 未安全暂停时保持供电，由主循环继续等待，禁止强制切断外设电源。 */
+            return 0U;
+        }
+        return SystemManager_TryFinalizePeripheralStop();
     }
     s_power_status.system_state = (uint8_t)target_state;
+    return 1U;
 }
 
 static void SystemManager_StartPeripheralPower(void)
@@ -163,10 +206,66 @@ static void SystemManager_StartPeripheralPower(void)
         TouchAdcTask_SetAcquisitionEnabled(1U);
         ImuCanTask_SetAcquisitionEnabled(1U);
         s_periph_power_enabled = 1U;
+        s_recovery_started_ms = SystemManager_GetTimestampMs();
+        s_recovery_producers_ready = 0U;
+        s_power_status.system_state = GLOVE_POWER_STATE_RECOVERING;
+        return;
     }
     s_power_status.system_state =
         (s_power_status.battery_level == GLOVE_BATTERY_LEVEL_NORMAL) ?
         GLOVE_POWER_STATE_ON_NORMAL : GLOVE_POWER_STATE_ON_LOW;
+}
+
+static void SystemManager_ServicePeripheralRecovery(void)
+{
+    DataProcessStats_t stats;
+    uint8_t imu_ready;
+    uint8_t touch_ready;
+
+    if ((s_periph_power_enabled == 0U) ||
+        ((s_power_status.system_state != GLOVE_POWER_STATE_RECOVERING) &&
+         (s_power_status.system_state != GLOVE_POWER_STATE_RECOVERY_FAULT)))
+    {
+        return;
+    }
+
+    imu_ready = ImuCanTask_IsRecoveryReady();
+    touch_ready = TouchAdcTask_IsRecoveryReady();
+    if ((imu_ready != 0U) && (touch_ready != 0U))
+    {
+        DataProcessTask_GetStats(&stats);
+        if (s_recovery_producers_ready == 0U)
+        {
+            /* 从两个采集源均就绪之后开始等待新的FullFrame，排除旧队列数据。 */
+            s_recovery_full_frame_baseline = stats.full_frames_published;
+            s_recovery_producers_ready = 1U;
+        }
+        else if (stats.full_frames_published != s_recovery_full_frame_baseline)
+        {
+            s_power_status.system_state =
+                (s_power_status.battery_level == GLOVE_BATTERY_LEVEL_NORMAL) ?
+                GLOVE_POWER_STATE_ON_NORMAL : GLOVE_POWER_STATE_ON_LOW;
+            printf("[Power] peripheral recovery ready imu=0x%04X full=%lu\r\n",
+                   (unsigned int)ImuCanTask_GetFreshMask(),
+                   (unsigned long)stats.full_frames_published);
+            return;
+        }
+    }
+    else
+    {
+        s_recovery_producers_ready = 0U;
+    }
+
+    if (((uint32_t)(SystemManager_GetTimestampMs() - s_recovery_started_ms) >=
+         SYSTEM_MANAGER_RECOVERY_TIMEOUT_MS) &&
+        (s_power_status.system_state == GLOVE_POWER_STATE_RECOVERING))
+    {
+        s_power_status.system_state = GLOVE_POWER_STATE_RECOVERY_FAULT;
+        printf("[Power] peripheral recovery timeout imu_ready=%u touch_ready=%u mask=0x%04X\r\n",
+               (unsigned int)imu_ready,
+               (unsigned int)touch_ready,
+               (unsigned int)ImuCanTask_GetFreshMask());
+    }
 }
 
 uint8_t SystemManagerTask_IsPeripheralPowerEnabled(void)
@@ -352,12 +451,14 @@ static void SystemManager_ServicePowerKey(void)
         s_power_key_off_wake_armed = 0U;
         taskEXIT_CRITICAL();
         s_power_key_last_trigger_elapsed_ms = (uint32_t)(now - press_start_ms);
-        SystemManager_StopPeripheralPower(GLOVE_POWER_STATE_USER_OFF);
+        uint8_t power_off_complete =
+            SystemManager_StopPeripheralPower(GLOVE_POWER_STATE_USER_OFF);
         s_power_key_last_poweroff_elapsed_ms =
             (uint32_t)(HAL_GetTick() - press_start_ms);
-        printf("[Power] peripheral power off trigger=%lums rail_off=%lums\r\n",
+        printf("[Power] peripheral power off trigger=%lums elapsed=%lums complete=%u\r\n",
                (unsigned long)s_power_key_last_trigger_elapsed_ms,
-               (unsigned long)s_power_key_last_poweroff_elapsed_ms);
+               (unsigned long)s_power_key_last_poweroff_elapsed_ms,
+               (unsigned int)power_off_complete);
     }
 }
 
@@ -608,8 +709,10 @@ static void SystemManager_ApplyCriticalProtection(void)
     {
         if (s_periph_power_enabled != 0U)
         {
-            SystemManager_StopPeripheralPower(GLOVE_POWER_STATE_LOW_BAT_LOCKOUT);
-            printf("[Power] peripheral power off by critical battery\r\n");
+            uint8_t power_off_complete =
+                SystemManager_StopPeripheralPower(GLOVE_POWER_STATE_LOW_BAT_LOCKOUT);
+            printf("[Power] peripheral power off by critical battery complete=%u\r\n",
+                   (unsigned int)power_off_complete);
         }
         else
         {
@@ -707,7 +810,10 @@ static void SystemManager_EvaluateBatteryLevel(void)
         }
     }
 
-    if (s_periph_power_enabled != 0U)
+    if ((s_periph_power_enabled != 0U) &&
+        (s_power_status.system_state != GLOVE_POWER_STATE_STOPPING) &&
+        (s_power_status.system_state != GLOVE_POWER_STATE_RECOVERING) &&
+        (s_power_status.system_state != GLOVE_POWER_STATE_RECOVERY_FAULT))
     {
         s_power_status.system_state =
             (s_power_status.battery_level == GLOVE_BATTERY_LEVEL_NORMAL) ?
@@ -835,6 +941,8 @@ void SystemManagerTask(void *argument)
     for (;;)
     {
         SystemManager_ServicePowerKey();
+        (void)SystemManager_TryFinalizePeripheralStop();
+        SystemManager_ServicePeripheralRecovery();
 
         if ((s_periph_power_enabled != 0U) &&
             (s_power_key_last_raw_pressed != 0U) &&

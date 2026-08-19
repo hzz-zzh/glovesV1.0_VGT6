@@ -80,6 +80,7 @@ uint32_t ImuCanTask_GetNodeCount(void);
 uint16_t ImuCanTask_GetFreshMask(void);
 void ImuCanTask_SetAcquisitionEnabled(uint8_t enabled);
 uint8_t ImuCanTask_IsAcquisitionPaused(void);
+uint8_t ImuCanTask_IsRecoveryReady(void);
 
 #ifdef __cplusplus
 }

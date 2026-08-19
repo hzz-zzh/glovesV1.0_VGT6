@@ -63,6 +63,7 @@ static const uint8_t s_touch_rows_sel_low[TOUCH_ADC_CHANNEL_COUNT] =
 static uint32_t s_touch_adc_dma_storage[TOUCH_ADC_CHANNEL_COUNT / 2U];
 static volatile uint8_t s_touch_acquisition_enabled = 1U;
 static volatile uint8_t s_touch_acquisition_paused = 0U;
+static volatile uint8_t s_touch_recovery_ready = 0U;
 static osThreadId_t s_touch_adc_task_id = NULL;
 static uint8_t s_touch_adc_trace_frame = 0U;
 static uint8_t s_touch_adc_trace_dma_once = 0U;
@@ -601,6 +602,12 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
 
   for (col = TOUCH_ADC_SCAN_FIRST_COLUMN; col <= TOUCH_ADC_SCAN_LAST_COLUMN; col++)
   {
+    if (s_touch_acquisition_enabled == 0U)
+    {
+      TouchAdcTask_DisableColumns();
+      return GLOVE_STATUS_NOT_READY;
+    }
+
     TouchAdcTask_Trace("col_begin", col, 0U);
     TouchAdcTask_SelectColumn(col);
     TouchAdcTask_Trace("col_selected", col, 0U);
@@ -615,6 +622,12 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
     {
       TouchAdcTask_DisableColumns();
       return status;
+    }
+
+    if (s_touch_acquisition_enabled == 0U)
+    {
+      TouchAdcTask_DisableColumns();
+      return GLOVE_STATUS_NOT_READY;
     }
 
     TouchAdcTask_Trace("row_low_begin", col, 0U);
@@ -640,11 +653,17 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
 void TouchAdcTask_SetAcquisitionEnabled(uint8_t enabled)
 {
   s_touch_acquisition_enabled = (enabled != 0U) ? 1U : 0U;
+  s_touch_recovery_ready = 0U;
 }
 
 uint8_t TouchAdcTask_IsAcquisitionPaused(void)
 {
   return s_touch_acquisition_paused;
+}
+
+uint8_t TouchAdcTask_IsRecoveryReady(void)
+{
+  return s_touch_recovery_ready;
 }
 
 void TouchAdcTask(void *argument)
@@ -706,7 +725,7 @@ void TouchAdcTask(void *argument)
     {
       alloc_fail_count = 0U;
       status = TouchAdcTask_CaptureFrame(touch, &sync);
-      if (status == GLOVE_STATUS_OK)
+      if ((status == GLOVE_STATUS_OK) && (s_touch_acquisition_enabled != 0U))
       {
         error_count = 0U;
         TouchAdcTask_PrintSamples(seq, touch);
@@ -719,12 +738,17 @@ void TouchAdcTask(void *argument)
         else
         {
           publish_fail_count = 0U;
+          /* 成功发布重新上电后的第一帧，触摸采集才算真正恢复。 */
+          s_touch_recovery_ready = 1U;
         }
       }
       else
       {
-        error_count++;
-        TouchAdcTask_PrintError(seq, status, error_count);
+        if (s_touch_acquisition_enabled != 0U)
+        {
+          error_count++;
+          TouchAdcTask_PrintError(seq, status, error_count);
+        }
         (void)DataManager_ReleaseTouchSensor(touch);
       }
     }

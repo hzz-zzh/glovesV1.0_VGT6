@@ -98,6 +98,7 @@ typedef struct
     uint32_t node_accel_rx_ms[IMU_CAN_TASK_MAX_NODES_PER_BUS];
     uint32_t node_gyro_rx_ms[IMU_CAN_TASK_MAX_NODES_PER_BUS];
     uint32_t node_quat_rx_ms[IMU_CAN_TASK_MAX_NODES_PER_BUS];
+    bool fdcan_initialized;
     bool fdcan_started;
 } ImuCanTaskBusRuntime_t;
 
@@ -148,6 +149,8 @@ static const ImuCanTaskBusConfig_t s_bus_configs[IMU_CAN_TASK_BUS_COUNT] =
 static ImuCanTaskBusRuntime_t s_buses[IMU_CAN_TASK_BUS_COUNT];
 static volatile uint8_t s_imu_acquisition_enabled = 1U;
 static volatile uint8_t s_imu_acquisition_paused = 0U;
+static volatile uint8_t s_imu_recovery_ready = 0U;
+static uint8_t s_imu_recovery_pending;
 static volatile uint16_t s_imu_fresh_mask = 0U;
 static ImuCanTaskStats_t s_imu_can_stats;
 static uint32_t s_sensor_seq;
@@ -411,6 +414,64 @@ static void ImuCanTask_EnableFdcanIrq(FDCAN_HandleTypeDef *hfdcan)
 #endif
 }
 
+static void ImuCanTask_DisableFdcanIrq(FDCAN_HandleTypeDef *hfdcan)
+{
+    if (hfdcan == NULL)
+    {
+        return;
+    }
+
+    if (hfdcan->Instance == FDCAN1)
+    {
+        HAL_NVIC_DisableIRQ(FDCAN1_IT0_IRQn);
+        HAL_NVIC_ClearPendingIRQ(FDCAN1_IT0_IRQn);
+    }
+#if defined(FDCAN2) && defined(FDCAN2_IT0_IRQn)
+    else if (hfdcan->Instance == FDCAN2)
+    {
+        HAL_NVIC_DisableIRQ(FDCAN2_IT0_IRQn);
+        HAL_NVIC_ClearPendingIRQ(FDCAN2_IT0_IRQn);
+    }
+#endif
+}
+
+static void ImuCanTask_ShutdownFdcan(ImuCanTaskBusRuntime_t *bus)
+{
+    FDCAN_HandleTypeDef *hfdcan;
+
+    if ((bus == NULL) || (bus->port.hfdcan == NULL))
+    {
+        return;
+    }
+
+    hfdcan = bus->port.hfdcan;
+    ImuCanTask_DisableFdcanIrq(hfdcan);
+    if (bus->fdcan_started != false)
+    {
+        (void)HAL_FDCAN_DeactivateNotification(hfdcan,
+                                               FDCAN_IT_RX_FIFO0_NEW_MESSAGE);
+        if (HAL_FDCAN_Stop(hfdcan) != HAL_OK)
+        {
+            s_imu_can_stats.last_error = 6U;
+        }
+    }
+    if ((bus->fdcan_initialized != false) &&
+        (HAL_FDCAN_DeInit(hfdcan) != HAL_OK))
+    {
+        s_imu_can_stats.last_error = 7U;
+    }
+    bus->fdcan_initialized = false;
+    bus->fdcan_started = false;
+}
+
+static void ImuCanTask_ShutdownAllFdcans(void)
+{
+    for (uint32_t i = 0U; i < IMU_CAN_TASK_BUS_COUNT; i++)
+    {
+        ImuCanTask_ShutdownFdcan(&s_buses[i]);
+    }
+}
+
 static bool ImuCanTask_ConfigFdcan(ImuCanTaskBusRuntime_t *bus)
 {
     FDCAN_FilterTypeDef filter;
@@ -470,6 +531,49 @@ static bool ImuCanTask_ConfigFdcan(ImuCanTaskBusRuntime_t *bus)
     ImuCanTask_EnableFdcanIrq(bus->port.hfdcan);
     bus->fdcan_started = true;
     return true;
+}
+
+static bool ImuCanTask_ReinitializeAllFdcans(void)
+{
+    bool all_ready = true;
+
+    /* 两路FDCAN共享外设时钟，先全部释放，再按初始化顺序重新建立。 */
+    ImuCanTask_ShutdownAllFdcans();
+    __HAL_RCC_FDCAN_FORCE_RESET();
+    __NOP();
+    __HAL_RCC_FDCAN_RELEASE_RESET();
+    for (uint32_t i = 0U; i < IMU_CAN_TASK_BUS_COUNT; i++)
+    {
+        FDCAN_HandleTypeDef *hfdcan = s_buses[i].port.hfdcan;
+
+        if (hfdcan == NULL)
+        {
+            s_imu_can_stats.init_error_count++;
+            all_ready = false;
+            break;
+        }
+        if (HAL_FDCAN_Init(hfdcan) != HAL_OK)
+        {
+            /* HAL初始化可能已经进入MSP阶段，失败时显式反初始化以平衡共享时钟计数。 */
+            (void)HAL_FDCAN_DeInit(hfdcan);
+            s_imu_can_stats.init_error_count++;
+            all_ready = false;
+            break;
+        }
+        s_buses[i].fdcan_initialized = true;
+        if (ImuCanTask_ConfigFdcan(&s_buses[i]) == false)
+        {
+            s_imu_can_stats.init_error_count++;
+            all_ready = false;
+            break;
+        }
+    }
+
+    if (all_ready == false)
+    {
+        ImuCanTask_ShutdownAllFdcans();
+    }
+    return all_ready;
 }
 
 static void ImuCanTask_UpdateLastRx(const hi04_can_frame_t *frame)
@@ -548,15 +652,36 @@ static void ImuCanTask_DrainAllRxFifosForConfig(void)
     }
 }
 
-static void ImuCanTask_ConfigDelayMs(uint32_t delay_ms)
+static bool ImuCanTask_ConfigDelayMs(uint32_t delay_ms)
 {
     uint32_t start_ms = HAL_GetTick();
 
     do
     {
+        if (s_imu_acquisition_enabled == 0U)
+        {
+            return false;
+        }
         ImuCanTask_DrainAllRxFifosForConfig();
         osDelay(10U);
     } while ((HAL_GetTick() - start_ms) < delay_ms);
+
+    return true;
+}
+
+static bool ImuCanTask_WaitWhileAcquisitionEnabled(uint32_t delay_ms)
+{
+    uint32_t start_ms = HAL_GetTick();
+
+    while ((HAL_GetTick() - start_ms) < delay_ms)
+    {
+        if (s_imu_acquisition_enabled == 0U)
+        {
+            return false;
+        }
+        osDelay(10U);
+    }
+    return true;
 }
 
 static bool ImuCanTask_SendJ1939ConfigU32(ImuCanTaskBusRuntime_t *bus,
@@ -567,13 +692,18 @@ static bool ImuCanTask_SendJ1939ConfigU32(ImuCanTaskBusRuntime_t *bus,
     hi04_can_frame_t frame;
     uint32_t start_ms = HAL_GetTick();
 
-    if ((bus == NULL) || (bus->fdcan_started == false))
+    if ((bus == NULL) || (bus->fdcan_started == false) ||
+        (s_imu_acquisition_enabled == 0U))
     {
         return false;
     }
 
     while (HAL_FDCAN_GetTxFifoFreeLevel(bus->port.hfdcan) == 0U)
     {
+        if (s_imu_acquisition_enabled == 0U)
+        {
+            return false;
+        }
         if ((HAL_GetTick() - start_ms) >= 20U)
         {
             return false;
@@ -617,8 +747,7 @@ static bool ImuCanTask_SendJ1939ConfigU32(ImuCanTaskBusRuntime_t *bus,
     }
 
     s_imu_can_stats.cfg_tx_count++;
-    ImuCanTask_ConfigDelayMs(50U);
-    return true;
+    return ImuCanTask_ConfigDelayMs(50U);
 }
 
 static bool ImuCanTask_SendJ1939OutputPeriod(ImuCanTaskBusRuntime_t *bus,
@@ -708,7 +837,10 @@ static void ImuCanTask_LoopJ1939NodeIdConfig(void)
             s_imu_can_stats.last_error = 21U;
         }
 
-        ImuCanTask_ConfigDelayMs(IMU_CAN_TASK_ID_CONFIG_LOOP_MS);
+        if (ImuCanTask_ConfigDelayMs(IMU_CAN_TASK_ID_CONFIG_LOOP_MS) == false)
+        {
+            return;
+        }
     }
 #endif
 }
@@ -777,45 +909,72 @@ static void ImuCanTask_ClearJ1939PeriodsOnce(ImuCanTaskBusRuntime_t *bus, uint8_
 #endif
 }
 
-static void ImuCanTask_ConfigJ1939SyncOnce(ImuCanTaskBusRuntime_t *bus, uint8_t node_id)
+static bool ImuCanTask_ConfigJ1939SyncOnce(ImuCanTaskBusRuntime_t *bus, uint8_t node_id)
 {
 #if IMU_CAN_TASK_CONFIG_J1939_SYNC_ONCE
+    bool success = true;
+
     if ((bus == NULL) || (bus->fdcan_started == false))
     {
-        return;
+        return false;
     }
 
     s_imu_can_stats.cfg_active_step = node_id;
-    (void)ImuCanTask_SendJ1939ConfigU32(bus, node_id, IMU_CAN_TASK_J1939_REG_OUTPUT_EN, 1UL);
-    (void)ImuCanTask_SendJ1939OutputPeriod(bus,
-                                           node_id,
-                                           IMU_CAN_TASK_J1939_OUTPUT_ACCEL,
-                                           IMU_CAN_TASK_J1939_SYNC_TRIGGER_VAL);
-    (void)ImuCanTask_SendJ1939OutputPeriod(bus,
-                                           node_id,
-                                           IMU_CAN_TASK_J1939_OUTPUT_GYRO,
-                                           IMU_CAN_TASK_J1939_SYNC_TRIGGER_VAL);
-    (void)ImuCanTask_SendJ1939OutputPeriod(bus,
-                                           node_id,
-                                           IMU_CAN_TASK_J1939_OUTPUT_QUAT,
-                                           IMU_CAN_TASK_J1939_SYNC_TRIGGER_VAL);
-    (void)ImuCanTask_SendJ1939OutputPeriod(bus, node_id, IMU_CAN_TASK_J1939_OUTPUT_RPY, 0U);
-    (void)ImuCanTask_SendJ1939OutputPeriod(bus, node_id, IMU_CAN_TASK_J1939_OUTPUT_YAW, 0U);
-    (void)ImuCanTask_SendJ1939ConfigU32(bus, node_id, IMU_CAN_TASK_J1939_REG_CONTROL, 0UL);
+    if (ImuCanTask_SendJ1939ConfigU32(bus, node_id,
+                                      IMU_CAN_TASK_J1939_REG_OUTPUT_EN, 1UL) == false)
+    {
+        success = false;
+    }
+    if (ImuCanTask_SendJ1939OutputPeriod(bus, node_id,
+                                         IMU_CAN_TASK_J1939_OUTPUT_ACCEL,
+                                         IMU_CAN_TASK_J1939_SYNC_TRIGGER_VAL) == false)
+    {
+        success = false;
+    }
+    if (ImuCanTask_SendJ1939OutputPeriod(bus, node_id,
+                                         IMU_CAN_TASK_J1939_OUTPUT_GYRO,
+                                         IMU_CAN_TASK_J1939_SYNC_TRIGGER_VAL) == false)
+    {
+        success = false;
+    }
+    if (ImuCanTask_SendJ1939OutputPeriod(bus, node_id,
+                                         IMU_CAN_TASK_J1939_OUTPUT_QUAT,
+                                         IMU_CAN_TASK_J1939_SYNC_TRIGGER_VAL) == false)
+    {
+        success = false;
+    }
+    if (ImuCanTask_SendJ1939OutputPeriod(bus, node_id,
+                                         IMU_CAN_TASK_J1939_OUTPUT_RPY, 0U) == false)
+    {
+        success = false;
+    }
+    if (ImuCanTask_SendJ1939OutputPeriod(bus, node_id,
+                                         IMU_CAN_TASK_J1939_OUTPUT_YAW, 0U) == false)
+    {
+        success = false;
+    }
+    if (ImuCanTask_SendJ1939ConfigU32(bus, node_id,
+                                      IMU_CAN_TASK_J1939_REG_CONTROL, 0UL) == false)
+    {
+        success = false;
+    }
     s_imu_can_stats.cfg_active_step = 0U;
+    return success;
 #else
     (void)bus;
     (void)node_id;
+    return true;
 #endif
 }
 
-static void ImuCanTask_InitHi04Devices(ImuCanTaskBusRuntime_t *bus)
+static bool ImuCanTask_InitHi04Devices(ImuCanTaskBusRuntime_t *bus)
 {
     hi04_bus_t hi04_bus;
+    bool success = true;
 
     if ((bus == NULL) || (bus->config == NULL))
     {
-        return;
+        return false;
     }
 
     hi04_bus.send = hi04_fdcan_stm32h563_send;
@@ -830,9 +989,13 @@ static void ImuCanTask_InitHi04Devices(ImuCanTaskBusRuntime_t *bus)
         {
             ImuCanTask_ConfigJ1939Outputs(bus, node_id);
             ImuCanTask_ClearJ1939PeriodsOnce(bus, node_id);
-            ImuCanTask_ConfigJ1939SyncOnce(bus, node_id);
+            if (ImuCanTask_ConfigJ1939SyncOnce(bus, node_id) == false)
+            {
+                success = false;
+            }
         }
     }
+    return success;
 }
 
 static void ImuCanTask_ProcessFrame(ImuCanTaskBusRuntime_t *bus,
@@ -1206,6 +1369,11 @@ static void ImuCanTask_PublishSnapshot(void)
             GLOVE_STATUS_OK)
         {
             s_imu_can_stats.published_count++;
+            if (s_imu_fresh_mask == (uint16_t)GLOVE_IMU_VALID_ALL_MASK)
+            {
+                /* 16个节点均产生完整新数据并成功发布后，才确认IMU恢复。 */
+                s_imu_recovery_ready = 1U;
+            }
             return;
         }
         s_imu_can_stats.publish_drop_count++;
@@ -1441,6 +1609,7 @@ uint16_t ImuCanTask_GetFreshMask(void)
 void ImuCanTask_SetAcquisitionEnabled(uint8_t enabled)
 {
     s_imu_acquisition_enabled = (enabled != 0U) ? 1U : 0U;
+    s_imu_recovery_ready = 0U;
     if (enabled == 0U)
     {
         s_imu_fresh_mask = 0U;
@@ -1450,6 +1619,11 @@ void ImuCanTask_SetAcquisitionEnabled(uint8_t enabled)
 uint8_t ImuCanTask_IsAcquisitionPaused(void)
 {
     return s_imu_acquisition_paused;
+}
+
+uint8_t ImuCanTask_IsRecoveryReady(void)
+{
+    return s_imu_recovery_ready;
 }
 
 void ImuCanTask(void *argument)
@@ -1464,6 +1638,8 @@ void ImuCanTask(void *argument)
         s_buses[i].config = &s_bus_configs[i];
         s_buses[i].port.hfdcan = s_bus_configs[i].hfdcan;
         s_buses[i].port.time_us = ImuCanTask_TimeUs;
+        /* FDCAN已在main中的MX_FDCANx_Init完成底层初始化。 */
+        s_buses[i].fdcan_initialized = true;
 
         if ((s_bus_configs[i].node_count > IMU_CAN_TASK_MAX_NODES_PER_BUS) ||
             (ImuCanTask_ValidateBusMap(i, s_bus_configs[i].node_count) == false))
@@ -1484,11 +1660,11 @@ void ImuCanTask(void *argument)
 #else
     ImuCanTask_SetJ1939NodeIdOnce();
 #endif
-	osDelay(300);
-	
+    (void)ImuCanTask_WaitWhileAcquisitionEnabled(300U);
+
     for (uint32_t i = 0U; i < IMU_CAN_TASK_BUS_COUNT; i++)
     {
-        ImuCanTask_InitHi04Devices(&s_buses[i]);
+        (void)ImuCanTask_InitHi04Devices(&s_buses[i]);
     }
     ImuCanTask_ResetConfigurationMonitor();
 
@@ -1498,16 +1674,32 @@ void ImuCanTask(void *argument)
     {
         if (s_imu_acquisition_enabled == 0U)
         {
+            /* FDCAN完全释放后再确认暂停，保证跨电源周期不保留错误和待发送帧。 */
+            ImuCanTask_ShutdownAllFdcans();
             s_imu_acquisition_paused = 1U;
+            s_imu_recovery_pending = 1U;
             s_imu_fresh_mask = 0U;
             osDelay(10U);
             continue;
         }
 
-        if (s_imu_acquisition_paused != 0U)
+        if (s_imu_recovery_pending != 0U)
         {
+            bool config_ok = true;
+
+            /* 即将重新操作FDCAN，撤销安全暂停确认。 */
+            s_imu_acquisition_paused = 0U;
             /* 外设重新上电后，等待节点启动并重新下发输出配置。 */
-            osDelay(200U);
+            if (ImuCanTask_WaitWhileAcquisitionEnabled(200U) == false)
+            {
+                continue;
+            }
+            if (ImuCanTask_ReinitializeAllFdcans() == false)
+            {
+                (void)ImuCanTask_WaitWhileAcquisitionEnabled(
+                    IMU_CAN_TASK_CONFIG_RETRY_INTERVAL_MS);
+                continue;
+            }
             for (uint32_t i = 0U; i < IMU_CAN_TASK_BUS_COUNT; i++)
             {
                 ImuCanTask_DrainRxFifoForConfig(&s_buses[i]);
@@ -1516,16 +1708,29 @@ void ImuCanTask(void *argument)
                              sizeof(s_buses[i].node_sync_timestamp_us));
                 (void)memset(s_buses[i].node_sync_seen_mask, 0,
                              sizeof(s_buses[i].node_sync_seen_mask));
+                (void)memset(s_buses[i].node_sync_valid, 0,
+                             sizeof(s_buses[i].node_sync_valid));
                 (void)memset(s_buses[i].node_accel_rx_ms, 0,
                              sizeof(s_buses[i].node_accel_rx_ms));
                 (void)memset(s_buses[i].node_gyro_rx_ms, 0,
                              sizeof(s_buses[i].node_gyro_rx_ms));
                 (void)memset(s_buses[i].node_quat_rx_ms, 0,
                              sizeof(s_buses[i].node_quat_rx_ms));
-                ImuCanTask_InitHi04Devices(&s_buses[i]);
+                if (ImuCanTask_InitHi04Devices(&s_buses[i]) == false)
+                {
+                    config_ok = false;
+                }
+            }
+            if ((config_ok == false) || (s_imu_acquisition_enabled == 0U))
+            {
+                ImuCanTask_ShutdownAllFdcans();
+                (void)ImuCanTask_WaitWhileAcquisitionEnabled(
+                    IMU_CAN_TASK_CONFIG_RETRY_INTERVAL_MS);
+                continue;
             }
             ImuCanTask_ResetConfigurationMonitor();
             last_publish_ms = HAL_GetTick();
+            s_imu_recovery_pending = 0U;
             s_imu_acquisition_paused = 0U;
         }
 

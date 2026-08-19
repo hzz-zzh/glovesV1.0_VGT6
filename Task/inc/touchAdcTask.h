@@ -10,6 +10,7 @@ extern "C" {
 void TouchAdcTask(void *argument);
 void TouchAdcTask_SetAcquisitionEnabled(uint8_t enabled);
 uint8_t TouchAdcTask_IsAcquisitionPaused(void);
+uint8_t TouchAdcTask_IsRecoveryReady(void);
 
 #ifdef __cplusplus
 }
