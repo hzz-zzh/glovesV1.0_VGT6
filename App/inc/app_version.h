@@ -10,7 +10,7 @@ extern "C" {
  * 发布新固件时只需在此处修改，串口日志和通信接口会同步更新。
  */
 #define GLOVE_FW_VERSION_MAJOR             2
-#define GLOVE_FW_VERSION_MINOR             0
+#define GLOVE_FW_VERSION_MINOR             1
 #define GLOVE_FW_VERSION_PATCH             0
 
 #define GLOVE_FW_VERSION_STRINGIFY_INNER(value)  #value

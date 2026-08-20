@@ -676,12 +676,11 @@ void TouchAdcTask(void *argument)
   uint32_t alloc_fail_count = 0U;
   uint32_t publish_fail_count = 0U;
   uint8_t health_success_count = 0U;
-  AcqSyncSnapshot_t sync;
+  AcqSyncSnapshot_t sync = {0};
   GloveStatus_t status;
   GloveStatus_t publish_status;
 
   (void)argument;
-
   s_touch_adc_task_id = osThreadGetId();
   AcqSync_RegisterTouchTask(s_touch_adc_task_id);
   TouchAdcTask_PrintStartup();

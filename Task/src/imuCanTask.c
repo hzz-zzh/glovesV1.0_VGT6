@@ -37,7 +37,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 
 #define IMU_CAN_TASK_SET_IMU_BUS_INDEX          (0U)
 
-#define IMU_CAN_TASK_PUBLISH_PERIOD_MS          (10U)
+#define IMU_CAN_TASK_RX_WAIT_TIMEOUT_MS          (10U)
 #define IMU_CAN_TASK_QUEUE_TIMEOUT_MS           (0U)
 #define IMU_CAN_TASK_FRAME_FLAGS_REQUIRED       (HI04_SEEN_ACCEL | HI04_SEEN_GYRO)
 #define IMU_CAN_TASK_VALID_FLAGS_REQUIRED       (IMU_CAN_TASK_FRAME_FLAGS_REQUIRED | HI04_SEEN_QUAT)
@@ -190,7 +190,6 @@ static volatile uint8_t s_imu_recovery_ready = 0U;
 static uint8_t s_imu_recovery_pending;
 static volatile uint16_t s_imu_fresh_mask = 0U;
 static ImuCanTaskStats_t s_imu_can_stats;
-static uint32_t s_sensor_seq;
 static ImuCanTaskRecoveryContext_t s_active_recovery;
 
 static const uint8_t s_left_bus1_output_index[IMU_CAN_TASK_MAX_NODES_PER_BUS] =
@@ -1873,17 +1872,46 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
     }
 }
 
-static void ImuCanTask_PublishSnapshot(void)
+static uint8_t ImuCanTask_IsSyncFrameComplete(uint32_t sync_seq)
+{
+    if (sync_seq == 0U)
+    {
+        return 0U;
+    }
+
+    for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
+    {
+        ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
+
+        for (uint32_t local_i = 0U; local_i < bus->config->node_count; local_i++)
+        {
+            if ((bus->node_sync_valid[local_i] == 0U) ||
+                (bus->node_sync_seq[local_i] != sync_seq) ||
+                ((bus->node_sync_seen_mask[local_i] & IMU_CAN_TASK_VALID_FLAGS_REQUIRED) !=
+                 IMU_CAN_TASK_VALID_FLAGS_REQUIRED))
+            {
+                return 0U;
+            }
+        }
+    }
+
+    return 1U;
+}
+
+static void ImuCanTask_PublishSnapshot(uint32_t sync_seq)
 {
     static uint8_t alloc_failure_count;
     static uint8_t queue_failure_count;
     GloveImuSensorBlock_t *block;
-    AcqSyncSnapshot_t sync;
     GloveTimestampUs_t block_sync_timestamp_us = 0ULL;
-    uint32_t block_sync_seq = 0U;
     uint8_t any_valid = 0U;
     uint8_t any_quat_valid = 0U;
     uint32_t now_ms = HAL_GetTick();
+
+    if (sync_seq == 0U)
+    {
+        return;
+    }
 
     block = DataManager_AllocImuSensor();
     if (block == NULL)
@@ -1917,11 +1945,16 @@ static void ImuCanTask_PublishSnapshot(void)
             }
 
             if ((bus->node_sync_valid[local_i] != 0U) &&
-                (bus->node_sync_seq[local_i] >= block_sync_seq))
+                (bus->node_sync_seq[local_i] == sync_seq))
             {
-                block_sync_seq = bus->node_sync_seq[local_i];
                 block_sync_timestamp_us = bus->node_sync_timestamp_us[local_i];
+                break;
             }
+        }
+
+        if (block_sync_timestamp_us != 0ULL)
+        {
+            break;
         }
     }
 
@@ -1939,9 +1972,11 @@ static void ImuCanTask_PublishSnapshot(void)
                 continue;
             }
 
-            seen_mask = bus->devices[local_i].seen_mask;
+            seen_mask = bus->node_sync_seen_mask[local_i];
 
-            if (((seen_mask & IMU_CAN_TASK_VALID_FLAGS_REQUIRED) ==
+            if ((bus->node_sync_valid[local_i] != 0U) &&
+                (bus->node_sync_seq[local_i] == sync_seq) &&
+                ((seen_mask & IMU_CAN_TASK_VALID_FLAGS_REQUIRED) ==
                  IMU_CAN_TASK_VALID_FLAGS_REQUIRED) &&
                 (ImuCanTask_IsNodeFresh(bus, local_i, now_ms) != 0U))
             {
@@ -1958,21 +1993,8 @@ static void ImuCanTask_PublishSnapshot(void)
 
     if (any_valid != 0U)
     {
-        if (block_sync_seq != 0U)
-        {
-            block->data.sensor_seq = block_sync_seq;
-            block->data.timestamp_us = block_sync_timestamp_us;
-        }
-        else if (AcqSync_GetLatest(&sync) != 0U)
-        {
-            block->data.sensor_seq = sync.seq;
-            block->data.timestamp_us = sync.timestamp_us;
-        }
-        else
-        {
-            block->data.sensor_seq = s_sensor_seq++;
-            block->data.timestamp_us = (GloveTimestampUs_t)ImuCanTask_TimeUs();
-        }
+        block->data.sensor_seq = sync_seq;
+        block->data.timestamp_us = block_sync_timestamp_us;
 
         block->data.valid_flags |= GLOVE_FRAME_FLAG_IMU_VALID;
         if (any_quat_valid != 0U)
@@ -2259,7 +2281,8 @@ uint8_t ImuCanTask_IsRecoveryReady(void)
 
 void ImuCanTask(void *argument)
 {
-    uint32_t last_publish_ms;
+    uint32_t active_sync_seq = 0U;
+    uint32_t last_published_sync_seq = 0U;
 
     (void)argument;
     (void)ImuCanTask_LoopJ1939NodeIdConfig;
@@ -2299,8 +2322,6 @@ void ImuCanTask(void *argument)
     }
     ImuCanTask_ResetConfigurationMonitor();
 
-    last_publish_ms = HAL_GetTick();
-
     for (;;)
     {
         if (s_imu_acquisition_enabled == 0U)
@@ -2313,6 +2334,8 @@ void ImuCanTask(void *argument)
                 s_imu_acquisition_paused = 1U;
             }
             s_imu_recovery_pending = 1U;
+            active_sync_seq = 0U;
+            last_published_sync_seq = 0U;
             s_imu_fresh_mask = 0U;
             SystemHealth_SetLiveImuMask(0U);
             SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_IMU_PARTIAL,
@@ -2375,14 +2398,38 @@ void ImuCanTask(void *argument)
                 continue;
             }
             ImuCanTask_ResetConfigurationMonitor();
-            last_publish_ms = HAL_GetTick();
+            active_sync_seq = 0U;
+            last_published_sync_seq = 0U;
             s_imu_recovery_pending = 0U;
             s_imu_acquisition_paused = 0U;
         }
 
         (void)osThreadFlagsWait(IMU_CAN_TASK_RX_FLAG,
                                 osFlagsWaitAny,
-                                IMU_CAN_TASK_PUBLISH_PERIOD_MS);
+                                IMU_CAN_TASK_RX_WAIT_TIMEOUT_MS);
+        {
+            AcqSyncSnapshot_t sync;
+
+            if (AcqSync_GetLatest(&sync) != 0U)
+            {
+                if (active_sync_seq == 0U)
+                {
+                    active_sync_seq = sync.seq;
+                }
+                else if (sync.seq != active_sync_seq)
+                {
+#if IMU_CAN_TASK_ENABLE_PUBLISH
+                    if (last_published_sync_seq != active_sync_seq)
+                    {
+                        /* 新同步周期开始前发布上一周期，节点缺失时仍维持流水线节拍。 */
+                        ImuCanTask_PublishSnapshot(active_sync_seq);
+                        last_published_sync_seq = active_sync_seq;
+                    }
+#endif
+                    active_sync_seq = sync.seq;
+                }
+            }
+        }
         ImuCanTask_DrainAllRxFifos();
         {
             uint32_t now_ms = HAL_GetTick();
@@ -2391,13 +2438,17 @@ void ImuCanTask(void *argument)
         }
 
 #if IMU_CAN_TASK_ENABLE_PUBLISH
-        if ((HAL_GetTick() - last_publish_ms) >= IMU_CAN_TASK_PUBLISH_PERIOD_MS)
+        if ((active_sync_seq != 0U) &&
+            (last_published_sync_seq != active_sync_seq) &&
+            (ImuCanTask_IsSyncFrameComplete(active_sync_seq) != 0U))
         {
-            ImuCanTask_PublishSnapshot();
-            last_publish_ms = HAL_GetTick();
+            /* 16个节点均完成当前同步周期后立即发布，降低合帧等待延迟。 */
+            ImuCanTask_PublishSnapshot(active_sync_seq);
+            last_published_sync_seq = active_sync_seq;
         }
 #else
-        (void)last_publish_ms;
+        (void)active_sync_seq;
+        (void)last_published_sync_seq;
 #endif
     }
 }

@@ -61,23 +61,42 @@ uint8_t AcqSync_GetLatest(AcqSyncSnapshot_t *snapshot)
 
 osStatus_t AcqSync_WaitForTouchSync(AcqSyncSnapshot_t *snapshot, uint32_t timeout_ms)
 {
-    osStatus_t status;
+    AcqSyncSnapshot_t latest;
+    uint32_t last_seq;
     uint32_t flags;
 
+    if (snapshot == NULL)
+    {
+        return osErrorParameter;
+    }
+
+    last_seq = (snapshot->valid != 0U) ? snapshot->seq : 0U;
+    AcqSync_CopyLatest(&latest);
+    if ((latest.valid != 0U) &&
+        ((snapshot->valid == 0U) || (latest.seq != last_seq)))
+    {
+        *snapshot = latest;
+        return osOK;
+    }
+
+    /* 清标志后再次核对序号，避免同步中断恰好发生在清标志前而丢帧。 */
     (void)osThreadFlagsClear(ACQ_SYNC_TOUCH_THREAD_FLAG);
+    AcqSync_CopyLatest(&latest);
+    if ((latest.valid != 0U) &&
+        ((snapshot->valid == 0U) || (latest.seq != last_seq)))
+    {
+        *snapshot = latest;
+        return osOK;
+    }
 
     flags = osThreadFlagsWait(ACQ_SYNC_TOUCH_THREAD_FLAG,
                               osFlagsWaitAny,
                               timeout_ms);
     if ((flags & osFlagsError) != 0U)
     {
-        status = (flags == (uint32_t)osFlagsErrorTimeout) ? osErrorTimeout : osError;
-    }
-    else
-    {
-        AcqSync_CopyLatest(snapshot);
-        status = osOK;
+        return (flags == (uint32_t)osFlagsErrorTimeout) ? osErrorTimeout : osError;
     }
 
-    return status;
+    AcqSync_CopyLatest(snapshot);
+    return (snapshot->valid != 0U) ? osOK : osError;
 }
