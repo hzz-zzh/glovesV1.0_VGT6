@@ -29,12 +29,13 @@ DEFAULT_POLL_MS = 500
 
 MAX_READ_REGS = 100
 MAX_WRITE_REGS = 100
-SENSOR_120HZ_PERIOD_S = 1.0 / 120.0
-SENSOR_120HZ_TIMEOUT_S = 0.008
-SENSOR_120HZ_READ_SLICE_S = 0.002
-SENSOR_120HZ_RETRIES = 1
-SENSOR_120HZ_RETRY_GAP_S = 0.001
-SENSOR_120HZ_SPIN_GUARD_S = 0.004
+SENSOR_200HZ_PERIOD_S = 1.0 / 200.0
+SENSOR_200HZ_TIMEOUT_S = 0.008
+SENSOR_200HZ_SERIAL_TIMEOUT_S = 0.008
+SENSOR_200HZ_RETRIES = 0
+SENSOR_200HZ_RETRY_GAP_S = 0.0005
+SENSOR_200HZ_SPIN_GUARD_S = 0.001
+SENSOR_200HZ_HEALTH_PERIOD_S = 1.0
 MODBUS_INTER_REQUEST_GAP_S = 0.0001
 
 REG_BASIC_STATUS_START = 0x0000
@@ -602,8 +603,8 @@ class ModbusRtuClient:
             if self.low_latency_saved_timeout is None:
                 self.low_latency_saved_timeout = self.port.timeout
                 self.low_latency_saved_inter_byte_timeout = self.port.inter_byte_timeout
-            # 高频读取按2ms分片返回，确保外层8ms事务截止时间能够真正生效。
-            self.port.timeout = SENSOR_120HZ_READ_SLICE_S
+            # 一次等待完整910字节响应，避免短分片引入多次Windows串口驱动往返。
+            self.port.timeout = SENSOR_200HZ_SERIAL_TIMEOUT_S
             self.port.inter_byte_timeout = None
             self.port.reset_input_buffer()
             self.low_latency_requests = 0
@@ -774,7 +775,7 @@ class ModbusRtuClient:
         self,
         slave: int,
         timeout_s: float,
-        retries: int = SENSOR_120HZ_RETRIES,
+        retries: int = SENSOR_200HZ_RETRIES,
     ) -> list[int]:
         """Read the complete high-rate sensor snapshot with one RTU transaction."""
         last_error: ModbusError | None = None
@@ -788,7 +789,7 @@ class ModbusRtuClient:
                     self.low_latency_retries += 1
                     self.recover_low_latency_poll()
                     # 给从机留出结束上一笔事务的时间，避免超时重试与迟到响应重叠。
-                    time.sleep(SENSOR_120HZ_RETRY_GAP_S)
+                    time.sleep(SENSOR_200HZ_RETRY_GAP_S)
 
         if last_error is None:
             raise ModbusError("sensor snapshot failed without error detail")
@@ -1333,6 +1334,7 @@ class GloveSnapshot:
     comm_retries: int = 0
     comm_max_request_ms: float = 0.0
     comm_last_timeout_start: int = 0
+    schedule_overruns: int = 0
     sensor_data_valid: bool = False
     sensor_invalid_reason: str = "sensor snapshot not received"
 
@@ -1433,7 +1435,7 @@ def empty_snapshot() -> GloveSnapshot:
     )
 
 
-def read_sensor_snapshot_120hz(
+def read_sensor_snapshot_200hz(
     client: ModbusRtuClient,
     slave: int,
     timeout_s: float,
@@ -1442,10 +1444,10 @@ def read_sensor_snapshot_120hz(
 ) -> GloveSnapshot:
     """Read IMU, solved joint and touch data with one snapshot request."""
     base = previous if previous is not None else empty_snapshot()
-    fast_timeout_s = min(timeout_s, SENSOR_120HZ_TIMEOUT_S)
+    fast_timeout_s = min(timeout_s, SENSOR_200HZ_TIMEOUT_S)
 
     snapshot_regs = client.read_sensor_snapshot_registers(
-        slave, fast_timeout_s, retries=SENSOR_120HZ_RETRIES
+        slave, fast_timeout_s, retries=SENSOR_200HZ_RETRIES
     )
     sensor_frame_id = snapshot_regs[0] | (snapshot_regs[1] << 16)
     sensor_time_regs = snapshot_regs[2:6]
@@ -1523,7 +1525,7 @@ def read_sensor_snapshot_120hz(
         imu_regs=imu_regs,
         joint_regs=joint_regs,
         touch_regs=touch_regs,
-        poll_mode="sensors120",
+        poll_mode="sensors200",
         actual_hz=actual_hz,
         sensor_frame_id=displayed_frame_id,
         sensor_timestamp_us=displayed_timestamp_us,
@@ -1537,15 +1539,15 @@ def read_sensor_snapshot_120hz(
     )
 
 
-def wait_sensor_120hz_deadline(stop_event: threading.Event, deadline: float) -> None:
-    """Wait to an absolute deadline without stretching an 8.333 ms period."""
+def wait_sensor_200hz_deadline(stop_event: threading.Event, deadline: float) -> None:
+    """Wait to an absolute deadline without stretching the 5 ms period."""
     while not stop_event.is_set():
         remaining = deadline - time.perf_counter()
         if remaining <= 0.0:
             return
-        if remaining > SENSOR_120HZ_SPIN_GUARD_S:
-            # 先阻塞较长空闲时间，最后4ms忙等，避免Windows定时等待多睡1～2ms。
-            if stop_event.wait(remaining - SENSOR_120HZ_SPIN_GUARD_S):
+        if remaining > SENSOR_200HZ_SPIN_GUARD_S:
+            # 先阻塞较长空闲时间，最后1ms忙等，兼顾Windows定时精度和CPU占用。
+            if stop_event.wait(remaining - SENSOR_200HZ_SPIN_GUARD_S):
                 return
 
 
@@ -1738,7 +1740,7 @@ class ModbusMonitorApp(tk.Tk):
         ttk.Button(top, text="Start Poll", command=self.start_poll).grid(
             row=0, column=14, padx=2
         )
-        ttk.Button(top, text="120Hz Sensors", command=self.start_sensor_120hz).grid(
+        ttk.Button(top, text="200Hz Sensors", command=self.start_sensor_200hz).grid(
             row=0, column=15, padx=2
         )
         ttk.Button(top, text="Stop", command=self.stop_poll).grid(row=0, column=16, padx=2)
@@ -2660,7 +2662,7 @@ class ModbusMonitorApp(tk.Tk):
         self.worker.start()
         self.status_var.set(self.status_var.get() + " | polling")
 
-    def start_sensor_120hz(self) -> None:
+    def start_sensor_200hz(self) -> None:
         if self.worker is not None and self.worker.is_alive():
             return
         try:
@@ -2674,12 +2676,12 @@ class ModbusMonitorApp(tk.Tk):
                 return
         self.stop_event.clear()
         self.worker = threading.Thread(
-            target=self._sensor_120hz_worker,
+            target=self._sensor_200hz_worker,
             args=(slave, timeout_s),
             daemon=True,
         )
         self.worker.start()
-        self.status_var.set(self.status_var.get() + " | 120Hz IMU+Joint+Touch")
+        self.status_var.set(self.status_var.get() + " | 200Hz IMU+Joint+Touch")
 
     def stop_poll(self) -> None:
         self.stop_event.set()
@@ -2695,11 +2697,11 @@ class ModbusMonitorApp(tk.Tk):
                 self.events.put(("error", exc))
                 self.stop_event.wait(0.5)
 
-    def _sensor_120hz_worker(self, slave: int, timeout_s: float) -> None:
+    def _sensor_200hz_worker(self, slave: int, timeout_s: float) -> None:
         previous = self.last_snapshot if self.last_snapshot is not None else empty_snapshot()
         if not previous.firmware_regs:
             try:
-                # 固件版本在高速采集开始前读取一次，避免占用120Hz采集周期。
+                # 固件版本在高速快照轮询开始前读取一次，避免占用200Hz采集周期。
                 previous.firmware_regs = self.client.read_holding_registers(
                     slave, REG_FW_VERSION_START, REG_FW_VERSION_COUNT, timeout_s
                 )
@@ -2715,6 +2717,7 @@ class ModbusMonitorApp(tk.Tk):
         actual_hz = 0.0
         sensor_hz = 0.0
         duplicate_responses = 0
+        schedule_overruns = 0
         next_health_poll = next_deadline
 
         try:
@@ -2726,7 +2729,7 @@ class ModbusMonitorApp(tk.Tk):
         try:
             while not self.stop_event.is_set():
                 try:
-                    snapshot = read_sensor_snapshot_120hz(
+                    snapshot = read_sensor_snapshot_200hz(
                         self.client, slave, timeout_s, previous, actual_hz
                     )
                     rate_count += 1
@@ -2734,7 +2737,7 @@ class ModbusMonitorApp(tk.Tk):
 
                     if now >= next_health_poll:
                         try:
-                            # 健康块低频读取，避免改变FC41帧并尽量不扰动120Hz采集。
+                            # 健康块低频读取，避免改变FC41帧并尽量不扰动200Hz轮询。
                             snapshot.health_regs = self.client.read_holding_registers(
                                 slave,
                                 REG_HEALTH_STATUS_START,
@@ -2759,7 +2762,7 @@ class ModbusMonitorApp(tk.Tk):
                                 )
                             except Exception:
                                 self.client.recover_low_latency_poll()
-                        next_health_poll = now + 0.2
+                        next_health_poll = now + SENSOR_200HZ_HEALTH_PERIOD_S
                     previous = snapshot
 
                     if snapshot.sensor_data_valid:
@@ -2802,19 +2805,27 @@ class ModbusMonitorApp(tk.Tk):
                     snapshot.actual_hz = actual_hz
                     snapshot.sensor_hz = sensor_hz
                     snapshot.duplicate_responses = duplicate_responses
-                    self.events.put(("snapshot", snapshot))
-
-                    next_deadline += SENSOR_120HZ_PERIOD_S
+                    next_deadline += SENSOR_200HZ_PERIOD_S
                     now = time.perf_counter()
-                    if next_deadline < now:
+                    if next_deadline <= now:
+                        # 超过5ms时立即从当前时刻重建节拍，避免连续补发旧周期请求。
+                        overruns = int((now - next_deadline) // SENSOR_200HZ_PERIOD_S) + 1
+                        schedule_overruns += overruns
                         next_deadline = now
-                    wait_sensor_120hz_deadline(self.stop_event, next_deadline)
+                    snapshot.schedule_overruns = schedule_overruns
+                    self.events.put(("snapshot", snapshot))
+                    wait_sensor_200hz_deadline(self.stop_event, next_deadline)
                 except Exception as exc:
                     self.events.put(("error", exc))
                     self.client.recover_low_latency_poll()
-                    # 异常后只等待一个短分片，避免额外空转完整8.333ms周期。
-                    next_deadline = time.perf_counter() + SENSOR_120HZ_PERIOD_S
-                    self.stop_event.wait(SENSOR_120HZ_READ_SLICE_S)
+                    # 超时后不在同一周期内重试；若已经超期则立即从当前时刻重建节拍。
+                    next_deadline += SENSOR_200HZ_PERIOD_S
+                    now = time.perf_counter()
+                    if next_deadline <= now:
+                        overruns = int((now - next_deadline) // SENSOR_200HZ_PERIOD_S) + 1
+                        schedule_overruns += overruns
+                        next_deadline = now
+                    wait_sensor_200hz_deadline(self.stop_event, next_deadline)
         finally:
             self.client.finish_low_latency_poll()
 
@@ -2879,16 +2890,16 @@ class ModbusMonitorApp(tk.Tk):
         touch_count = snapshot.touch_status_regs[5]
         touch_capacity = snapshot.touch_status_regs[6]
 
-        if snapshot.poll_mode == "sensors120":
+        if snapshot.poll_mode == "sensors200":
             last_timeout = (
                 f" last=0x{snapshot.comm_last_timeout_start:04X}"
                 if snapshot.comm_timeouts > 0
                 else ""
             )
             poll_text = (
-                f"120Hz Sensors comm={snapshot.actual_hz:.1f}Hz "
+                f"200Hz Sensors comm={snapshot.actual_hz:.1f}Hz "
                 f"sensor={snapshot.sensor_hz:.1f}Hz frame={snapshot.sensor_frame_id} "
-                f"dup={snapshot.duplicate_responses} "
+                f"dup={snapshot.duplicate_responses} overrun={snapshot.schedule_overruns} "
                 f"timeout={snapshot.comm_timeouts} retry={snapshot.comm_retries} "
                 f"max={snapshot.comm_max_request_ms:.2f}ms{last_timeout}"
             )
@@ -2925,6 +2936,7 @@ class ModbusMonitorApp(tk.Tk):
             f"Sensor data       : {'VALID' if snapshot.sensor_data_valid else 'INVALID'}",
             f"Data reason       : {snapshot.sensor_invalid_reason}",
             f"Duplicate replies : {snapshot.duplicate_responses}",
+            f"Schedule overruns : {snapshot.schedule_overruns}",
             f"Slave addr reg    : {snapshot.basic[0]}",
             f"Baud code reg     : {snapshot.basic[1]}",
             f"UTC time          : {utc_time}",
@@ -3255,6 +3267,7 @@ class ModbusMonitorApp(tk.Tk):
             writer.writerow(("meta", "sensor", "frame_id", snapshot.sensor_frame_id))
             writer.writerow(("meta", "sensor", "timestamp_us", snapshot.sensor_timestamp_us))
             writer.writerow(("meta", "sensor", "duplicate_responses", snapshot.duplicate_responses))
+            writer.writerow(("meta", "sensor", "schedule_overruns", snapshot.schedule_overruns))
             writer.writerow(("status", "power", "battery_voltage_v", power.battery_voltage_v))
             writer.writerow(("status", "power", "battery_current_a", power.battery_current_a))
             writer.writerow(("status", "power", "soc_percent", power.soc_percent))
