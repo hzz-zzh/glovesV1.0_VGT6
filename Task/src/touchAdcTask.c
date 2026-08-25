@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "acq_sync.h"
 #include "cmsis_os2.h"
@@ -45,6 +46,8 @@
 #define TOUCH_ADC_MUX_SETTLE_NOP_COUNT  (64U)
 #define TOUCH_ADC_HEALTH_FAILURE_LIMIT   (5U)
 #define TOUCH_ADC_HEALTH_RECOVERY_FRAMES (3U)
+/* 每个触点使用5帧滑动均值，兼顾稳定性与响应速度。 */
+#define TOUCH_ADC_MEAN_FILTER_WINDOW     (5U)
 
 #if GLOVE_TOUCH_COUNT != (TOUCH_ADC_FINGER_BASE_COUNT + \
     ((TOUCH_ADC_PALM_LAST_COLUMN - TOUCH_ADC_PALM_FIRST_COLUMN + 1U) * TOUCH_ADC_PALM_ROWS))
@@ -71,6 +74,10 @@ static osThreadId_t s_touch_adc_task_id = NULL;
 static uint8_t s_touch_adc_trace_frame = 0U;
 static uint8_t s_touch_adc_trace_dma_once = 0U;
 static uint8_t s_touch_adc_debug_print_once = 1U;
+static uint16_t s_touch_mean_history[TOUCH_ADC_MEAN_FILTER_WINDOW][GLOVE_TOUCH_COUNT];
+static uint32_t s_touch_mean_sum[GLOVE_TOUCH_COUNT];
+static uint8_t s_touch_mean_sample_count = 0U;
+static uint8_t s_touch_mean_write_index = 0U;
 
 static uint32_t TouchAdcTask_MsToTicks(uint32_t timeout_ms)
 {
@@ -464,6 +471,63 @@ static void TouchAdcTask_StoreSample(GloveTouchSensorBlock_t *block,
   }
 }
 
+static void TouchAdcTask_ResetMeanFilter(void)
+{
+  memset(s_touch_mean_history, 0, sizeof(s_touch_mean_history));
+  memset(s_touch_mean_sum, 0, sizeof(s_touch_mean_sum));
+  s_touch_mean_sample_count = 0U;
+  s_touch_mean_write_index = 0U;
+}
+
+static void TouchAdcTask_FilterFrame(GloveTouchSensorBlock_t *block)
+{
+  uint32_t index;
+  uint32_t divisor;
+
+  if (block == NULL)
+  {
+    return;
+  }
+
+  if (s_touch_mean_sample_count < TOUCH_ADC_MEAN_FILTER_WINDOW)
+  {
+    divisor = (uint32_t)s_touch_mean_sample_count + 1U;
+  }
+  else
+  {
+    divisor = TOUCH_ADC_MEAN_FILTER_WINDOW;
+  }
+
+  for (index = 0U; index < GLOVE_TOUCH_COUNT; index++)
+  {
+    uint16_t raw_value = block->data.touch[index].value;
+    uint32_t filtered_value;
+
+    if (s_touch_mean_sample_count >= TOUCH_ADC_MEAN_FILTER_WINDOW)
+    {
+      s_touch_mean_sum[index] -= s_touch_mean_history[s_touch_mean_write_index][index];
+    }
+
+    s_touch_mean_history[s_touch_mean_write_index][index] = raw_value;
+    s_touch_mean_sum[index] += raw_value;
+
+    /* 窗口未填满时只平均已有样本，避免启动阶段被初始零值拉低。 */
+    filtered_value = (s_touch_mean_sum[index] + (divisor / 2U)) / divisor;
+    block->data.touch[index].value = (uint16_t)filtered_value;
+  }
+
+  if (s_touch_mean_sample_count < TOUCH_ADC_MEAN_FILTER_WINDOW)
+  {
+    s_touch_mean_sample_count++;
+  }
+
+  s_touch_mean_write_index++;
+  if (s_touch_mean_write_index >= TOUCH_ADC_MEAN_FILTER_WINDOW)
+  {
+    s_touch_mean_write_index = 0U;
+  }
+}
+
 static GloveStatus_t TouchAdcTask_ReadAdcDma(const uint16_t **samples)
 {
   uint32_t flags;
@@ -681,6 +745,7 @@ void TouchAdcTask(void *argument)
   GloveStatus_t publish_status;
 
   (void)argument;
+  TouchAdcTask_ResetMeanFilter();
   s_touch_adc_task_id = osThreadGetId();
   AcqSync_RegisterTouchTask(s_touch_adc_task_id);
   TouchAdcTask_PrintStartup();
@@ -695,6 +760,11 @@ void TouchAdcTask(void *argument)
     if (s_touch_acquisition_enabled == 0U)
     {
       TouchAdcTask_DisableColumns();
+      if (s_touch_acquisition_paused == 0U)
+      {
+        /* 停采后丢弃旧历史，恢复采集时从新数据重新建立均值窗口。 */
+        TouchAdcTask_ResetMeanFilter();
+      }
       s_touch_acquisition_paused = 1U;
       health_success_count = 0U;
       SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_TOUCH, 0U);
@@ -748,6 +818,7 @@ void TouchAdcTask(void *argument)
       if ((status == GLOVE_STATUS_OK) && (s_touch_acquisition_enabled != 0U))
       {
         error_count = 0U;
+        TouchAdcTask_FilterFrame(touch);
         TouchAdcTask_PrintSamples(seq, touch);
         publish_status = DataManager_PublishTouchSensor(touch, TOUCH_ADC_QUEUE_TIMEOUT_MS);
         if (publish_status != GLOVE_STATUS_OK)
