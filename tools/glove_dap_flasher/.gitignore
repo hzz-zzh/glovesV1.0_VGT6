@@ -1,0 +1,6 @@
+.vendor/
+build/
+dist/
+*.spec
+__pycache__/
+resources/app_icon.ico
