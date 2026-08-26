@@ -50,7 +50,6 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "Glove DAP Flasher"
-APP_VERSION = "1.0.2"
 TARGET_NAME = "STM32H563VGTx"
 FLASH_START = 0x08000000
 FLASH_END = 0x08100000
@@ -91,11 +90,16 @@ def resource_path(relative_path: str) -> Path:
     return _bundle_root() / relative_path
 
 
-def load_firmware_info() -> FirmwareInfo:
+def load_firmware_metadata() -> dict:
+    """读取软件与固件共用的发布信息。"""
     metadata_path = resource_path("resources/firmware.json")
-    firmware_dir = resource_path("resources/firmware")
     # Windows PowerShell 5.1 写入 UTF-8 JSON 时会带 BOM，读取时一并兼容。
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+    return json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+
+
+def load_firmware_info() -> FirmwareInfo:
+    firmware_dir = resource_path("resources/firmware")
+    metadata = load_firmware_metadata()
     firmware_path = firmware_dir / metadata["filename"]
     digest = hashlib.sha256(firmware_path.read_bytes()).hexdigest()
     if digest.lower() != metadata["sha256"].lower():
@@ -116,6 +120,10 @@ def load_firmware_info() -> FirmwareInfo:
         sha256=digest,
         byte_count=sum(end - start for start, end in segments),
     )
+
+
+# 软件版本与固件版本统一，发布时只修改 firmware.json 中的 version。
+APP_VERSION = str(load_firmware_metadata()["version"])
 
 
 def enumerate_dap_probes() -> list[ProbeInfo]:
