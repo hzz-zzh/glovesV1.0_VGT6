@@ -25,9 +25,8 @@ python .\app.py
 ## 重新打包
 
 1. 在 Keil中生成最新的 `MDK-ARM\glovesV1.0_VGT6\glovesV1_0_VGT6.hex`。
-2. 修改 `resources\firmware.json` 中唯一的 `version` 字段。软件界面、固件信息和 EXE 文件名都会自动使用该版本号。
-3. 确认电脑已经安装 `Keil.STM32H5xx_DFP 2.2.0`。
-4. 执行：
+2. 确认电脑已经安装 `Keil.STM32H5xx_DFP 2.2.0`。
+3. 执行：
 
 ```powershell
 .\build.ps1
@@ -36,7 +35,7 @@ python .\app.py
 输出文件：
 
 ```text
-dist\GloveDAPFlasher_<固件版本>.exe
+dist\GloveDAPFlasher_v1.0.2.exe
 ```
 
 构建脚本会重新复制最新 HEX、计算 SHA-256，并更新内置固件信息。
@@ -44,7 +43,7 @@ dist\GloveDAPFlasher_<固件版本>.exe
 构建后可执行以下命令进行自检。自检只检查内置资源并枚举 DAP，不连接或改写目标芯片：
 
 ```powershell
-.\dist\GloveDAPFlasher_<固件版本>.exe --self-test
+.\dist\GloveDAPFlasher_v1.0.2.exe --self-test
 ```
 
 ## 烧录保护

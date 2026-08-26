@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 
 $toolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $toolRoot '..\..')
@@ -7,6 +7,7 @@ $firmwareSource = Join-Path $repoRoot 'MDK-ARM\glovesV1.0_VGT6\glovesV1_0_VGT6.h
 $firmwareTarget = Join-Path $toolRoot 'resources\firmware\glovesV1_0_VGT6.hex'
 $packSource = 'E:\Software\Apps\Keil\Package\Keil\STM32H5xx_DFP\2.2.0'
 $packTarget = Join-Path $toolRoot 'resources\pack'
+$outputName = 'GloveDAPFlasher_v1.0.2'
 
 if (-not (Test-Path -LiteralPath $firmwareSource)) {
     throw "找不到 Keil 生成的 HEX：$firmwareSource"
@@ -40,19 +41,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $vendorDir 'pyocd'))) {
 
 $metadataPath = Join-Path $toolRoot 'resources\firmware.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
-$releaseVersion = ([string]($metadata.version)).Trim()
-if ([string]::IsNullOrWhiteSpace($releaseVersion)) {
-    throw "firmware.json 中的 version 不能为空"
-}
-
-# EXE 文件名与界面版本统一使用固件版本号。
-$safeVersion = [regex]::Replace($releaseVersion, '[^0-9A-Za-z._-]', '_')
-if ([string]::IsNullOrWhiteSpace($safeVersion)) {
-    throw "firmware.json 中的 version 无法生成有效文件名"
-}
-$outputName = 'GloveDAPFlasher_{0}' -f $safeVersion
-Write-Host ('Release version: [' + $releaseVersion + ']')
-Write-Host ('Output filename: [' + $outputName + '.exe]')
 $metadata.sha256 = (Get-FileHash -LiteralPath $firmwareTarget -Algorithm SHA256).Hash.ToLowerInvariant()
 $metadata.build_time = (Get-Item -LiteralPath $firmwareSource).LastWriteTime.ToString('yyyy-MM-dd HH:mm')
 $metadata | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
