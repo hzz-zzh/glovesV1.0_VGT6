@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 import datetime as dt
 import math
+import os
 import queue
 import struct
 import threading
@@ -22,21 +24,26 @@ except ImportError:  # pragma: no cover - shown in GUI at runtime
     list_ports = None
 
 
-DEFAULT_BAUD = 3000000
+# 与手套USART1保持一致，减少910字节传感快照的传输占时。
+DEFAULT_BAUD = 6000000
 DEFAULT_SLAVE = 1
 DEFAULT_TIMEOUT_S = 0.20
 DEFAULT_POLL_MS = 500
 
 MAX_READ_REGS = 100
 MAX_WRITE_REGS = 100
-SENSOR_200HZ_PERIOD_S = 1.0 / 200.0
-SENSOR_200HZ_TIMEOUT_S = 0.008
-SENSOR_200HZ_SERIAL_TIMEOUT_S = 0.008
-SENSOR_200HZ_RETRIES = 0
-SENSOR_200HZ_RETRY_GAP_S = 0.0005
-SENSOR_200HZ_SPIN_GUARD_S = 0.001
-SENSOR_200HZ_HEALTH_PERIOD_S = 1.0
+# RS485轮询与手套内部FullFrame保持200Hz目标节拍。
+SENSOR_POLL_PERIOD_S = 1.0 / 200.0
+SENSOR_POLL_TIMEOUT_S = 0.008
+SENSOR_POLL_SERIAL_TIMEOUT_S = 0.008
+SENSOR_POLL_RETRIES = 0
+SENSOR_POLL_RETRY_GAP_S = 0.0005
+SENSOR_POLL_SPIN_GUARD_S = 0.002
 MODBUS_INTER_REQUEST_GAP_S = 0.0001
+
+WINDOWS_TIMER_PERIOD_MS = 1
+WINDOWS_THREAD_PRIORITY_ABOVE_NORMAL = 1
+WINDOWS_THREAD_PRIORITY_ERROR_RETURN = 0x7FFFFFFF
 
 REG_BASIC_STATUS_START = 0x0000
 REG_BASIC_STATUS_COUNT = 14
@@ -550,11 +557,24 @@ class ModbusRtuClient:
         self.low_latency_retries = 0
         self.low_latency_max_request_ms = 0.0
         self.low_latency_last_timeout_start = 0
+        self.low_latency_last_transaction_end = 0.0
 
     @staticmethod
     def _wait_inter_request_gap() -> None:
         """Leave a short silent interval before each RTU request."""
         deadline = time.perf_counter() + MODBUS_INTER_REQUEST_GAP_S
+        while time.perf_counter() < deadline:
+            pass
+
+    def _wait_low_latency_inter_request_gap(self) -> None:
+        """Only add the missing part of the RTU silent interval in a 200 Hz poll."""
+        now = time.perf_counter()
+        if self.low_latency_last_transaction_end > 0.0:
+            deadline = (
+                self.low_latency_last_transaction_end + MODBUS_INTER_REQUEST_GAP_S
+            )
+        else:
+            deadline = now + MODBUS_INTER_REQUEST_GAP_S
         while time.perf_counter() < deadline:
             pass
 
@@ -590,6 +610,7 @@ class ModbusRtuClient:
                 self.connected_baud = 0
                 self.low_latency_saved_timeout = None
                 self.low_latency_saved_inter_byte_timeout = None
+                self.low_latency_last_transaction_end = 0.0
 
     @property
     def is_open(self) -> bool:
@@ -604,7 +625,7 @@ class ModbusRtuClient:
                 self.low_latency_saved_timeout = self.port.timeout
                 self.low_latency_saved_inter_byte_timeout = self.port.inter_byte_timeout
             # 一次等待完整910字节响应，避免短分片引入多次Windows串口驱动往返。
-            self.port.timeout = SENSOR_200HZ_SERIAL_TIMEOUT_S
+            self.port.timeout = SENSOR_POLL_SERIAL_TIMEOUT_S
             self.port.inter_byte_timeout = None
             self.port.reset_input_buffer()
             self.low_latency_requests = 0
@@ -612,6 +633,7 @@ class ModbusRtuClient:
             self.low_latency_retries = 0
             self.low_latency_max_request_ms = 0.0
             self.low_latency_last_timeout_start = 0
+            self.low_latency_last_transaction_end = 0.0
 
     def finish_low_latency_poll(self) -> None:
         """Restore normal serial timeouts after the high-rate poll stops."""
@@ -623,6 +645,7 @@ class ModbusRtuClient:
                 self.port.inter_byte_timeout = self.low_latency_saved_inter_byte_timeout
                 self.low_latency_saved_timeout = None
                 self.low_latency_saved_inter_byte_timeout = None
+                self.low_latency_last_transaction_end = 0.0
 
     def get_low_latency_stats(self) -> LowLatencyStats:
         return LowLatencyStats(
@@ -775,7 +798,7 @@ class ModbusRtuClient:
         self,
         slave: int,
         timeout_s: float,
-        retries: int = SENSOR_200HZ_RETRIES,
+        retries: int = SENSOR_POLL_RETRIES,
     ) -> list[int]:
         """Read the complete high-rate sensor snapshot with one RTU transaction."""
         last_error: ModbusError | None = None
@@ -789,7 +812,7 @@ class ModbusRtuClient:
                     self.low_latency_retries += 1
                     self.recover_low_latency_poll()
                     # 给从机留出结束上一笔事务的时间，避免超时重试与迟到响应重叠。
-                    time.sleep(SENSOR_200HZ_RETRY_GAP_S)
+                    time.sleep(SENSOR_POLL_RETRY_GAP_S)
 
         if last_error is None:
             raise ModbusError("sensor snapshot failed without error detail")
@@ -803,24 +826,41 @@ class ModbusRtuClient:
 
         request = append_crc(bytes((slave & 0xFF, MB_FC_READ_SENSOR_SNAPSHOT)))
         expected_len = 4 + SENSOR_SNAPSHOT_DATA_SIZE + 2
-        deadline = time.monotonic() + timeout_s
         request_started = time.perf_counter()
+        write_finished = request_started
 
         with self.lock:
             self.last_tx = request
             self.last_rx = b""
-            self._wait_inter_request_gap()
-            self.port.write(request)
+            # 正常5 ms调度间隔已经满足总线静默时间，只在紧邻上一事务时补足。
+            self._wait_low_latency_inter_request_gap()
+            written = self.port.write(request)
+            write_finished = time.perf_counter()
+            if written != len(request):
+                self.low_latency_last_transaction_end = write_finished
+                raise ModbusError(
+                    f"short write reading sensor snapshot, tx_len={written}, "
+                    f"expected_tx={len(request)}"
+                )
+
+            # 8 ms是从请求交给串口驱动之后等待响应的窗口，不能被Windows写入抖动占用。
+            deadline = time.monotonic() + timeout_s
 
             buffer = bytearray()
             while time.monotonic() < deadline:
                 chunk = self.port.read(max(1, expected_len - len(buffer)))
                 if chunk:
                     buffer.extend(chunk)
-                    parsed = self._try_parse_sensor_snapshot_response(buffer, slave)
+                    try:
+                        parsed = self._try_parse_sensor_snapshot_response(buffer, slave)
+                    except ModbusError:
+                        self.low_latency_last_transaction_end = time.perf_counter()
+                        raise
                     if parsed is not None:
                         self.last_rx = bytes(buffer)
-                        request_ms = (time.perf_counter() - request_started) * 1000.0
+                        request_finished = time.perf_counter()
+                        self.low_latency_last_transaction_end = request_finished
+                        request_ms = (request_finished - request_started) * 1000.0
                         self.low_latency_requests += 1
                         self.low_latency_max_request_ms = max(
                             self.low_latency_max_request_ms, request_ms
@@ -828,12 +868,17 @@ class ModbusRtuClient:
                         return parsed
 
         self.last_rx = bytes(buffer)
+        request_finished = time.perf_counter()
+        self.low_latency_last_transaction_end = request_finished
         self.low_latency_timeouts += 1
         self.low_latency_last_timeout_start = MB_FC_READ_SENSOR_SNAPSHOT
         hex_head = " ".join(f"{byte:02X}" for byte in buffer[:16])
+        tx_stage_ms = (write_finished - request_started) * 1000.0
+        response_wait_ms = (request_finished - write_finished) * 1000.0
         raise ModbusError(
             f"timeout reading sensor snapshot, rx_len={len(buffer)} "
-            f"rx_head=[{hex_head}], expected={expected_len}"
+            f"rx_head=[{hex_head}], expected={expected_len}, "
+            f"tx_stage={tx_stage_ms:.2f}ms, response_wait={response_wait_ms:.2f}ms"
         )
 
     @staticmethod
@@ -1435,7 +1480,7 @@ def empty_snapshot() -> GloveSnapshot:
     )
 
 
-def read_sensor_snapshot_200hz(
+def read_sensor_snapshot_poll(
     client: ModbusRtuClient,
     slave: int,
     timeout_s: float,
@@ -1444,10 +1489,10 @@ def read_sensor_snapshot_200hz(
 ) -> GloveSnapshot:
     """Read IMU, solved joint and touch data with one snapshot request."""
     base = previous if previous is not None else empty_snapshot()
-    fast_timeout_s = min(timeout_s, SENSOR_200HZ_TIMEOUT_S)
+    fast_timeout_s = min(timeout_s, SENSOR_POLL_TIMEOUT_S)
 
     snapshot_regs = client.read_sensor_snapshot_registers(
-        slave, fast_timeout_s, retries=SENSOR_200HZ_RETRIES
+        slave, fast_timeout_s, retries=SENSOR_POLL_RETRIES
     )
     sensor_frame_id = snapshot_regs[0] | (snapshot_regs[1] << 16)
     sensor_time_regs = snapshot_regs[2:6]
@@ -1539,16 +1584,93 @@ def read_sensor_snapshot_200hz(
     )
 
 
-def wait_sensor_200hz_deadline(stop_event: threading.Event, deadline: float) -> None:
-    """Wait to an absolute deadline without stretching the 5 ms period."""
+def wait_sensor_poll_deadline(stop_event: threading.Event, deadline: float) -> None:
+    """Wait to an absolute deadline without stretching the configured period."""
     while not stop_event.is_set():
         remaining = deadline - time.perf_counter()
         if remaining <= 0.0:
             return
-        if remaining > SENSOR_200HZ_SPIN_GUARD_S:
-            # 先阻塞较长空闲时间，最后1ms忙等，兼顾Windows定时精度和CPU占用。
-            if stop_event.wait(remaining - SENSOR_200HZ_SPIN_GUARD_S):
+        if remaining > SENSOR_POLL_SPIN_GUARD_S:
+            # 先阻塞较长空闲时间，最后2ms忙等，减少Windows线程晚唤醒造成的周期漂移。
+            if stop_event.wait(remaining - SENSOR_POLL_SPIN_GUARD_S):
                 return
+
+
+@dataclass
+class SensorPollSchedulingState:
+    winmm: object | None = None
+    timer_period_active: bool = False
+    kernel32: object | None = None
+    thread_handle: int | None = None
+    previous_thread_priority: int | None = None
+    thread_priority_changed: bool = False
+
+
+def enter_sensor_poll_scheduling() -> SensorPollSchedulingState:
+    """Improve timing precision for the current polling thread on Windows."""
+    state = SensorPollSchedulingState()
+    if os.name != "nt":
+        return state
+
+    try:
+        winmm = ctypes.WinDLL("winmm", use_last_error=True)
+        winmm.timeBeginPeriod.argtypes = [ctypes.c_uint]
+        winmm.timeBeginPeriod.restype = ctypes.c_uint
+        winmm.timeEndPeriod.argtypes = [ctypes.c_uint]
+        winmm.timeEndPeriod.restype = ctypes.c_uint
+        if winmm.timeBeginPeriod(WINDOWS_TIMER_PERIOD_MS) == 0:
+            state.winmm = winmm
+            state.timer_period_active = True
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentThread.argtypes = []
+        kernel32.GetCurrentThread.restype = ctypes.c_void_p
+        kernel32.GetThreadPriority.argtypes = [ctypes.c_void_p]
+        kernel32.GetThreadPriority.restype = ctypes.c_int
+        kernel32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        kernel32.SetThreadPriority.restype = ctypes.c_int
+        thread_handle = kernel32.GetCurrentThread()
+        previous_priority = kernel32.GetThreadPriority(thread_handle)
+        if (
+            previous_priority != WINDOWS_THREAD_PRIORITY_ERROR_RETURN
+            and kernel32.SetThreadPriority(
+                thread_handle, WINDOWS_THREAD_PRIORITY_ABOVE_NORMAL
+            )
+            != 0
+        ):
+            state.kernel32 = kernel32
+            state.thread_handle = thread_handle
+            state.previous_thread_priority = previous_priority
+            state.thread_priority_changed = True
+    except (AttributeError, OSError):
+        pass
+
+    return state
+
+
+def leave_sensor_poll_scheduling(state: SensorPollSchedulingState) -> None:
+    """Restore Windows scheduling settings changed for the polling thread."""
+    if (
+        state.thread_priority_changed
+        and state.kernel32 is not None
+        and state.thread_handle is not None
+        and state.previous_thread_priority is not None
+    ):
+        try:
+            state.kernel32.SetThreadPriority(
+                state.thread_handle, state.previous_thread_priority
+            )
+        except (AttributeError, OSError):
+            pass
+
+    if state.timer_period_active and state.winmm is not None:
+        try:
+            state.winmm.timeEndPeriod(WINDOWS_TIMER_PERIOD_MS)
+        except (AttributeError, OSError):
+            pass
 
 
 def decode_imu(imu_regs: list[int]) -> list[list[float]]:
@@ -1740,7 +1862,7 @@ class ModbusMonitorApp(tk.Tk):
         ttk.Button(top, text="Start Poll", command=self.start_poll).grid(
             row=0, column=14, padx=2
         )
-        ttk.Button(top, text="200Hz Sensors", command=self.start_sensor_200hz).grid(
+        ttk.Button(top, text="200Hz Sensors", command=self.start_sensor_poll).grid(
             row=0, column=15, padx=2
         )
         ttk.Button(top, text="Stop", command=self.stop_poll).grid(row=0, column=16, padx=2)
@@ -2662,7 +2784,7 @@ class ModbusMonitorApp(tk.Tk):
         self.worker.start()
         self.status_var.set(self.status_var.get() + " | polling")
 
-    def start_sensor_200hz(self) -> None:
+    def start_sensor_poll(self) -> None:
         if self.worker is not None and self.worker.is_alive():
             return
         try:
@@ -2676,7 +2798,7 @@ class ModbusMonitorApp(tk.Tk):
                 return
         self.stop_event.clear()
         self.worker = threading.Thread(
-            target=self._sensor_200hz_worker,
+            target=self._sensor_poll_worker,
             args=(slave, timeout_s),
             daemon=True,
         )
@@ -2697,16 +2819,34 @@ class ModbusMonitorApp(tk.Tk):
                 self.events.put(("error", exc))
                 self.stop_event.wait(0.5)
 
-    def _sensor_200hz_worker(self, slave: int, timeout_s: float) -> None:
+    def _sensor_poll_worker(self, slave: int, timeout_s: float) -> None:
         previous = self.last_snapshot if self.last_snapshot is not None else empty_snapshot()
         if not previous.firmware_regs:
             try:
-                # 固件版本在高速快照轮询开始前读取一次，避免占用200Hz采集周期。
+                # 固件版本在高速快照轮询开始前读取一次，避免占用200Hz通信周期。
                 previous.firmware_regs = self.client.read_holding_registers(
                     slave, REG_FW_VERSION_START, REG_FW_VERSION_COUNT, timeout_s
                 )
             except Exception as exc:
                 self.events.put(("error", exc))
+        try:
+            # 健康状态在启动前读取并缓存，200Hz运行期间只发送传感器快照请求。
+            previous.health_regs = self.client.read_holding_registers(
+                slave,
+                REG_HEALTH_STATUS_START,
+                REG_HEALTH_STATUS_COUNT,
+                min(timeout_s, 0.05),
+            )
+        except Exception:
+            # 预读失败不影响高速采集，界面沿用最近一次成功读取的健康状态。
+            pass
+        try:
+            self.client.prepare_low_latency_poll()
+        except Exception as exc:
+            self.events.put(("error", exc))
+            return
+
+        scheduling_state = enter_sensor_poll_scheduling()
         next_deadline = time.perf_counter()
         rate_started = next_deadline
         sensor_rate_start_frame_id: int | None = None
@@ -2718,51 +2858,15 @@ class ModbusMonitorApp(tk.Tk):
         sensor_hz = 0.0
         duplicate_responses = 0
         schedule_overruns = 0
-        next_health_poll = next_deadline
-
-        try:
-            self.client.prepare_low_latency_poll()
-        except Exception as exc:
-            self.events.put(("error", exc))
-            return
 
         try:
             while not self.stop_event.is_set():
                 try:
-                    snapshot = read_sensor_snapshot_200hz(
+                    snapshot = read_sensor_snapshot_poll(
                         self.client, slave, timeout_s, previous, actual_hz
                     )
                     rate_count += 1
                     now = time.perf_counter()
-
-                    if now >= next_health_poll:
-                        try:
-                            # 健康块低频读取，避免改变FC41帧并尽量不扰动200Hz轮询。
-                            snapshot.health_regs = self.client.read_holding_registers(
-                                slave,
-                                REG_HEALTH_STATUS_START,
-                                REG_HEALTH_STATUS_COUNT,
-                                min(timeout_s, 0.02),
-                                low_latency=True,
-                            )
-                        except Exception:
-                            self.client.recover_low_latency_poll()
-                            snapshot.health_regs = list(previous.health_regs) if previous else [
-                                0
-                            ] * REG_HEALTH_STATUS_COUNT
-                        if not snapshot.firmware_regs:
-                            try:
-                                # 启动时读取失败则随健康状态低频轮询重试，成功后不再重复读取。
-                                snapshot.firmware_regs = self.client.read_holding_registers(
-                                    slave,
-                                    REG_FW_VERSION_START,
-                                    REG_FW_VERSION_COUNT,
-                                    min(timeout_s, 0.02),
-                                    low_latency=True,
-                                )
-                            except Exception:
-                                self.client.recover_low_latency_poll()
-                        next_health_poll = now + SENSOR_200HZ_HEALTH_PERIOD_S
                     previous = snapshot
 
                     if snapshot.sensor_data_valid:
@@ -2805,29 +2909,32 @@ class ModbusMonitorApp(tk.Tk):
                     snapshot.actual_hz = actual_hz
                     snapshot.sensor_hz = sensor_hz
                     snapshot.duplicate_responses = duplicate_responses
-                    next_deadline += SENSOR_200HZ_PERIOD_S
+                    next_deadline += SENSOR_POLL_PERIOD_S
                     now = time.perf_counter()
                     if next_deadline <= now:
-                        # 超过5ms时立即从当前时刻重建节拍，避免连续补发旧周期请求。
-                        overruns = int((now - next_deadline) // SENSOR_200HZ_PERIOD_S) + 1
+                        # 超过当前周期时立即重建节拍，避免连续补发已经错过的请求。
+                        overruns = int((now - next_deadline) // SENSOR_POLL_PERIOD_S) + 1
                         schedule_overruns += overruns
                         next_deadline = now
                     snapshot.schedule_overruns = schedule_overruns
                     self.events.put(("snapshot", snapshot))
-                    wait_sensor_200hz_deadline(self.stop_event, next_deadline)
+                    wait_sensor_poll_deadline(self.stop_event, next_deadline)
                 except Exception as exc:
                     self.events.put(("error", exc))
                     self.client.recover_low_latency_poll()
                     # 超时后不在同一周期内重试；若已经超期则立即从当前时刻重建节拍。
-                    next_deadline += SENSOR_200HZ_PERIOD_S
+                    next_deadline += SENSOR_POLL_PERIOD_S
                     now = time.perf_counter()
                     if next_deadline <= now:
-                        overruns = int((now - next_deadline) // SENSOR_200HZ_PERIOD_S) + 1
+                        overruns = int((now - next_deadline) // SENSOR_POLL_PERIOD_S) + 1
                         schedule_overruns += overruns
                         next_deadline = now
-                    wait_sensor_200hz_deadline(self.stop_event, next_deadline)
+                    wait_sensor_poll_deadline(self.stop_event, next_deadline)
         finally:
-            self.client.finish_low_latency_poll()
+            try:
+                self.client.finish_low_latency_poll()
+            finally:
+                leave_sensor_poll_scheduling(scheduling_state)
 
     def _process_events(self) -> None:
         latest_snapshot: Optional[GloveSnapshot] = None
