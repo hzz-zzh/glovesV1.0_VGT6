@@ -963,7 +963,8 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 3000000;
+  /* 使用6Mbps兼顾高速快照传输和USB-RS485设备兼容性。 */
+  huart1.Init.BaudRate = 6000000;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
