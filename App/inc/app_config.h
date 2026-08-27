@@ -11,6 +11,46 @@ extern "C" {
  * 这里主要放系统规模、队列深度、内存池大小、数据流策略等业务参数
  */
 
+/*
+ * 量产构建默认关闭调试串口、测试任务和模拟数据。
+ * 研发调试时需先将 APP_BUILD_PRODUCTION 置 0，再单独开启所需功能。
+ */
+#define APP_BUILD_PRODUCTION                    (1U)
+#define APP_ENABLE_DEBUG_UART_OUTPUT            (0U)
+#define APP_ENABLE_UART_DEBUG_TASK              (0U)
+#define APP_ENABLE_TEST_TASK                    (0U)
+#define APP_ENABLE_TEST_DATA_INJECTION          (0U)
+#define APP_ENABLE_TOUCH_ADC_TEST_ONLY          (0U)
+#define APP_ENABLE_SD_LOG_TEST_ONLY             (0U)
+#define APP_ENABLE_STORAGE_SIM_DATA             (0U)
+
+#if (APP_BUILD_PRODUCTION != 0U) && \
+    ((APP_ENABLE_DEBUG_UART_OUTPUT != 0U) || \
+     (APP_ENABLE_UART_DEBUG_TASK != 0U) || \
+     (APP_ENABLE_TEST_TASK != 0U) || \
+     (APP_ENABLE_TEST_DATA_INJECTION != 0U) || \
+     (APP_ENABLE_TOUCH_ADC_TEST_ONLY != 0U) || \
+     (APP_ENABLE_SD_LOG_TEST_ONLY != 0U) || \
+     (APP_ENABLE_STORAGE_SIM_DATA != 0U))
+#error "Production build must not enable debug or test features"
+#endif
+
+#if (APP_ENABLE_UART_DEBUG_TASK != 0U) && (APP_ENABLE_DEBUG_UART_OUTPUT == 0U)
+#error "UART debug task requires debug UART output"
+#endif
+
+#if (APP_ENABLE_TEST_DATA_INJECTION != 0U) && (APP_ENABLE_TEST_TASK == 0U)
+#error "Test data injection requires the test task"
+#endif
+
+#if (APP_ENABLE_STORAGE_SIM_DATA != 0U) && (APP_ENABLE_SD_LOG_TEST_ONLY == 0U)
+#error "Storage simulated data is only allowed in SD log test mode"
+#endif
+
+#if (APP_ENABLE_TOUCH_ADC_TEST_ONLY != 0U) && (APP_ENABLE_SD_LOG_TEST_ONLY != 0U)
+#error "Only one exclusive hardware test mode may be enabled"
+#endif
+
 #define GLOVE_IMU_COUNT                         (16U)
 #define GLOVE_TOUCH_COUNT                       (68U)
 #define GLOVE_JOINT_DOF_COUNT                   (27U)

@@ -1,7 +1,9 @@
 #include "uart_redirect.h"
 
+#include "app_config.h"
 #include "main.h"
 
+#if (APP_ENABLE_DEBUG_UART_OUTPUT != 0U)
 #define UART_REDIRECT_BUFFER_SIZE       (4096U)
 #define UART_REDIRECT_TX_CHUNK_SIZE     (256U)
 #define UART_REDIRECT_TX_TIMEOUT_MS     (5U)
@@ -25,9 +27,11 @@ static void UartRedirect_Unlock(uint32_t primask)
     __enable_irq();
   }
 }
+#endif
 
 int fputc(int ch, FILE *f)
 {
+#if (APP_ENABLE_DEBUG_UART_OUTPUT != 0U)
   uint16_t next_head;
   uint32_t primask;
 
@@ -44,6 +48,10 @@ int fputc(int ch, FILE *f)
     s_uart_redirect_dropped++;
   }
   UartRedirect_Unlock(primask);
+#else
+  /* 量产固件不缓存、不发送调试日志，避免占用串口和中断时间。 */
+  (void)f;
+#endif
 
   return ch;
 }
@@ -59,6 +67,7 @@ int fgetc(FILE *f)
 
 void UartRedirect_Flush(uint32_t max_bytes)
 {
+#if (APP_ENABLE_DEBUG_UART_OUTPUT != 0U)
   uint8_t tx_chunk[UART_REDIRECT_TX_CHUNK_SIZE];
   uint32_t total = 0U;
 
@@ -86,9 +95,16 @@ void UartRedirect_Flush(uint32_t max_bytes)
     (void)HAL_UART_Transmit(&huart2, tx_chunk, count, UART_REDIRECT_TX_TIMEOUT_MS);
     total += count;
   }
+#else
+  (void)max_bytes;
+#endif
 }
 
 uint32_t UartRedirect_GetDroppedCount(void)
 {
+#if (APP_ENABLE_DEBUG_UART_OUTPUT != 0U)
   return s_uart_redirect_dropped;
+#else
+  return 0U;
+#endif
 }

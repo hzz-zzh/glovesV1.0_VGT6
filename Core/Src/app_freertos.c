@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "app_config.h"
 #include "data_manager.h"
 #include "system_health.h"
 #include "watchdogTask.h"
@@ -38,11 +39,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define FREERTOS_ENABLE_UART_DEBUG_TASK            (1)
-#define FREERTOS_ENABLE_TEST_TASK                  (0)
-#define FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY        (0)
-#define FREERTOS_ENABLE_SD_LOG_TEST_ONLY           (0)
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -184,16 +180,16 @@ void MX_FREERTOS_Init(void) {
   /* MCU长期由电池供电，看门狗任务不受外设电源开关影响。 */
   watchdogTaskHandle = osThreadNew(WatchdogTask, NULL, &watchdogTask_attributes);
 
-#if FREERTOS_ENABLE_UART_DEBUG_TASK
+#if (APP_ENABLE_UART_DEBUG_TASK != 0U)
   /* creation of uartDebugTask */
   uartDebugTaskHandle = osThreadNew(UartDebugTask, NULL, &uartDebugTask_attributes);
 #endif
 
-#if FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY
+#if (APP_ENABLE_TOUCH_ADC_TEST_ONLY != 0U)
   /* creation of touchAdcTask */
   touchAdcTaskHandle = osThreadNew(TouchAdcTask, NULL, &touchAdcTask_attributes);
-#elif FREERTOS_ENABLE_SD_LOG_TEST_ONLY == 0
-#if FREERTOS_ENABLE_TEST_TASK
+#elif (APP_ENABLE_SD_LOG_TEST_ONLY == 0U)
+#if (APP_ENABLE_TEST_TASK != 0U)
   /* creation of testTask */
   testTaskHandle = osThreadNew(StartTestTask, NULL, &testTask_attributes);
 #endif
@@ -220,7 +216,7 @@ void MX_FREERTOS_Init(void) {
   rs485TaskHandle = osThreadNew(Rs485Task, NULL, &rs485Task_attributes);
 #endif
 
-#if FREERTOS_ENABLE_TOUCH_ADC_TEST_ONLY == 0
+#if (APP_ENABLE_TOUCH_ADC_TEST_ONLY == 0U)
   /* creation of storageTask */
   storageTaskHandle = osThreadNew(StorageTask, NULL, &storageTask_attributes);
 #endif

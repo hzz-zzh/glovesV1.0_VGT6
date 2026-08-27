@@ -1,5 +1,6 @@
 #include "storageTask.h"
 
+#include "app_config.h"
 #include "cmsis_os2.h"
 #include "data_manager.h"
 #include "FreeRTOS.h"
@@ -15,7 +16,6 @@
 #define STORAGE_FULL_FRAME_GET_TIMEOUT_MS  (20U)
 #define STORAGE_KEY_DEBOUNCE_MS            (50U)
 #define STORAGE_USER_KEY_ACTIVE_LEVEL      GPIO_PIN_SET
-#define STORAGE_ENABLE_SIM_LOG_DATA        (1U)
 #define STORAGE_SIM_FRAME_PERIOD_MS        (20U)
 #define STORAGE_KEY_DEBUG_PRINT            (0U)
 #define STORAGE_KEY_LEVEL_PRINT_MS         (1000U)
@@ -183,7 +183,7 @@ static void StorageTask_PollUserKey(void)
   }
 }
 
-#if STORAGE_ENABLE_SIM_LOG_DATA
+#if (APP_ENABLE_STORAGE_SIM_DATA != 0U)
 static void StorageTask_BuildSimFrame(GloveFullFrame_t *frame)
 {
   const uint32_t frame_id = storage_sim_frame_count + 1U;
@@ -295,7 +295,7 @@ void StorageTask(void *argument)
       }
       (void)DataManager_ReleaseFullFrame(full);
     }
-#if STORAGE_ENABLE_SIM_LOG_DATA
+#if (APP_ENABLE_STORAGE_SIM_DATA != 0U)
     else
     {
       StorageTask_WriteSimFrameIfDue();

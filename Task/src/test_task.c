@@ -2,11 +2,13 @@
 
 #include <stddef.h>
 
+#include "app_config.h"
 #include "app_data.h"
 #include "cmsis_os2.h"
 #include "data_manager.h"
 #include "uart_redirect.h"
 
+#if (APP_ENABLE_TEST_DATA_INJECTION != 0U)
 typedef struct
 {
     volatile uint32_t pass_count;
@@ -260,9 +262,11 @@ static GloveStatus_t Test_RunOneFrame(uint32_t frame_id)
     s_test_stats.last_frame_id = frame_id;
     return GLOVE_STATUS_OK;
 }
+#endif
 
 void StartTestTask(void *argument)
 {
+#if (APP_ENABLE_TEST_DATA_INJECTION != 0U)
     uint32_t frame_id = 0U;
     GloveStatus_t status;
 
@@ -270,25 +274,28 @@ void StartTestTask(void *argument)
 
     for (;;)
     {
-        // status = Test_RunOneFrame(frame_id);
-        // s_test_stats.last_status = status;
+        status = Test_RunOneFrame(frame_id);
+        s_test_stats.last_status = status;
 
-        // if (status == GLOVE_STATUS_OK)
-        // {
-        //     s_test_stats.pass_count++;
-        //     frame_id++;
-        // }
-        // else
-        // {
-        //     Test_SetError(status);
-        // }
-
-        // printf("TestTask: frame_id=%lu, status=%d, pass_count=%lu, fail_count=%lu\r\n",
-        //        s_test_stats.last_frame_id,
-        //        s_test_stats.last_status,
-        //        s_test_stats.pass_count,
-        //        s_test_stats.fail_count);
+        if (status == GLOVE_STATUS_OK)
+        {
+            s_test_stats.pass_count++;
+            frame_id++;
+        }
+        else
+        {
+            Test_SetError(status);
+        }
 
         osDelay(1000U);
     }
+#else
+    (void)argument;
+
+    /* 防御性保护：即使被误创建，量产构建也不会向数据链注入模拟帧。 */
+    for (;;)
+    {
+        osDelay(1000U);
+    }
+#endif
 }
