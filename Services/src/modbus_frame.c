@@ -14,6 +14,7 @@
 #include "modbus_registers.h"
 #include "modbus_time_sync.h"
 #include "sd_log.h"
+#include "storageTask.h"
 #include "systemManagerTask.h"
 #include "system_health.h"
 #include "system_watchdog.h"
@@ -413,6 +414,8 @@ static uint8_t Modbus_WriteCommandReg(uint16_t reg_addr, uint16_t value)
 
 static void Modbus_ProcessCommand(void)
 {
+  GloveStatus_t command_status;
+
   if (modbus_cmd_command == CMD_NONE)
   {
     return;
@@ -442,6 +445,51 @@ static void Modbus_ProcessCommand(void)
     {
       modbus_cmd_ack = CMD_ACK_INVALID_PARAM;
       modbus_cmd_error = CMD_ERROR_INVALID_PARAM;
+    }
+  }
+  else if ((modbus_cmd_command == CMD_LOG_START) ||
+           (modbus_cmd_command == CMD_LOG_STOP))
+  {
+    if (modbus_cmd_param != 0U)
+    {
+      modbus_cmd_ack = CMD_ACK_INVALID_PARAM;
+      modbus_cmd_error = CMD_ERROR_INVALID_PARAM;
+    }
+    else
+    {
+      /* 485任务只确认命令已经入队，实际结果由SD状态寄存器异步返回。 */
+      if ((modbus_cmd_command == CMD_LOG_START) &&
+          (ModbusTimeSync_IsSynced() == 0U))
+      {
+        command_status = GLOVE_STATUS_NOT_READY;
+      }
+      else
+      {
+        command_status = (modbus_cmd_command == CMD_LOG_START) ?
+                         StorageTask_RequestStartAsync() :
+                         StorageTask_RequestStopAsync();
+      }
+      if (command_status == GLOVE_STATUS_OK)
+      {
+        modbus_cmd_ack = CMD_ACK_OK;
+      }
+      else
+      {
+        modbus_cmd_ack = CMD_ACK_FAILED;
+        if (command_status == GLOVE_STATUS_TIMEOUT)
+        {
+          modbus_cmd_error = CMD_ERROR_TIMEOUT;
+        }
+        else if (command_status == GLOVE_STATUS_NOT_READY)
+        {
+          modbus_cmd_error = CMD_ERROR_RESOURCE_NOT_READY;
+        }
+        else
+        {
+          modbus_cmd_error = (modbus_cmd_command == CMD_LOG_START) ?
+                             CMD_ERROR_START_FAILED : CMD_ERROR_STOP_FAILED;
+        }
+      }
     }
   }
   else
@@ -1212,6 +1260,12 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
     case REG_SD_CURRENT_FILE_ID:
       return modbus_read_snapshot.sd.current_file_id;
 
+    case REG_SD_FORMAT_VERSION:
+      return modbus_read_snapshot.sd.format_version;
+
+    case REG_SD_BLOCK_SIZE:
+      return modbus_read_snapshot.sd.block_size;
+
     case REG_IMU_STATUS_BITS:
       return Modbus_ReadImuStatusBits();
 
@@ -1329,6 +1383,24 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
   {
     return Modbus_ReadU32Reg(modbus_read_snapshot.sd.current_write_count,
                              (uint16_t)(reg_addr - REG_SD_CURRENT_WRITE_CNT));
+  }
+  if ((reg_addr >= REG_SD_LAST_WRITE_MS) &&
+      (reg_addr < (REG_SD_LAST_WRITE_MS + MODBUS_REGS_U32)))
+  {
+    return Modbus_ReadU32Reg(modbus_read_snapshot.sd.last_write_time_ms,
+                             (uint16_t)(reg_addr - REG_SD_LAST_WRITE_MS));
+  }
+  if ((reg_addr >= REG_SD_MAX_WRITE_MS) &&
+      (reg_addr < (REG_SD_MAX_WRITE_MS + MODBUS_REGS_U32)))
+  {
+    return Modbus_ReadU32Reg(modbus_read_snapshot.sd.max_write_time_ms,
+                             (uint16_t)(reg_addr - REG_SD_MAX_WRITE_MS));
+  }
+  if ((reg_addr >= REG_SD_SLOW_WRITE_CNT) &&
+      (reg_addr < (REG_SD_SLOW_WRITE_CNT + MODBUS_REGS_U32)))
+  {
+    return Modbus_ReadU32Reg(modbus_read_snapshot.sd.slow_write_count,
+                             (uint16_t)(reg_addr - REG_SD_SLOW_WRITE_CNT));
   }
   if ((reg_addr >= REG_SD_LOG_LENGTH) &&
       (reg_addr < (REG_SD_LOG_LENGTH + MODBUS_REGS_U64)))

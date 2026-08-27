@@ -63,8 +63,15 @@ extern "C" {
 #define GLOVE_RAW_FRAME_POOL_SIZE               (8U)
 #define GLOVE_RAW_FRAME_QUEUE_DEPTH             (4U)
 
-#define GLOVE_FULL_FRAME_POOL_SIZE              (8U)
-#define GLOVE_FULL_FRAME_QUEUE_DEPTH            (4U)
+#define GLOVE_FULL_FRAME_POOL_SIZE              (136U)
+#define GLOVE_FULL_FRAME_STORAGE_QUEUE_DEPTH    (128U)
+#define GLOVE_FULL_FRAME_RS485_QUEUE_DEPTH      (4U)
+
+/* Storage、RS485和正在发布的帧必须都有独立的数据块余量。 */
+#if GLOVE_FULL_FRAME_POOL_SIZE < (GLOVE_FULL_FRAME_STORAGE_QUEUE_DEPTH + \
+                                  GLOVE_FULL_FRAME_RS485_QUEUE_DEPTH + 4U)
+#error "GLOVE_FULL_FRAME_POOL_SIZE is too small for the configured consumers"
+#endif
 
 #define GLOVE_RAW_FRAME_CONSUMER_COUNT          (1U)
 #define GLOVE_FULL_FRAME_CONSUMER_COUNT         (2U)

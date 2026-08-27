@@ -91,6 +91,10 @@ typedef struct
     uint32_t frame_id;                /* 单调递增帧号，用于日志和通讯对齐 */
     GloveTimestampUs_t timestamp_us;  /* 合帧时间戳 单位 us */
     uint32_t valid_flags;             /* 本帧有效数据标志 */
+    uint32_t imu_sensor_seq;          /* 生成本帧的IMU源序号 */
+    uint32_t touch_sensor_seq;        /* 生成本帧的触觉源序号 */
+    GloveTimestampUs_t imu_timestamp_us;
+    GloveTimestampUs_t touch_timestamp_us;
 
     GloveImuSample_t imu[GLOVE_IMU_COUNT];
     GloveQuaternion_t quat[GLOVE_IMU_COUNT];
@@ -107,6 +111,10 @@ typedef struct
     uint32_t frame_id;                /* 与输入 RawFrame 保持一致 */
     GloveTimestampUs_t timestamp_us;  /* 与输入 RawFrame 保持一致 */
     uint32_t valid_flags;             /* 算法结果有效标志 */
+    GloveStatus_t process_status;     /* 本帧算法执行结果 */
+    uint16_t calibration_seq;         /* 本帧使用的标定版本序号 */
+    uint8_t calibration_applied;
+    uint8_t reserved;
 
     GloveQuaternion_t imu_attitude[GLOVE_IMU_COUNT];
     float joint_angle_deg[GLOVE_JOINT_DOF_COUNT];

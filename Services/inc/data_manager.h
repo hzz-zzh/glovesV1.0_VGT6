@@ -93,6 +93,9 @@ GloveStatus_t DataManager_PublishTouchSensor(GloveTouchSensorBlock_t *block, uin
 GloveStatus_t DataManager_PublishRawFrame(GloveRawFrameBlock_t *block, uint32_t timeout_ms);
 GloveStatus_t DataManager_PublishFullFrame(GloveFullFrameBlock_t *block, uint32_t timeout_ms);
 
+/* 仅在文件已经准备完成后向Storage队列投递FullFrame。 */
+void DataManager_SetFullFrameStorageEnabled(uint8_t enabled);
+
 GloveStatus_t DataManager_GetImuSensor(GloveImuSensorBlock_t **block, uint32_t timeout_ms);
 GloveStatus_t DataManager_GetTouchSensor(GloveTouchSensorBlock_t **block, uint32_t timeout_ms);
 GloveStatus_t DataManager_GetRawFrame(DataConsumer_t consumer,

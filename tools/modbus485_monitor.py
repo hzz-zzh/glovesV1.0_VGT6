@@ -15,6 +15,7 @@ import time
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
+from typing import Optional
 
 try:
     import serial
@@ -59,6 +60,8 @@ REG_CMD_ACK_START = 0x0023
 REG_CMD_ACK_COUNT = 3
 CMD_HEALTH_CLEAR_HISTORY = 0x004A
 CMD_HEALTH_CLEAR_MAGIC = 0xC1EA
+CMD_LOG_START = 0x0094
+CMD_LOG_STOP = 0x0096
 CMD_ACK_OK = 0x0001
 REG_SYSTEM_STATUS_START = 0x0040
 REG_SYSTEM_STATUS_COUNT = 10
@@ -66,6 +69,8 @@ REG_HEALTH_STATUS_START = 0x004A
 REG_HEALTH_STATUS_COUNT = 22
 REG_POWER_STATUS_START = 0x0060
 REG_POWER_STATUS_COUNT = 18
+REG_SD_STATUS_START = 0x0081
+REG_SD_STATUS_COUNT = 63
 REG_WORK_STATE = 0x0500
 
 REG_IMU_DATA_START = 0x1000
@@ -464,6 +469,24 @@ def format_delta_ns(delta_ns: int) -> str:
 def regs_to_f32_le_words(low_word: int, high_word: int) -> float:
     raw = (low_word & 0xFFFF) | ((high_word & 0xFFFF) << 16)
     return struct.unpack("<f", struct.pack("<I", raw))[0]
+
+
+def regs_to_u32_le_words(regs: list[int], offset: int) -> int:
+    return (regs[offset] & 0xFFFF) | ((regs[offset + 1] & 0xFFFF) << 16)
+
+
+def regs_to_u64_le_words(regs: list[int], offset: int) -> int:
+    value = 0
+    for index in range(4):
+        value |= (regs[offset + index] & 0xFFFF) << (index * 16)
+    return value
+
+
+def regs_to_text(regs: list[int]) -> str:
+    data = bytearray()
+    for value in regs:
+        data.extend(((value >> 8) & 0xFF, value & 0xFF))
+    return bytes(data).split(b"\0", 1)[0].decode("ascii", errors="replace")
 
 
 def f32_to_regs_le_words(value: float) -> list[int]:
@@ -1360,6 +1383,7 @@ class GloveSnapshot:
     system: list[int]
     health_regs: list[int]
     power_regs: list[int]
+    sd_regs: list[int]
     work_state: int
     imu_status_regs: list[int]
     calib_ctrl_regs: list[int]
@@ -1425,6 +1449,9 @@ def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> Glov
         power_regs=client.read_holding_registers(
             slave, REG_POWER_STATUS_START, REG_POWER_STATUS_COUNT, timeout_s
         ),
+        sd_regs=client.read_holding_registers(
+            slave, REG_SD_STATUS_START, REG_SD_STATUS_COUNT, timeout_s
+        ),
         work_state=client.read_holding_registers(slave, REG_WORK_STATE, 1, timeout_s)[0],
         imu_status_regs=client.read_holding_registers(
             slave, REG_IMU_TIMESTAMP_US, 5, timeout_s
@@ -1469,6 +1496,7 @@ def empty_snapshot() -> GloveSnapshot:
         system=[0] * REG_SYSTEM_STATUS_COUNT,
         health_regs=[0] * REG_HEALTH_STATUS_COUNT,
         power_regs=[0] * REG_POWER_STATUS_COUNT,
+        sd_regs=[0] * REG_SD_STATUS_COUNT,
         work_state=0,
         imu_status_regs=[0] * 5,
         calib_ctrl_regs=[0] * REG_IMU_CALIB_CTRL_COUNT,
@@ -1551,6 +1579,7 @@ def read_sensor_snapshot_poll(
         system=base.system,
         health_regs=base.health_regs,
         power_regs=power_regs,
+        sd_regs=base.sd_regs,
         work_state=base.work_state,
         imu_status_regs=[*sensor_time_regs, imu_status],
         calib_ctrl_regs=base.calib_ctrl_regs,
@@ -1887,6 +1916,7 @@ class ModbusMonitorApp(tk.Tk):
         self.summary_text = self._add_text_tab("Summary")
         self.health_text = self._add_health_tab()
         self.power_text = self._add_text_tab("Power")
+        self.sd_text = self._add_sd_tab()
         self.imu_text = self._add_text_tab("IMU")
         self.joint_text = self._add_text_tab("Joint")
         self.touch_text = self._add_text_tab("Touch")
@@ -2071,6 +2101,33 @@ class ModbusMonitorApp(tk.Tk):
         ybar.grid(row=1, column=1, sticky="ns")
         xbar.grid(row=2, column=0, sticky="ew")
         self.notebook.add(frame, text="Time Sync")
+        return text
+
+    def _add_sd_tab(self) -> tk.Text:
+        frame = ttk.Frame(self.notebook)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        controls = ttk.Frame(frame, padding=8)
+        controls.grid(row=0, column=0, sticky="ew")
+        ttk.Button(controls, text="Start Recording", command=self.start_sd_recording).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(controls, text="Stop Recording", command=self.stop_sd_recording).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(controls, text="Refresh SD", command=self.refresh_sd_status).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+
+        text = tk.Text(frame, wrap="none", font=("Consolas", 10), state="disabled")
+        ybar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        xbar = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text.xview)
+        text.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        text.grid(row=1, column=0, sticky="nsew")
+        ybar.grid(row=1, column=1, sticky="ns")
+        xbar.grid(row=2, column=0, sticky="ew")
+        self.notebook.add(frame, text="SD Log")
         return text
 
     def _add_test_tab(self) -> tk.Text:
@@ -2259,6 +2316,97 @@ class ModbusMonitorApp(tk.Tk):
                     "log",
                     f"[{time.strftime('%H:%M:%S')}] health history cleared "
                     f"seq=0x{seq:04X}\n\n",
+                )
+            )
+        except Exception as exc:
+            self.events.put(("error", exc))
+
+    def start_sd_recording(self) -> None:
+        self._start_worker(self._sd_command_worker, CMD_LOG_START)
+
+    def stop_sd_recording(self) -> None:
+        self._start_worker(self._sd_command_worker, CMD_LOG_STOP)
+
+    def refresh_sd_status(self) -> None:
+        self._start_worker(self._refresh_sd_status_worker)
+
+    def _refresh_sd_status_worker(self) -> None:
+        try:
+            slave, timeout_s = self._ensure_connected_for_worker()
+            regs = self.client.read_holding_registers(
+                slave, REG_SD_STATUS_START, REG_SD_STATUS_COUNT, timeout_s
+            )
+            self.events.put(("sd_status", regs))
+            self._queue_exchange_log("read SD status")
+        except Exception as exc:
+            self.events.put(("error", exc))
+
+    def _sd_command_worker(self, command: int) -> None:
+        try:
+            slave, timeout_s = self._ensure_connected_for_worker()
+            action = "start" if command == CMD_LOG_START else "stop"
+
+            if command == CMD_LOG_START:
+                # 创建文件前同步主机UTC，确保FAT目录中的创建和修改时间真实可追溯。
+                host_ns = time.time_ns()
+                sec = host_ns // 1_000_000_000
+                nsec = host_ns % 1_000_000_000
+                self.client.write_multiple_registers(
+                    slave,
+                    REG_TIME_SYNC_UTC_US,
+                    ros_time_to_regs_le_words(sec, nsec),
+                    timeout_s,
+                )
+
+            seq = int(time.time() * 1000.0) & 0xFFFF
+            self.client.write_multiple_registers(
+                slave, REG_CMD_START, [command, 0, seq], timeout_s
+            )
+            ack, ack_seq, error = self.client.read_holding_registers(
+                slave, REG_CMD_ACK_START, REG_CMD_ACK_COUNT, timeout_s
+            )
+            if (ack != CMD_ACK_OK) or (ack_seq != seq) or (error != 0):
+                raise ModbusError(
+                    f"SD {action} rejected: ack=0x{ack:04X} "
+                    f"ack_seq=0x{ack_seq:04X} expected=0x{seq:04X} "
+                    f"error=0x{error:04X}"
+                )
+
+            # 命令ACK表示已进入Storage控制队列，继续轮询直到实际状态完成。
+            target_state = 1 if command == CMD_LOG_START else 0
+            target_fs_state = 1 if command == CMD_LOG_START else 0
+            deadline = time.monotonic() + (30.0 if command == CMD_LOG_START else 15.0)
+            # StorageTask最多20ms检查一次控制队列，先让状态离开上一笔命令的终态。
+            time.sleep(0.05)
+            while True:
+                status_regs = self.client.read_holding_registers(
+                    slave, REG_SD_STATUS_START, 3, timeout_s
+                )
+                fs_state = status_regs[0]
+                log_state = status_regs[1]
+                error_code = status_regs[2]
+                if (log_state == target_state) and (fs_state == target_fs_state):
+                    break
+                if log_state == 0x8000:
+                    raise ModbusError(
+                        f"SD {action} failed: error=0x{error_code:04X}"
+                    )
+                if time.monotonic() >= deadline:
+                    raise ModbusError(
+                        f"SD {action} timeout: fs={fs_state} state=0x{log_state:04X} "
+                        f"error=0x{error_code:04X}"
+                    )
+                time.sleep(0.1)
+
+            regs = self.client.read_holding_registers(
+                slave, REG_SD_STATUS_START, REG_SD_STATUS_COUNT, timeout_s
+            )
+            self.events.put(("sd_status", regs))
+            self.events.put(
+                (
+                    "log",
+                    f"[{time.strftime('%H:%M:%S')}] SD recording {action} "
+                    f"completed seq=0x{seq:04X}\n\n",
                 )
             )
         except Exception as exc:
@@ -2953,6 +3101,11 @@ class ModbusMonitorApp(tk.Tk):
                     append_text(self.manual_text, str(payload))
                 elif kind == "time_log":
                     append_text(self.time_text, str(payload))
+                elif kind == "sd_status":
+                    sd_regs = payload  # type: ignore[assignment]
+                    if self.last_snapshot is not None:
+                        self.last_snapshot.sd_regs = sd_regs
+                    self._render_sd_status(sd_regs)
                 elif kind == "test_log":
                     append_text(self.test_text, str(payload))
                 elif kind == "log":
@@ -2969,6 +3122,62 @@ class ModbusMonitorApp(tk.Tk):
         if latest_snapshot is not None:
             self._render_snapshot(latest_snapshot)
         self.after(80, self._process_events)
+
+    def _render_sd_status(self, regs: list[int]) -> None:
+        if len(regs) < REG_SD_STATUS_COUNT:
+            set_text(self.sd_text, f"SD status incomplete: {len(regs)} registers")
+            return
+
+        fs_names = {0: "NOT_MOUNTED", 1: "MOUNTED"}
+        log_names = {
+            0: "IDLE",
+            1: "RECORDING",
+            2: "STOPPING",
+            3: "PREPARING",
+            0x8000: "ERROR",
+        }
+        error_names = {
+            0: "none",
+            0x8001: "card is not exFAT",
+            0x8002: "short write",
+            0x8003: "LOG file id exhausted",
+            0x8004: "UTC time not synchronized",
+        }
+        total_mb = regs_to_u32_le_words(regs, 3)
+        free_mb = regs_to_u32_le_words(regs, 5)
+        used_mb = regs_to_u32_le_words(regs, 7)
+        file_size = regs_to_u64_le_words(regs, 11)
+        write_count = regs_to_u32_le_words(regs, 15)
+        last_write_ms = regs_to_u32_le_words(regs, 19)
+        max_write_ms = regs_to_u32_le_words(regs, 21)
+        slow_write_count = regs_to_u32_le_words(regs, 23)
+        current_name = regs_to_text(regs[31:47])
+        last_name = regs_to_text(regs[47:63])
+        duration_s = write_count / 200.0
+
+        lines = [
+            "SD recording status",
+            "",
+            f"Filesystem       : {regs[0]} ({fs_names.get(regs[0], 'UNKNOWN')})",
+            f"Recording        : 0x{regs[1]:04X} ({log_names.get(regs[1], 'UNKNOWN')})",
+            f"Error            : 0x{regs[2]:04X} ({error_names.get(regs[2], 'FatFs/HAL error')})",
+            f"Capacity         : total={total_mb} MB used={used_mb} MB free={free_mb} MB",
+            f"Current file id  : {regs[9]}",
+            f"Current filename : {current_name or '<none>'}",
+            f"Last filename    : {last_name or '<none>'}",
+            f"Current size     : {file_size} bytes ({file_size / (1024 ** 2):.2f} MiB)",
+            f"Record count     : {write_count} (~{duration_s:.1f} s at 200Hz)",
+            "",
+            f"Format version   : {regs[17]}",
+            f"Record size      : {regs[18]} bytes",
+            f"Last batch write : {last_write_ms} ms",
+            f"Max batch write  : {max_write_ms} ms",
+            f"Slow writes      : {slow_write_count} (>20 ms per 4-record batch)",
+            "",
+            "Expected V2 load : 307200 bytes/s at 200Hz (~1.03 GiB/hour)",
+            "Start Recording automatically synchronizes host UTC before creating the file.",
+        ]
+        set_text(self.sd_text, "\n".join(lines))
 
     def _render_snapshot(self, snapshot: GloveSnapshot) -> None:
         power = decode_power(snapshot.power_regs)
@@ -3101,6 +3310,7 @@ class ModbusMonitorApp(tk.Tk):
             f"Touch count/cap   : {touch_count}/{touch_capacity}",
         ]
         set_text(self.summary_text, "\n".join(summary))
+        self._render_sd_status(snapshot.sd_regs)
 
         attempt_text = (
             f"{health.recovery_attempt}/{health.recovery_limit}"
@@ -3235,6 +3445,7 @@ class ModbusMonitorApp(tk.Tk):
             self._format_regs("system 0x0040", REG_SYSTEM_STATUS_START, snapshot.system),
             self._format_regs("health 0x004A", REG_HEALTH_STATUS_START, snapshot.health_regs),
             self._format_regs("power 0x0060", REG_POWER_STATUS_START, snapshot.power_regs),
+            self._format_regs("SD 0x0081", REG_SD_STATUS_START, snapshot.sd_regs),
             self._format_regs("imu status 0x1140", REG_IMU_TIMESTAMP_US, snapshot.imu_status_regs),
             self._format_regs(
                 "calib ctrl 0x1254", REG_IMU_CALIB_CTRL_START, snapshot.calib_ctrl_regs

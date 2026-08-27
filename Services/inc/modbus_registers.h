@@ -143,9 +143,11 @@ extern "C" {
 #define REG_SD_CURRENT_FILE_ID         0x008AU
 #define REG_SD_CURRENT_FILE_SIZE       0x008CU
 #define REG_SD_CURRENT_WRITE_CNT       0x0090U
-#define REG_SD_LOG_CREATE_FILE         0x0092U
-#define REG_SD_RESERVED0_START         0x0093U
-#define REG_SD_RESERVED0_END           0x0099U
+#define REG_SD_FORMAT_VERSION          0x0092U
+#define REG_SD_BLOCK_SIZE              0x0093U
+#define REG_SD_LAST_WRITE_MS           0x0094U
+#define REG_SD_MAX_WRITE_MS            0x0096U
+#define REG_SD_SLOW_WRITE_CNT          0x0098U
 #define REG_SD_LOG_LENGTH              0x009AU
 #define REG_SD_RESERVED1_START         0x009EU
 #define REG_SD_RESERVED1_END           0x009FU
@@ -162,6 +164,9 @@ extern "C" {
 #define SD_FS_STATUS_MOUNTED           0x0001U
 #define SD_LOG_STATUS_IDLE             0x0000U
 #define SD_LOG_STATUS_RECORDING        0x0001U
+#define SD_LOG_STATUS_STOPPING         0x0002U
+#define SD_LOG_STATUS_PREPARING        0x0003U
+#define SD_LOG_STATUS_ERROR            0x8000U
 #define SD_ERROR_NONE                  0x0000U
 
 /* Work status register. */

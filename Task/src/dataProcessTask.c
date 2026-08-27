@@ -286,7 +286,8 @@ static void DataProcess_PrintFullFrame(const GloveFullFrame_t *full,
 
 static GloveStatus_t DataProcess_SolveJointAnglesDeg(const GloveRawFrame_t *raw,
                                                      float joint_angle_deg[GLOVE_JOINT_DOF_COUNT],
-                                                     uint8_t *calibration_applied)
+                                                     uint8_t *calibration_applied,
+                                                     uint16_t *calibration_seq)
 {
     DataProcessAlgorithmConfig_t config;
 
@@ -299,6 +300,20 @@ static GloveStatus_t DataProcess_SolveJointAnglesDeg(const GloveRawFrame_t *raw,
     {
         *calibration_applied = 0U;
     }
+    if (calibration_seq != NULL)
+    {
+        *calibration_seq = 0U;
+    }
+
+    DataProcess_CopyAlgorithmConfig(&config);
+    if (calibration_applied != NULL)
+    {
+        *calibration_applied = config.calibration_applied;
+    }
+    if (calibration_seq != NULL)
+    {
+        *calibration_seq = config.calibration_seq;
+    }
 
     if (DataProcess_HasValidImuInput(raw) == 0U)
     {
@@ -307,12 +322,6 @@ static GloveStatus_t DataProcess_SolveJointAnglesDeg(const GloveRawFrame_t *raw,
             joint_angle_deg[i] = HAND_SOLVE_MISSING_VALUE;
         }
         return GLOVE_STATUS_NOT_READY;
-    }
-
-    DataProcess_CopyAlgorithmConfig(&config);
-    if (calibration_applied != NULL)
-    {
-        *calibration_applied = config.calibration_applied;
     }
 
     return HandSolve_SolveAnglesDeg(raw->quat,
@@ -328,6 +337,7 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
 {
     GloveStatus_t status;
     uint8_t calibration_applied = 0U;
+    uint16_t calibration_seq = 0U;
 
     if ((raw == NULL) || (processed == NULL))
     {
@@ -337,6 +347,7 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
     AppData_ClearProcessedFrame(processed);
     processed->frame_id = raw->frame_id;
     processed->timestamp_us = raw->timestamp_us;
+    processed->process_status = GLOVE_STATUS_NOT_READY;
 
     if ((raw->valid_flags & GLOVE_FRAME_FLAG_QUAT_VALID) != 0U)
     {
@@ -347,7 +358,11 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
 
     status = DataProcess_SolveJointAnglesDeg(raw,
                                              processed->joint_angle_deg,
-                                             &calibration_applied);
+                                             &calibration_applied,
+                                             &calibration_seq);
+    processed->process_status = status;
+    processed->calibration_applied = calibration_applied;
+    processed->calibration_seq = calibration_seq;
     if (status != GLOVE_STATUS_OK)
     {
         s_data_process_stats.invalid_input_frames++;

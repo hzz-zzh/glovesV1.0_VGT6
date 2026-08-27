@@ -26,6 +26,7 @@ static FramePool_t s_full_pool;
 static DataManagerQueues_t s_queues;
 static GloveDataStats_t s_stats;
 static uint8_t s_initialized;
+static volatile uint8_t s_full_storage_enabled;
 
 /* 静态数据块存储区 运行期不使用 malloc */
 static GloveImuSensorBlock_t s_imu_sensor_blocks[GLOVE_IMU_SENSOR_POOL_SIZE];
@@ -246,9 +247,9 @@ GloveStatus_t DataManager_Init(void)
     s_queues.raw_for_algorithm =
         CreatePointerQueue(GLOVE_RAW_FRAME_QUEUE_DEPTH, "raw.alg");
     s_queues.full_for_storage =
-        CreatePointerQueue(GLOVE_FULL_FRAME_QUEUE_DEPTH, "full.store");
+        CreatePointerQueue(GLOVE_FULL_FRAME_STORAGE_QUEUE_DEPTH, "full.store");
     s_queues.full_for_rs485 =
-        CreatePointerQueue(GLOVE_FULL_FRAME_QUEUE_DEPTH, "full.rs485");
+        CreatePointerQueue(GLOVE_FULL_FRAME_RS485_QUEUE_DEPTH, "full.rs485");
 
     if ((s_queues.imu_sensor_for_assembler == NULL) ||
         (s_queues.touch_sensor_for_assembler == NULL) ||
@@ -260,6 +261,7 @@ GloveStatus_t DataManager_Init(void)
     }
 
     s_initialized = 1U;
+    s_full_storage_enabled = 0U;
     return GLOVE_STATUS_OK;
 }
 
@@ -409,18 +411,21 @@ GloveStatus_t DataManager_PublishFullFrame(GloveFullFrameBlock_t *block, uint32_
     /*
      * FullFrame 有两个消费者
      * Alloc 已经让发布者持有一个引用
-     * Storage 引用和 RS485 引用共同管理后续生命周期
+     * Storage订阅开启时与RS485共同管理后续生命周期
      */
-    AddRef(&block->ref_count);
-    status = SendPointer(s_queues.full_for_storage, block, timeout_ms);
-    if (status != GLOVE_STATUS_OK)
+    if (s_full_storage_enabled != 0U)
     {
-        (void)DataManager_ReleaseFullFrame(block);
-        final_status = status;
-    }
-    else
-    {
-        delivered_count++;
+        AddRef(&block->ref_count);
+        status = SendPointer(s_queues.full_for_storage, block, timeout_ms);
+        if (status != GLOVE_STATUS_OK)
+        {
+            (void)DataManager_ReleaseFullFrame(block);
+            final_status = status;
+        }
+        else
+        {
+            delivered_count++;
+        }
     }
 
     AddRef(&block->ref_count);
@@ -446,6 +451,12 @@ GloveStatus_t DataManager_PublishFullFrame(GloveFullFrameBlock_t *block, uint32_
 
     StatsIncrement(&s_stats.full_frames_published);
     return final_status;
+}
+
+void DataManager_SetFullFrameStorageEnabled(uint8_t enabled)
+{
+    /* 单字节开关在Cortex-M上原子更新，发布者下一帧立即使用新状态。 */
+    s_full_storage_enabled = (enabled != 0U) ? 1U : 0U;
 }
 
 GloveStatus_t DataManager_GetImuSensor(GloveImuSensorBlock_t **block, uint32_t timeout_ms)

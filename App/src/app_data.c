@@ -61,6 +61,10 @@ void AppData_BuildRawFrameFromSensors(GloveRawFrame_t *raw,
     raw->frame_id = frame_id;
     raw->timestamp_us = timestamp_us;
     raw->valid_flags = imu->valid_flags | touch->valid_flags;
+    raw->imu_sensor_seq = imu->sensor_seq;
+    raw->touch_sensor_seq = touch->sensor_seq;
+    raw->imu_timestamp_us = imu->timestamp_us;
+    raw->touch_timestamp_us = touch->timestamp_us;
 
     (void)memcpy(raw->imu, imu->imu, sizeof(raw->imu));
     (void)memcpy(raw->quat, imu->quat, sizeof(raw->quat));

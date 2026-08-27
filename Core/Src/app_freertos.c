@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "app_config.h"
 #include "data_manager.h"
+#include "storageTask.h"
 #include "system_health.h"
 #include "watchdogTask.h"
 #include "FreeRTOS.h"
@@ -155,7 +156,10 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
   SystemHealth_Init();
   GloveStatus_t dm_status = DataManager_Init();
+  GloveStatus_t storage_control_status = StorageTask_ControlInit();
   printf("[RTOS] DataManager_Init status=%u\r\n", (unsigned int)dm_status);
+  printf("[RTOS] StorageTask_ControlInit status=%u\r\n",
+         (unsigned int)storage_control_status);
 
   /* USER CODE END Init */
 

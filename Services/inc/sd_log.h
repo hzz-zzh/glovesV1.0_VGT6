@@ -9,13 +9,16 @@ extern "C" {
 
 #include "app_data.h"
 
-#define SD_LOG_BLOCK_SIZE             (2048U)
+#define SD_LOG_FORMAT_VERSION         (2U)
+#define SD_LOG_BLOCK_SIZE             (1536U)
+#define SD_LOG_RECORD_HEADER_SIZE     (96U)
 #define SD_LOG_FILENAME_BYTES         (32U)
 
 #define SD_LOG_ERROR_NONE             (0U)
 #define SD_LOG_ERROR_NOT_EXFAT        (0x8001U)
 #define SD_LOG_ERROR_WRITE_SHORT      (0x8002U)
 #define SD_LOG_ERROR_FILE_ID_FULL     (0x8003U)
+#define SD_LOG_ERROR_TIME_UNSYNCED    (0x8004U)
 
 typedef enum
 {
@@ -28,6 +31,7 @@ typedef enum
   SD_LOG_RECORD_IDLE = 0U,
   SD_LOG_RECORD_RECORDING = 1U,
   SD_LOG_RECORD_STOPPING = 2U,
+  SD_LOG_RECORD_PREPARING = 3U,
   SD_LOG_RECORD_ERROR = 0x8000U
 } SdLogRecordStatus_t;
 
@@ -42,6 +46,11 @@ typedef struct
   uint32_t total_size_mb;
   uint32_t free_size_mb;
   uint32_t used_size_mb;
+  uint16_t format_version;
+  uint16_t block_size;
+  uint32_t last_write_time_ms;
+  uint32_t max_write_time_ms;
+  uint32_t slow_write_count;
   char current_filename[SD_LOG_FILENAME_BYTES];
   char last_filename[SD_LOG_FILENAME_BYTES];
 } SdLogStatusSnapshot_t;

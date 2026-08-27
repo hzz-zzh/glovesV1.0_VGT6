@@ -15,6 +15,7 @@
 #include "main.h"
 #include "max17043.h"
 #include "modbus_frame.h"
+#include "storageTask.h"
 #include "system_health.h"
 #include "system_watchdog.h"
 #include "touchAdcTask.h"
@@ -33,6 +34,7 @@ extern TIM_HandleTypeDef htim2;
 /* BQ25622以80mA为步进，1440mA是不超过1.5A的最近可配置值。 */
 #define SYSTEM_MANAGER_BQ25622_CHARGE_CURRENT_MA     (1440U)
 #define SYSTEM_MANAGER_BQ25622_TERMINATION_CURRENT_MA (100U)
+#define SYSTEM_MANAGER_STORAGE_STOP_TIMEOUT_MS        (6000U)
 #define SYSTEM_MANAGER_MAX17043_TIMEOUT_MS           (20U)
 #define SYSTEM_MANAGER_POWER_KEY_DEBOUNCE_MS         (20U)
 #define SYSTEM_MANAGER_POWER_KEY_LONG_PRESS_MS       (600U)
@@ -200,6 +202,8 @@ static uint8_t SystemManager_WaitAcquisitionPaused(uint32_t timeout_ms)
 
 static uint8_t SystemManager_TryFinalizePeripheralStop(void)
 {
+    GloveStatus_t storage_status;
+
     if (s_power_stop_pending == 0U)
     {
         return 1U;
@@ -208,6 +212,17 @@ static uint8_t SystemManager_TryFinalizePeripheralStop(void)
         (TouchAdcTask_IsAcquisitionPaused() == 0U))
     {
         return 0U;
+    }
+
+    /* 采集源已停止后先落盘并关闭文件，再清队列和断外设电源。 */
+    storage_status = StorageTask_RequestStop(SYSTEM_MANAGER_STORAGE_STOP_TIMEOUT_MS);
+    if (storage_status != GLOVE_STATUS_OK)
+    {
+        SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_SD_ERROR,
+                              SYSTEM_ERROR_SD,
+                              SYSTEM_HEALTH_SOURCE_STORAGE,
+                              (uint16_t)storage_status,
+                              1U);
     }
 
     SystemManager_StopAcquisitionSync();
