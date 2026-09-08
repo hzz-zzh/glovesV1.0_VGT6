@@ -13,7 +13,6 @@
 #include "hi04_driver.h"
 #include "hi04_fdcan_stm32h563.h"
 #include "main.h"
-#include "systemManagerTask.h"
 #include "system_health.h"
 
 extern FDCAN_HandleTypeDef hfdcan1;
@@ -73,7 +72,6 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define IMU_CAN_TASK_ACTIVE_VERIFY_MS           (500U)
 #define IMU_CAN_TASK_ACTIVE_TX_RETRY_LIMIT      (3U)
 #define IMU_CAN_TASK_ACTIVE_CONFIG_STEP_COUNT   (7U)
-#define IMU_CAN_TASK_ACTIVE_POWER_RETRY_MS      (500U)
 #define IMU_CAN_TASK_QUAT_SOURCE_NONE           (0U)
 #define IMU_CAN_TASK_QUAT_SOURCE_RAW            (1U)
 #define IMU_CAN_TASK_IRQ_PRIORITY               (configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY)
@@ -118,7 +116,7 @@ typedef enum
     IMU_CAN_RECOVERY_BUS_REINIT = 3,
     IMU_CAN_RECOVERY_BUS_CONFIG = 4,
     IMU_CAN_RECOVERY_BUS_VERIFY = 5,
-    IMU_CAN_RECOVERY_POWER_CYCLE = 6
+    IMU_CAN_RECOVERY_FAILED = 6
 } ImuCanTaskRecoveryState_t;
 
 typedef struct
@@ -1370,8 +1368,8 @@ static void ImuCanTask_SetRecoveryState(ImuCanTaskRecoveryState_t state)
             health_stage = SYSTEM_RECOVERY_BUS_VERIFY;
             target = (uint16_t)s_active_recovery.bus_index + 1U;
             break;
-        case IMU_CAN_RECOVERY_POWER_CYCLE:
-            health_stage = SYSTEM_RECOVERY_SAFE_STOP;
+        case IMU_CAN_RECOVERY_FAILED:
+            health_stage = SYSTEM_RECOVERY_FAILED;
             target = 0U;
             break;
         default:
@@ -1558,11 +1556,11 @@ static void ImuCanTask_StartBusRecovery(uint8_t bus_index, uint32_t now_ms)
     ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_BUS_REINIT);
 }
 
-static void ImuCanTask_RequestFullPowerRecovery(uint32_t now_ms)
+static void ImuCanTask_SetRecoveryFailed(void)
 {
     s_imu_can_stats.last_error = 93U;
-    s_active_recovery.next_action_ms = now_ms;
-    ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_POWER_CYCLE);
+    /* 固定外部供电板无法执行外设断电重启，总线恢复耗尽后进入故障态。 */
+    ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_FAILED);
 }
 
 static uint8_t ImuCanTask_FindBusOff(uint8_t *bus_index)
@@ -1627,7 +1625,7 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
     if ((s_active_recovery.state != IMU_CAN_RECOVERY_BUS_REINIT) &&
         (s_active_recovery.state != IMU_CAN_RECOVERY_BUS_CONFIG) &&
         (s_active_recovery.state != IMU_CAN_RECOVERY_BUS_VERIFY) &&
-        (s_active_recovery.state != IMU_CAN_RECOVERY_POWER_CYCLE) &&
+        (s_active_recovery.state != IMU_CAN_RECOVERY_FAILED) &&
         (ImuCanTask_FindBusOff(&bus_off_index) != 0U))
     {
         s_imu_can_stats.last_error = 91U;
@@ -1774,7 +1772,7 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
                                       SYSTEM_HEALTH_SOURCE_CAN2,
                                       (uint16_t)s_active_recovery.bus_index + 1U,
                                       1U);
-                ImuCanTask_RequestFullPowerRecovery(now_ms);
+                ImuCanTask_SetRecoveryFailed();
                 return;
             }
             /* 总线重建后逐节点、逐寄存器恢复，另一条CAN总线继续正常采集。 */
@@ -1808,7 +1806,7 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
                 if (s_active_recovery.tx_failure_count >=
                     IMU_CAN_TASK_ACTIVE_TX_RETRY_LIMIT)
                 {
-                    ImuCanTask_RequestFullPowerRecovery(now_ms);
+                    ImuCanTask_SetRecoveryFailed();
                 }
                 return;
             }
@@ -1842,12 +1840,12 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
                                       SYSTEM_HEALTH_SOURCE_CAN2,
                                       (uint16_t)s_active_recovery.bus_index + 1U,
                                       1U);
-                ImuCanTask_RequestFullPowerRecovery(now_ms);
+                ImuCanTask_SetRecoveryFailed();
             }
             return;
         }
 
-        case IMU_CAN_RECOVERY_POWER_CYCLE:
+        case IMU_CAN_RECOVERY_FAILED:
             if (fresh_mask == expected_mask)
             {
                 ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_IDLE);
@@ -1855,15 +1853,6 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
                 s_imu_can_stats.last_error = 0U;
                 return;
             }
-            if (ImuCanTask_RecoveryActionDue(now_ms) == 0U)
-            {
-                return;
-            }
-            if (SystemManagerTask_RequestPeripheralRecovery() != 0U)
-            {
-                s_imu_can_stats.recovery_power_cycle_count++;
-            }
-            s_active_recovery.next_action_ms = now_ms + IMU_CAN_TASK_ACTIVE_POWER_RETRY_MS;
             return;
 
         default:

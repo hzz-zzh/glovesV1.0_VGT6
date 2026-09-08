@@ -113,14 +113,14 @@ typedef struct
     uint8_t bq_last_status;
 } GlovePowerStatus_t;
 
+/*
+ * 电池及充电字段为兼容既有485寄存器而保留。固定外部供电板上这些字段为0，
+ * 对应有效位保持清零，system_state固定为ON_NORMAL。
+ */
+
 void SystemManagerTask(void *argument);
 void SystemManagerTask_GetBatteryStatus(GloveBatteryStatus_t *status);
 void SystemManagerTask_GetPowerStatus(GlovePowerStatus_t *status);
-void SystemManagerTask_OnPowerKeyEdgeFromIsr(void);
-void SystemManagerTask_OnChargeStatusEdgeFromIsr(void);
-void SystemManagerTask_OnBqInterruptFromIsr(void);
-uint8_t SystemManagerTask_IsPeripheralPowerEnabled(void);
-uint8_t SystemManagerTask_RequestPeripheralRecovery(void);
 
 #ifdef __cplusplus
 }

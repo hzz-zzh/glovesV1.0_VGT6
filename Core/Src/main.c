@@ -23,11 +23,11 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "acq_sync.h"
+#include "app_config.h"
 #include "app_version.h"
 #include "data_manager.h"
 #include "glove_hand_config.h"
 #include "modbus_time_sync.h"
-#include "systemManagerTask.h"
 #include "system_watchdog.h"
 #include "uart_redirect.h"
 
@@ -56,7 +56,6 @@ FDCAN_HandleTypeDef hfdcan2;
 
 DMA_HandleTypeDef handle_GPDMA2_Channel0;
 
-I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
 
 XSPI_HandleTypeDef hxspi1;
@@ -92,7 +91,6 @@ static void MX_ADC1_Init(void);
 static void MX_OCTOSPI1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_FDCAN1_Init(void);
-static void MX_I2C1_Init(void);
 static void MX_RTC_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_FDCAN2_Init(void);
@@ -155,7 +153,6 @@ int main(void)
   MX_OCTOSPI1_Init();
   MX_I2C2_Init();
   MX_FDCAN1_Init();
-  MX_I2C1_Init();
   MX_RTC_Init();
   MX_TIM6_Init();
   MX_FDCAN2_Init();
@@ -164,20 +161,29 @@ int main(void)
   MX_TIM5_Init();
   MX_SDMMC1_SD_Init();
   /* USER CODE BEGIN 2 */
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[FW] version=%s\r\n", GLOVE_FW_VERSION_STRING);
+#endif
   GloveHandConfig_InitFromGpio();
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[Hand] side=%s\r\n",
          (GloveHandConfig_GetHandSide() == GLOVE_HAND_RIGHT) ? "RIGHT" : "LEFT");
   printf("[Boot] after hand\r\n");
-  HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_SET);
+#endif
   HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_RESET);
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[Boot] before imu delay\r\n");
+#endif
   HAL_Delay(10U);
   HAL_GPIO_WritePin(IMU_RST_GPIO_Port, IMU_RST_Pin, GPIO_PIN_SET);
   HAL_Delay(100U);
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[Boot] after imu delay\r\n");
+#endif
   AcqSync_Reset();
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[Boot] before pwm\r\n");
+#endif
   if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
@@ -188,15 +194,23 @@ int main(void)
   /* USER CODE END 2 */
 
   /* Init scheduler */
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[Boot] before kernel\r\n");
+#endif
   osKernelInitialize();
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[Boot] kernel initialized\r\n");
+#endif
   /* Call init function for freertos objects (in app_freertos.c) */
   MX_FREERTOS_Init();
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[Boot] freertos init done\r\n");
+#endif
 
   /* Start scheduler */
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[Boot] starting scheduler\r\n");
+#endif
   osKernelStart();
 
   /* We should never get here as control is now taken by the scheduler */
@@ -567,54 +581,6 @@ static void MX_GPDMA2_Init(void)
   /* USER CODE BEGIN GPDMA2_Init 2 */
 
   /* USER CODE END GPDMA2_Init 2 */
-
-}
-
-/**
-  * @brief I2C1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_I2C1_Init(void)
-{
-
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x60808CD3;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Analogue filter
-  */
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Digital filter
-  */
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
 
 }
 
@@ -1072,15 +1038,10 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOB, TOUCH_COL_SEL0_Pin|TOUCH_COL_SEL1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  /* 充电参数回读确认前保持禁止充电，SystemManagerTask配置成功后再放开。 */
-  HAL_GPIO_WritePin(DISABLE_CHARGE_GPIO_Port, DISABLE_CHARGE_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(TOUCH_COL_SEL2_GPIO_Port, TOUCH_COL_SEL2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(USER_LED_GPIO_Port, USER_LED_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(PERIPH_PWR_EN_GPIO_Port, PERIPH_PWR_EN_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : IMU_RST_Pin TOUCH_ROW_SEL0_Pin RS485_EN_Pin TOUCH_COL_SEL4_Pin
                            TOUCH_COL_SEL3_Pin */
@@ -1091,27 +1052,21 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : POWER_ON_OFF_Pin */
-  GPIO_InitStruct.Pin = POWER_ON_OFF_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(POWER_ON_OFF_GPIO_Port, &GPIO_InitStruct);
-
   /*Configure GPIO pin : L_R_HAND_FLAG_Pin */
   GPIO_InitStruct.Pin = L_R_HAND_FLAG_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(L_R_HAND_FLAG_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : TOUCH_COL_SEL0_Pin PERIPH_PWR_EN_Pin TOUCH_COL_SEL1_Pin */
-  GPIO_InitStruct.Pin = TOUCH_COL_SEL0_Pin|PERIPH_PWR_EN_Pin|TOUCH_COL_SEL1_Pin;
+  /*Configure GPIO pins : TOUCH_COL_SEL0_Pin TOUCH_COL_SEL1_Pin */
+  GPIO_InitStruct.Pin = TOUCH_COL_SEL0_Pin|TOUCH_COL_SEL1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : DISABLE_CHARGE_Pin TOUCH_COL_SEL2_Pin */
-  GPIO_InitStruct.Pin = DISABLE_CHARGE_Pin|TOUCH_COL_SEL2_Pin;
+  /*Configure GPIO pin : TOUCH_COL_SEL2_Pin */
+  GPIO_InitStruct.Pin = TOUCH_COL_SEL2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -1130,33 +1085,27 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(USER_LED_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : INT_GAUGE_BQ_Pin */
-  GPIO_InitStruct.Pin = INT_GAUGE_BQ_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(INT_GAUGE_BQ_GPIO_Port, &GPIO_InitStruct);
-
   /*Configure GPIO pin : USER_KEY_Pin */
   GPIO_InitStruct.Pin = USER_KEY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(USER_KEY_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : STATUS_CHARGE_Pin */
-  GPIO_InitStruct.Pin = STATUS_CHARGE_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  /* 新板未连接旧电源管理信号，设为模拟模式避免悬空输入和误中断。 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(STATUS_CHARGE_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_5;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI15_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_IRQn);
-  HAL_NVIC_SetPriority(EXTI2_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
-  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-  HAL_NVIC_SetPriority(EXTI3_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -1166,29 +1115,9 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == POWER_ON_OFF_Pin)
-  {
-    SystemManagerTask_OnPowerKeyEdgeFromIsr();
-  }
-  else if (GPIO_Pin == PPS_IN_Pin)
+  if (GPIO_Pin == PPS_IN_Pin)
   {
     ModbusTimeSync_OnPpsEdge(GPIO_Pin);
-  }
-  else if (GPIO_Pin == STATUS_CHARGE_Pin)
-  {
-    SystemManagerTask_OnChargeStatusEdgeFromIsr();
-  }
-}
-
-void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
-{
-  if (GPIO_Pin == POWER_ON_OFF_Pin)
-  {
-    SystemManagerTask_OnPowerKeyEdgeFromIsr();
-  }
-  else if (GPIO_Pin == INT_GAUGE_BQ_Pin)
-  {
-    SystemManagerTask_OnBqInterruptFromIsr();
   }
 }
 
@@ -1263,7 +1192,9 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[Error] handler\r\n");
+#endif
   __disable_irq();
   while (1)
   {

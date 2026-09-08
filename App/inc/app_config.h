@@ -11,13 +11,13 @@ extern "C" {
  * 这里主要放系统规模、队列深度、内存池大小、数据流策略等业务参数
  */
 
-/*
- * 量产构建默认关闭调试串口、测试任务和模拟数据。
- * 研发调试时需先将 APP_BUILD_PRODUCTION 置 0，再单独开启所需功能。
- */
+/* 量产构建关闭调试串口、诊断任务和触觉数据流输出。 */
 #define APP_BUILD_PRODUCTION                    (1U)
 #define APP_ENABLE_DEBUG_UART_OUTPUT            (0U)
 #define APP_ENABLE_UART_DEBUG_TASK              (0U)
+#define APP_ENABLE_GENERAL_DEBUG_OUTPUT          (0U)
+#define APP_ENABLE_ACQUISITION_DEBUG             (0U)
+#define APP_ENABLE_TOUCH_1_30_STREAM             (0U)
 #define APP_ENABLE_TEST_TASK                    (0U)
 #define APP_ENABLE_TEST_DATA_INJECTION          (0U)
 #define APP_ENABLE_TOUCH_ADC_TEST_ONLY          (0U)
@@ -27,6 +27,9 @@ extern "C" {
 #if (APP_BUILD_PRODUCTION != 0U) && \
     ((APP_ENABLE_DEBUG_UART_OUTPUT != 0U) || \
      (APP_ENABLE_UART_DEBUG_TASK != 0U) || \
+     (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U) || \
+     (APP_ENABLE_ACQUISITION_DEBUG != 0U) || \
+     (APP_ENABLE_TOUCH_1_30_STREAM != 0U) || \
      (APP_ENABLE_TEST_TASK != 0U) || \
      (APP_ENABLE_TEST_DATA_INJECTION != 0U) || \
      (APP_ENABLE_TOUCH_ADC_TEST_ONLY != 0U) || \
@@ -37,6 +40,20 @@ extern "C" {
 
 #if (APP_ENABLE_UART_DEBUG_TASK != 0U) && (APP_ENABLE_DEBUG_UART_OUTPUT == 0U)
 #error "UART debug task requires debug UART output"
+#endif
+
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U) && (APP_ENABLE_DEBUG_UART_OUTPUT == 0U)
+#error "General debug output requires debug UART output"
+#endif
+
+#if (APP_ENABLE_ACQUISITION_DEBUG != 0U) && \
+    ((APP_ENABLE_DEBUG_UART_OUTPUT == 0U) || (APP_ENABLE_UART_DEBUG_TASK == 0U))
+#error "Acquisition debug requires UART debug output and task"
+#endif
+
+#if (APP_ENABLE_TOUCH_1_30_STREAM != 0U) && \
+    ((APP_ENABLE_DEBUG_UART_OUTPUT == 0U) || (APP_ENABLE_UART_DEBUG_TASK == 0U))
+#error "Touch point stream requires UART debug output and task"
 #endif
 
 #if (APP_ENABLE_TEST_DATA_INJECTION != 0U) && (APP_ENABLE_TEST_TASK == 0U)

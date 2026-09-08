@@ -212,6 +212,8 @@ active flags：
 
 电源状态区由 `SystemManagerTask` 的实时快照提供。float32 继续采用本协议统一的双寄存器字节序。
 
+当前固定外部供电板为了兼容既有寄存器地址，仍保留本区。运行时 `system power state` 固定为 `ON_NORMAL`，`power status flags` 仅置位 bit8；电池、电流、VBUS、SOC、充电状态及BQ诊断字段均为0且对应有效位不置位。不存在的电量计和充电芯片不会被报告为通信故障。
+
 | 地址 | 数量 | 类型 | 含义 |
 |---:|---:|---|---|
 | `0x0060` | 2 | float32 | battery voltage，单位 V |

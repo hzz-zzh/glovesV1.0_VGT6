@@ -10,11 +10,17 @@ extern "C" {
  * 发布新固件时只需在此处修改，串口日志和通信接口会同步更新。
  */
 #define GLOVE_FW_VERSION_MAJOR             2
-#define GLOVE_FW_VERSION_MINOR             2
-#define GLOVE_FW_VERSION_PATCH             2
+#define GLOVE_FW_VERSION_MINOR             3
+#define GLOVE_FW_VERSION_PATCH             0
 
 /*
     版本说明
+    V2.3.0：
+        1. 适配外部直接供电的新硬件，移除电量计和充电管理芯片逻辑
+        2. 移除按键控制外设电源及外设断电恢复流程
+        3. 触觉数据均值滤波窗口3帧
+        4. 默认关闭调试串口、采集诊断和触觉数据流输出
+
     V2.2.2：
         1. 修复SD DMA错误中断可能被误判为传输完成的问题
         2. 485录制命令改为异步执行，文件就绪后才开启Storage数据投递

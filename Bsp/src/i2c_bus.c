@@ -7,16 +7,12 @@
 
 static I2C_HandleTypeDef *I2cBus_GetHandle(I2cBusId_t bus_id)
 {
-    if (bus_id == I2C_BUS_1)
-    {
-        return &hi2c1;
-    }
-
     if (bus_id == I2C_BUS_2)
     {
         return &hi2c2;
     }
 
+    /* I2C1随电量计和充电管理芯片一起移除，不再映射到HAL句柄。 */
     return NULL;
 }
 

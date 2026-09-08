@@ -226,7 +226,9 @@ static void StorageTask_ReportSdResult(GloveStatus_t result)
 static GloveStatus_t StorageTask_StartRecordingInternal(void)
 {
   GloveStatus_t result;
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   SdLogStatusSnapshot_t status;
+#endif
 
   if (SdLog_IsRecording() != 0U)
   {
@@ -243,6 +245,7 @@ static GloveStatus_t StorageTask_StartRecordingInternal(void)
     DataManager_SetFullFrameStorageEnabled(1U);
   }
   StorageTask_ReportSdResult(result);
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   SdLog_GetStatus(&status);
 
   if (result == GLOVE_STATUS_OK)
@@ -263,6 +266,7 @@ static GloveStatus_t StorageTask_StartRecordingInternal(void)
            (unsigned long)sd_disk_last_state_after,
            (unsigned long)sd_disk_last_card_state);
   }
+#endif
   return result;
 }
 
@@ -295,14 +299,17 @@ static void StorageTask_DrainPendingFrames(void)
 static GloveStatus_t StorageTask_StopRecordingInternal(void)
 {
   GloveStatus_t result;
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   SdLogStatusSnapshot_t status;
   const char *filename;
+#endif
 
   /* 先关闭新帧投递，再把停止命令之前已经排队的数据全部写完。 */
   DataManager_SetFullFrameStorageEnabled(0U);
   StorageTask_DrainPendingFrames();
   result = SdLog_Stop();
   StorageTask_ReportSdResult(result);
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   SdLog_GetStatus(&status);
   filename = (status.last_filename[0] != '\0') ?
              status.last_filename : status.current_filename;
@@ -321,6 +328,7 @@ static GloveStatus_t StorageTask_StopRecordingInternal(void)
            status.error_code,
            filename);
   }
+#endif
   return result;
 }
 

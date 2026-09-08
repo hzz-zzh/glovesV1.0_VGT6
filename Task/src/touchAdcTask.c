@@ -5,15 +5,15 @@
 #include <string.h>
 
 #include "acq_sync.h"
+#include "app_config.h"
 #include "cmsis_os2.h"
 #include "data_manager.h"
 #include "main.h"
 #include "system_health.h"
 
-#define TOUCH_ADC_DEBUG_ENABLE         (0U)
+#define TOUCH_ADC_DEBUG_ENABLE         APP_ENABLE_TOUCH_1_30_STREAM
 #define TOUCH_ADC_DEBUG_PRINT_PERIOD   (1U)
-#define TOUCH_ADC_DEBUG_PRINT_DETAILS  (1U)
-#define TOUCH_ADC_DEBUG_PRINT_STATUS   (1U)
+#define TOUCH_ADC_DEBUG_PRINT_STATUS   (0U)
 #define TOUCH_ADC_DEBUG_ERROR_PERIOD   (50U)
 #define TOUCH_ADC_DEBUG_ALLOC_PERIOD   (100U)
 #define TOUCH_ADC_DEBUG_PUBLISH_PERIOD (100U)
@@ -46,12 +46,18 @@
 #define TOUCH_ADC_MUX_SETTLE_NOP_COUNT  (64U)
 #define TOUCH_ADC_HEALTH_FAILURE_LIMIT   (5U)
 #define TOUCH_ADC_HEALTH_RECOVERY_FRAMES (3U)
-/* 每个触点使用5帧滑动均值，兼顾稳定性与响应速度。 */
-#define TOUCH_ADC_MEAN_FILTER_WINDOW     (5U)
+#define TOUCH_ADC_STREAM_FIRST_INDEX     (0U)
+#define TOUCH_ADC_STREAM_POINT_COUNT     (30U)
+/* 三帧滑动均值用于抑制ADC瞬时噪声。 */
+#define TOUCH_ADC_MEAN_FILTER_WINDOW     (3U)
 
 #if GLOVE_TOUCH_COUNT != (TOUCH_ADC_FINGER_BASE_COUNT + \
     ((TOUCH_ADC_PALM_LAST_COLUMN - TOUCH_ADC_PALM_FIRST_COLUMN + 1U) * TOUCH_ADC_PALM_ROWS))
 #error "GLOVE_TOUCH_COUNT must match the 68-point touch layout"
+#endif
+
+#if (TOUCH_ADC_STREAM_FIRST_INDEX + TOUCH_ADC_STREAM_POINT_COUNT) > GLOVE_TOUCH_COUNT
+#error "Touch stream range exceeds GLOVE_TOUCH_COUNT"
 #endif
 
 /* ROW_SEL0 high selects the first row in each analog switch pair. */
@@ -98,65 +104,54 @@ static uint32_t TouchAdcTask_MsToTicks(uint32_t timeout_ms)
 }
 
 #if (TOUCH_ADC_DEBUG_ENABLE != 0U)
-static const char *const s_touch_debug_finger_tags[TOUCH_ADC_FINGER_COUNT] =
+static void TouchAdcTask_PrintSamples(uint32_t seq,
+                                      const GloveTouchSensorBlock_t *block)
 {
-  "A", "B", "C", "D", "E"
-};
-
-static void TouchAdcTask_PrintValues(const GloveTouchSensorBlock_t *block,
-                                     uint32_t base,
-                                     uint32_t count)
-{
-  uint32_t index;
-
-  for (index = 0U; index < count; index++)
+  if ((block != NULL) &&
+      ((s_touch_adc_debug_print_once != 0U) ||
+       ((seq % TOUCH_ADC_DEBUG_PRINT_PERIOD) == 0U)))
   {
-    printf("%u", (unsigned int)block->data.touch[base + index].value);
-    if ((index + 1U) < count)
-    {
-      printf(",");
-    }
+    s_touch_adc_debug_print_once = 0U;
+    /* 对外点号从1开始，因此第1～30点对应数组下标0～29。 */
+    printf("[TOUCH_01_30] %u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\r\n",
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 0U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 1U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 2U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 3U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 4U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 5U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 6U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 7U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 8U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 9U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 10U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 11U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 12U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 13U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 14U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 15U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 16U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 17U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 18U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 19U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 20U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 21U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 22U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 23U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 24U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 25U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 26U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 27U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 28U].value,
+           (unsigned int)block->data.touch[TOUCH_ADC_STREAM_FIRST_INDEX + 29U].value);
   }
-  printf("\r\n");
 }
-
-static void TouchAdcTask_PrintFingerValues(uint32_t seq,
-                                           const GloveTouchSensorBlock_t *block,
-                                           uint32_t finger)
+#else
+static void TouchAdcTask_PrintSamples(uint32_t seq,
+                                      const GloveTouchSensorBlock_t *block)
 {
-  uint32_t base;
-
-  if ((block == NULL) || (finger >= TOUCH_ADC_FINGER_COUNT))
-  {
-    return;
-  }
-
-  base = finger * TOUCH_ADC_POINTS_PER_FINGER;
-  printf("[TOUCH_PART] seq=%lu %s=",
-         (unsigned long)seq,
-         s_touch_debug_finger_tags[finger]);
-  TouchAdcTask_PrintValues(block, base, TOUCH_ADC_POINTS_PER_FINGER);
-}
-
-static void TouchAdcTask_PrintPalmColumnValues(uint32_t seq,
-                                               const GloveTouchSensorBlock_t *block,
-                                               uint32_t palm_column)
-{
-  uint32_t palm_point;
-  uint32_t base;
-
-  if (block == NULL)
-  {
-    return;
-  }
-
-  palm_point = palm_column * TOUCH_ADC_PALM_ROWS;
-  base = TOUCH_ADC_FINGER_BASE_COUNT + palm_point;
-  printf("[TOUCH_PART] seq=%lu F%lu_F%lu=",
-         (unsigned long)seq,
-         (unsigned long)palm_point,
-         (unsigned long)(palm_point + TOUCH_ADC_PALM_ROWS - 1U));
-  TouchAdcTask_PrintValues(block, base, TOUCH_ADC_PALM_ROWS);
+  (void)seq;
+  (void)block;
 }
 #endif
 
@@ -182,64 +177,6 @@ static void TouchAdcTask_Trace(const char *stage, uint32_t a, uint32_t b)
   (void)stage;
   (void)a;
   (void)b;
-#endif
-}
-
-static void TouchAdcTask_PrintSamples(uint32_t seq, const GloveTouchSensorBlock_t *block)
-{
-#if (TOUCH_ADC_DEBUG_ENABLE != 0U)
-  if ((block != NULL) &&
-      ((s_touch_adc_debug_print_once != 0U) ||
-       ((seq % TOUCH_ADC_DEBUG_PRINT_PERIOD) == 0U)))
-  {
-    uint32_t finger;
-    uint32_t index;
-    uint32_t finger_sum[TOUCH_ADC_FINGER_COUNT] = {0U};
-    uint32_t palm_sum = 0U;
-    uint32_t palm_count = GLOVE_TOUCH_COUNT - TOUCH_ADC_FINGER_BASE_COUNT;
-    uint32_t palm_column_count = TOUCH_ADC_PALM_LAST_COLUMN - TOUCH_ADC_PALM_FIRST_COLUMN + 1U;
-
-    s_touch_adc_debug_print_once = 0U;
-
-    for (finger = 0U; finger < TOUCH_ADC_FINGER_COUNT; finger++)
-    {
-      uint32_t base = finger * TOUCH_ADC_POINTS_PER_FINGER;
-      for (index = 0U; index < TOUCH_ADC_POINTS_PER_FINGER; index++)
-      {
-        finger_sum[finger] += block->data.touch[base + index].value;
-      }
-    }
-
-    for (index = TOUCH_ADC_FINGER_BASE_COUNT; index < GLOVE_TOUCH_COUNT; index++)
-    {
-      palm_sum += block->data.touch[index].value;
-    }
-
-    printf("[TOUCH] seq=%lu count=%lu A=%lu B=%lu C=%lu D=%lu E=%lu F=%lu\r\n",
-           (unsigned long)seq,
-           (unsigned long)GLOVE_TOUCH_COUNT,
-           (unsigned long)(finger_sum[0] / TOUCH_ADC_POINTS_PER_FINGER),
-           (unsigned long)(finger_sum[1] / TOUCH_ADC_POINTS_PER_FINGER),
-           (unsigned long)(finger_sum[2] / TOUCH_ADC_POINTS_PER_FINGER),
-           (unsigned long)(finger_sum[3] / TOUCH_ADC_POINTS_PER_FINGER),
-           (unsigned long)(finger_sum[4] / TOUCH_ADC_POINTS_PER_FINGER),
-           (unsigned long)(palm_sum / palm_count));
-
-#if (TOUCH_ADC_DEBUG_PRINT_DETAILS != 0U)
-    for (finger = 0U; finger < TOUCH_ADC_FINGER_COUNT; finger++)
-    {
-      TouchAdcTask_PrintFingerValues(seq, block, finger);
-    }
-
-    for (index = 0U; index < palm_column_count; index++)
-    {
-      TouchAdcTask_PrintPalmColumnValues(seq, block, index);
-    }
-#endif
-  }
-#else
-  (void)seq;
-  (void)block;
 #endif
 }
 
@@ -481,7 +418,6 @@ static void TouchAdcTask_ResetMeanFilter(void)
 
 static void TouchAdcTask_FilterFrame(GloveTouchSensorBlock_t *block)
 {
-  uint32_t index;
   uint32_t divisor;
 
   if (block == NULL)
@@ -489,19 +425,13 @@ static void TouchAdcTask_FilterFrame(GloveTouchSensorBlock_t *block)
     return;
   }
 
-  if (s_touch_mean_sample_count < TOUCH_ADC_MEAN_FILTER_WINDOW)
-  {
-    divisor = (uint32_t)s_touch_mean_sample_count + 1U;
-  }
-  else
-  {
-    divisor = TOUCH_ADC_MEAN_FILTER_WINDOW;
-  }
+  divisor = (s_touch_mean_sample_count < TOUCH_ADC_MEAN_FILTER_WINDOW) ?
+            ((uint32_t)s_touch_mean_sample_count + 1U) :
+            TOUCH_ADC_MEAN_FILTER_WINDOW;
 
-  for (index = 0U; index < GLOVE_TOUCH_COUNT; index++)
+  for (uint32_t index = 0U; index < GLOVE_TOUCH_COUNT; index++)
   {
     uint16_t raw_value = block->data.touch[index].value;
-    uint32_t filtered_value;
 
     if (s_touch_mean_sample_count >= TOUCH_ADC_MEAN_FILTER_WINDOW)
     {
@@ -510,10 +440,9 @@ static void TouchAdcTask_FilterFrame(GloveTouchSensorBlock_t *block)
 
     s_touch_mean_history[s_touch_mean_write_index][index] = raw_value;
     s_touch_mean_sum[index] += raw_value;
-
-    /* 窗口未填满时只平均已有样本，避免启动阶段被初始零值拉低。 */
-    filtered_value = (s_touch_mean_sum[index] + (divisor / 2U)) / divisor;
-    block->data.touch[index].value = (uint16_t)filtered_value;
+    /* 加入半个除数后再整除，得到四舍五入的三帧均值。 */
+    block->data.touch[index].value =
+        (uint16_t)((s_touch_mean_sum[index] + (divisor / 2U)) / divisor);
   }
 
   if (s_touch_mean_sample_count < TOUCH_ADC_MEAN_FILTER_WINDOW)
@@ -762,7 +691,7 @@ void TouchAdcTask(void *argument)
       TouchAdcTask_DisableColumns();
       if (s_touch_acquisition_paused == 0U)
       {
-        /* 停采后丢弃旧历史，恢复采集时从新数据重新建立均值窗口。 */
+        /* 停止采集时清空历史，恢复后不混入停采前的旧数据。 */
         TouchAdcTask_ResetMeanFilter();
       }
       s_touch_acquisition_paused = 1U;

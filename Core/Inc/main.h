@@ -49,7 +49,6 @@ extern "C" {
 extern ADC_HandleTypeDef hadc1;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
-extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
 extern XSPI_HandleTypeDef hxspi1;
 extern TIM_HandleTypeDef htim5;
@@ -76,9 +75,6 @@ void Error_Handler(void);
 #define ADIN_CH12_GPIO_Port GPIOC
 #define IMU_SYNC_Pin GPIO_PIN_1
 #define IMU_SYNC_GPIO_Port GPIOA
-#define POWER_ON_OFF_Pin GPIO_PIN_2
-#define POWER_ON_OFF_GPIO_Port GPIOA
-#define POWER_ON_OFF_EXTI_IRQn EXTI2_IRQn
 #define ADIN_CH15_Pin GPIO_PIN_3
 #define ADIN_CH15_GPIO_Port GPIOA
 #define ADIN_CH7_Pin GPIO_PIN_7
@@ -105,8 +101,6 @@ void Error_Handler(void);
 #define TOUCH_COL_SEL4_GPIO_Port GPIOC
 #define TOUCH_COL_SEL3_Pin GPIO_PIN_8
 #define TOUCH_COL_SEL3_GPIO_Port GPIOC
-#define DISABLE_CHARGE_Pin GPIO_PIN_8
-#define DISABLE_CHARGE_GPIO_Port GPIOA
 #define TOUCH_COL_SEL2_Pin GPIO_PIN_9
 #define TOUCH_COL_SEL2_GPIO_Port GPIOA
 #define PPS_IN_Pin GPIO_PIN_15
@@ -114,16 +108,10 @@ void Error_Handler(void);
 #define PPS_IN_EXTI_IRQn EXTI15_IRQn
 #define USER_LED_Pin GPIO_PIN_0
 #define USER_LED_GPIO_Port GPIOD
-#define INT_GAUGE_BQ_Pin GPIO_PIN_3
-#define INT_GAUGE_BQ_GPIO_Port GPIOB
 #define USER_KEY_Pin GPIO_PIN_4
 #define USER_KEY_GPIO_Port GPIOB
-#define PERIPH_PWR_EN_Pin GPIO_PIN_5
-#define PERIPH_PWR_EN_GPIO_Port GPIOB
 #define TOUCH_COL_SEL1_Pin GPIO_PIN_9
 #define TOUCH_COL_SEL1_GPIO_Port GPIOB
-#define STATUS_CHARGE_Pin GPIO_PIN_0
-#define STATUS_CHARGE_GPIO_Port GPIOE
 
 /* USER CODE BEGIN Private defines */
 

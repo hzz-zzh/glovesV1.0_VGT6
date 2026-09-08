@@ -4,7 +4,8 @@
 #include "main.h"
 
 #if (APP_ENABLE_DEBUG_UART_OUTPUT != 0U)
-#define UART_REDIRECT_BUFFER_SIZE       (4096U)
+/* 采集诊断会集中输出16路IMU和68路触觉数据，预留一秒完整日志空间。 */
+#define UART_REDIRECT_BUFFER_SIZE       (8192U)
 #define UART_REDIRECT_TX_CHUNK_SIZE     (256U)
 #define UART_REDIRECT_TX_TIMEOUT_MS     (5U)
 
@@ -91,8 +92,11 @@ void UartRedirect_Flush(uint32_t max_bytes)
       break;
     }
 
-    /* 串口异常只影响低优先级调试任务，已经出队的日志允许丢弃。 */
-    (void)HAL_UART_Transmit(&huart2, tx_chunk, count, UART_REDIRECT_TX_TIMEOUT_MS);
+    /* 串口异常只影响低优先级调试任务，失败字节计入丢弃数供诊断。 */
+    if (HAL_UART_Transmit(&huart2, tx_chunk, count, UART_REDIRECT_TX_TIMEOUT_MS) != HAL_OK)
+    {
+      s_uart_redirect_dropped += count;
+    }
     total += count;
   }
 #else

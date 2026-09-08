@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "app_config.h"
 #include "cmsis_os2.h"
 #include "dataProcessTask.h"
 #include "data_manager.h"
@@ -10,11 +11,30 @@
 #include "imuCanTask.h"
 #include "RS485_uasrt.h"
 #include "rs485Task.h"
+#include "system_health.h"
 #include "uart_redirect.h"
 
-#define UART_DEBUG_PRINT_PERIOD_MS    (1000U)
-#define UART_DEBUG_PRINT_IMU_DUMP     (0U)
-#define UART_DEBUG_FLUSH_MAX_BYTES    (3072U)
+#define UART_DEBUG_PRINT_PERIOD_MS    \
+    ((APP_ENABLE_ACQUISITION_DEBUG != 0U) ? 1000U : 1U)
+#define UART_DEBUG_PRINT_IMU_DUMP     APP_ENABLE_ACQUISITION_DEBUG
+#define UART_DEBUG_FLUSH_MAX_BYTES    \
+    ((APP_ENABLE_ACQUISITION_DEBUG != 0U) ? 7168U : 512U)
+#define UART_DEBUG_MIN_SAMPLE_RATE_X10 (1800U)
+
+#define UART_DEBUG_ACQ_HEALTH_MASK \
+    (SYSTEM_HEALTH_FLAG_IMU_PARTIAL | \
+     SYSTEM_HEALTH_FLAG_IMU_ALL_INVALID | \
+     SYSTEM_HEALTH_FLAG_TOUCH_INVALID | \
+     SYSTEM_HEALTH_FLAG_FRAME_STALE | \
+     SYSTEM_HEALTH_FLAG_JOINT_INVALID | \
+     SYSTEM_HEALTH_FLAG_CAN1_ERROR_PASSIVE | \
+     SYSTEM_HEALTH_FLAG_CAN1_BUS_OFF | \
+     SYSTEM_HEALTH_FLAG_CAN2_ERROR_PASSIVE | \
+     SYSTEM_HEALTH_FLAG_CAN2_BUS_OFF | \
+     SYSTEM_HEALTH_FLAG_IMU_CONFIG_FAILED | \
+     SYSTEM_HEALTH_FLAG_CAN_REINIT_FAILED | \
+     SYSTEM_HEALTH_FLAG_QUEUE_PRESSURE | \
+     SYSTEM_HEALTH_FLAG_POOL_EXHAUSTED)
 
 static uint32_t UartDebugTask_RateHzX10(uint32_t delta_count,
                                         uint32_t elapsed_ticks)
@@ -67,28 +87,10 @@ static void UartDebugTask_PrintImuNode(uint32_t node_id)
 
 static void UartDebugTask_PrintImuDump(void)
 {
-    ImuCanTaskDebugSnapshot_t imu_stats;
     uint32_t first_node_id = ImuCanTask_GetFirstNodeId();
     uint32_t node_count = ImuCanTask_GetNodeCount();
 
-    ImuCanTask_GetDebugSnapshot(&imu_stats);
-    printf("[IMU_CAN] irq=%lu rx=%lu parsed=%lu unparsed=%lu rejected=%lu pub=%lu drop=%lu init_err=%lu err=%lu last=0x%08lx ext=%lu dlc=%lu cfg_tx=%lu cfg_reply=%lu\r\n",
-           (unsigned long)imu_stats.rx_irq_count,
-           (unsigned long)imu_stats.rx_frame_count,
-           (unsigned long)imu_stats.parsed_frame_count,
-           (unsigned long)imu_stats.unparsed_frame_count,
-           (unsigned long)imu_stats.rejected_node_count,
-           (unsigned long)imu_stats.published_count,
-           (unsigned long)imu_stats.publish_drop_count,
-           (unsigned long)imu_stats.init_error_count,
-           (unsigned long)imu_stats.last_error,
-           (unsigned long)imu_stats.last_rx_id,
-           (unsigned long)imu_stats.last_rx_is_extended,
-           (unsigned long)imu_stats.last_rx_dlc,
-           (unsigned long)imu_stats.cfg_tx_count,
-           (unsigned long)imu_stats.cfg_reply_count);
-
-    printf("[IMU] latest synced dump nodes=%lu first=%lu\r\n",
+    printf("[IMU_ALL] nodes=%lu first=%lu\r\n",
            (unsigned long)node_count,
            (unsigned long)first_node_id);
 
@@ -105,6 +107,7 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
     FrameAssemblerStats_t frame_stats;
     DataProcessStats_t process_stats;
     ImuCanTaskDebugSnapshot_t imu_stats;
+    SystemHealthSnapshot_t health;
     static uint8_t initialized = 0U;
     static uint32_t last_tick = 0U;
     static uint32_t last_imu_pub = 0U;
@@ -113,6 +116,7 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
     static uint32_t last_full_pub = 0U;
     static uint32_t last_processed = 0U;
     static uint32_t last_imu_rx = 0U;
+    static uint32_t last_error_total = 0U;
     uint32_t now_tick;
     uint32_t elapsed_ticks;
     uint32_t imu_delta;
@@ -121,11 +125,44 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
     uint32_t full_delta;
     uint32_t processed_delta;
     uint32_t imu_rx_delta;
+    uint32_t imu_rate_x10;
+    uint32_t touch_rate_x10;
+    uint32_t raw_rate_x10;
+    uint32_t full_rate_x10;
+    uint32_t processed_rate_x10;
+    uint32_t current_error_total;
+    uint32_t error_delta;
+    uint32_t acquisition_health_flags;
+    uint16_t fresh_mask;
+    uint8_t imu_ok;
+    uint8_t touch_ok;
+    uint8_t pipeline_ok;
+    uint8_t acquisition_ok;
 
     DataManager_GetStats(&dm_stats);
     FrameAssemblerTask_GetStats(&frame_stats);
     DataProcessTask_GetStats(&process_stats);
     ImuCanTask_GetDebugSnapshot(&imu_stats);
+    SystemHealth_GetSnapshot(&health);
+
+    current_error_total = dm_stats.data.imu_sensor_dropped +
+                          dm_stats.data.touch_sensor_dropped +
+                          dm_stats.data.raw_frames_dropped +
+                          dm_stats.data.full_frames_dropped +
+                          dm_stats.data.pool_alloc_failures +
+                          dm_stats.data.queue_send_failures +
+                          frame_stats.imu_wait_timeouts +
+                          frame_stats.touch_wait_timeouts +
+                          frame_stats.imu_stale_drops +
+                          frame_stats.touch_stale_drops +
+                          frame_stats.timestamp_mismatch_drops +
+                          frame_stats.raw_alloc_failures +
+                          frame_stats.raw_publish_failures +
+                          process_stats.invalid_input_frames +
+                          process_stats.joint_solve_failures +
+                          process_stats.full_alloc_failures +
+                          process_stats.full_publish_failures +
+                          process_stats.raw_release_failures;
 
     now_tick = osKernelGetTickCount();
     if (initialized == 0U)
@@ -138,6 +175,7 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
         last_full_pub = dm_stats.data.full_frames_published;
         last_processed = process_stats.processed_frames;
         last_imu_rx = imu_stats.rx_frame_count;
+        last_error_total = current_error_total;
         return;
     }
 
@@ -148,19 +186,61 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
     full_delta = dm_stats.data.full_frames_published - last_full_pub;
     processed_delta = process_stats.processed_frames - last_processed;
     imu_rx_delta = imu_stats.rx_frame_count - last_imu_rx;
+    error_delta = current_error_total - last_error_total;
+
+    imu_rate_x10 = UartDebugTask_RateHzX10(imu_delta, elapsed_ticks);
+    touch_rate_x10 = UartDebugTask_RateHzX10(touch_delta, elapsed_ticks);
+    raw_rate_x10 = UartDebugTask_RateHzX10(raw_delta, elapsed_ticks);
+    full_rate_x10 = UartDebugTask_RateHzX10(full_delta, elapsed_ticks);
+    processed_rate_x10 = UartDebugTask_RateHzX10(processed_delta, elapsed_ticks);
+    acquisition_health_flags = health.current_flags & UART_DEBUG_ACQ_HEALTH_MASK;
+    /* 同一诊断周期只取一次掩码，避免任务切换导致判定值与打印值不一致。 */
+    fresh_mask = ImuCanTask_GetFreshMask();
+    imu_ok = ((imu_rate_x10 >= UART_DEBUG_MIN_SAMPLE_RATE_X10) &&
+              (fresh_mask == (uint16_t)GLOVE_IMU_VALID_ALL_MASK)) ? 1U : 0U;
+    touch_ok = (touch_rate_x10 >= UART_DEBUG_MIN_SAMPLE_RATE_X10) ? 1U : 0U;
+    pipeline_ok = ((raw_rate_x10 >= UART_DEBUG_MIN_SAMPLE_RATE_X10) &&
+                   (full_rate_x10 >= UART_DEBUG_MIN_SAMPLE_RATE_X10) &&
+                   (processed_rate_x10 >= UART_DEBUG_MIN_SAMPLE_RATE_X10)) ? 1U : 0U;
+    acquisition_ok = ((imu_ok != 0U) &&
+                      (touch_ok != 0U) &&
+                      (pipeline_ok != 0U) &&
+                      (error_delta == 0U) &&
+                      (acquisition_health_flags == 0UL)) ? 1U : 0U;
+
+    printf("[ACQ] status=%s imu_ok=%u touch_ok=%u pipe_ok=%u fresh=0x%04x new_err=%lu health=0x%08lx uart_drop=%lu\r\n",
+           (acquisition_ok != 0U) ? "OK" : "WARN",
+           (unsigned int)imu_ok,
+           (unsigned int)touch_ok,
+           (unsigned int)pipeline_ok,
+           (unsigned int)fresh_mask,
+           (unsigned long)error_delta,
+           (unsigned long)acquisition_health_flags,
+           (unsigned long)UartRedirect_GetDroppedCount());
+
+    printf("[HEALTH] state=%u current_err=0x%04x source=%u target=%u last_err=0x%04x live=0x%04x ready=0x%04x age_ms=%u recovery=%u\r\n",
+           (unsigned int)health.state,
+           (unsigned int)health.current_error,
+           (unsigned int)health.current_source,
+           (unsigned int)health.current_target,
+           (unsigned int)health.last_error,
+           (unsigned int)health.live_imu_mask,
+           (unsigned int)health.sensor_ready_flags,
+           (unsigned int)health.snapshot_age_ms,
+           (unsigned int)health.recovery_stage);
 
     printf("[RATE] sample=%lu imu_pub=%lu hz=",
            (unsigned long)sample_count,
            (unsigned long)imu_delta);
-    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(imu_delta, elapsed_ticks));
+    UartDebugTask_PrintHz10(imu_rate_x10);
     printf(" touch_pub=%lu hz=", (unsigned long)touch_delta);
-    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(touch_delta, elapsed_ticks));
+    UartDebugTask_PrintHz10(touch_rate_x10);
     printf(" raw_pub=%lu hz=", (unsigned long)raw_delta);
-    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(raw_delta, elapsed_ticks));
+    UartDebugTask_PrintHz10(raw_rate_x10);
     printf(" full_pub=%lu hz=", (unsigned long)full_delta);
-    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(full_delta, elapsed_ticks));
+    UartDebugTask_PrintHz10(full_rate_x10);
     printf(" processed=%lu hz=", (unsigned long)processed_delta);
-    UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(processed_delta, elapsed_ticks));
+    UartDebugTask_PrintHz10(processed_rate_x10);
     printf(" imu_rx=%lu hz=", (unsigned long)imu_rx_delta);
     UartDebugTask_PrintHz10(UartDebugTask_RateHzX10(imu_rx_delta, elapsed_ticks));
     printf("\r\n");
@@ -213,7 +293,7 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
            (unsigned long)imu_stats.recovery_target_node,
            (unsigned long)imu_stats.recovery_bus_reinit_count,
            (unsigned long)imu_stats.recovery_power_cycle_count,
-           (unsigned int)ImuCanTask_GetFreshMask(),
+           (unsigned int)fresh_mask,
            (unsigned long)imu_stats.first_valid_node_id,
            (unsigned long)imu_stats.first_valid_seen_mask);
 
@@ -238,6 +318,22 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
            (unsigned long)imu_stats.bus_off[0],
            (unsigned long)imu_stats.bus_off[1]);
 
+    if (imu_stats.first_valid_node_id != 0U)
+    {
+        printf("[IMU_SAMPLE] node=%lu acc_mg=(%ld,%ld,%ld) gyro_mdps=(%ld,%ld,%ld) quat_1e4=(%ld,%ld,%ld,%ld)\r\n",
+               (unsigned long)imu_stats.first_valid_node_id,
+               (long)imu_stats.accel_x_mg,
+               (long)imu_stats.accel_y_mg,
+               (long)imu_stats.accel_z_mg,
+               (long)imu_stats.gyro_x_mdps,
+               (long)imu_stats.gyro_y_mdps,
+               (long)imu_stats.gyro_z_mdps,
+               (long)imu_stats.quat_w_1e4,
+               (long)imu_stats.quat_x_1e4,
+               (long)imu_stats.quat_y_1e4,
+               (long)imu_stats.quat_z_1e4);
+    }
+
     last_tick = now_tick;
     last_imu_pub = dm_stats.data.imu_sensor_published;
     last_touch_pub = dm_stats.data.touch_sensor_published;
@@ -245,12 +341,13 @@ static void UartDebugTask_PrintChainStatus(uint32_t sample_count)
     last_full_pub = dm_stats.data.full_frames_published;
     last_processed = process_stats.processed_frames;
     last_imu_rx = imu_stats.rx_frame_count;
+    last_error_total = current_error_total;
 }
 
 /**
  * @brief 串口调试线程
  *
- * 低频心跳打印
+ * 综合诊断模式下输出状态；触觉流模式下仅负责及时发送缓存数据。
  */
 void UartDebugTask(void *argument)
 {
@@ -258,11 +355,16 @@ void UartDebugTask(void *argument)
 
     uint32_t tick_count = 0U;
 
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
     printf("\r\n[UART] debug task started\r\n");
+#endif
 
     for (;;)
     {
-        UartDebugTask_PrintChainStatus(tick_count);
+        if (APP_ENABLE_ACQUISITION_DEBUG != 0U)
+        {
+            UartDebugTask_PrintChainStatus(tick_count);
+        }
 
 #if (UART_DEBUG_PRINT_IMU_DUMP != 0U)
         UartDebugTask_PrintImuDump();

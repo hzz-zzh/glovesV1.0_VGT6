@@ -564,16 +564,6 @@
           <GroupName>Devices</GroupName>
           <Files>
             <File>
-              <FileName>bq25622.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Devices\src\bq25622.c</FilePath>
-            </File>
-            <File>
-              <FileName>max17043.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Devices\src\max17043.c</FilePath>
-            </File>
-            <File>
               <FileName>w25q512jv.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Devices\src\w25q512jv.c</FilePath>

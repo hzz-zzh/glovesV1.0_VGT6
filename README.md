@@ -1,6 +1,6 @@
 ﻿# 数据采集手套嵌入式软件任务设计
 
-面向设备使用者的开关机、充电和低电保护说明见 [电源管理使用说明](POWER_MANAGEMENT_USER_GUIDE.md)。
+当前硬件由外部电源直接供电，不安装电量计、充电管理芯片和外设电源开关。旧版电池供电板说明保留在 [旧版电源管理使用说明](POWER_MANAGEMENT_USER_GUIDE.md)，不适用于当前硬件。
 
 RS485寄存器、统一健康状态和历史错误清除命令见 [Modbus485协议](MODBUS485_PROTOCOL.md)。
 
@@ -65,7 +65,7 @@ StorageTask
     -> 写入 SD 卡缓存和文件
 
 SystemManagerTask
-    -> 电量检测 状态灯 错误状态 看门狗 运行统计
+    -> 固定供电状态 错误状态 看门狗 运行统计
 ```
 
 ---
@@ -77,11 +77,10 @@ SystemManagerTask
 职责：
 
 ```text
-电量检测
-状态灯显示
+维护固定外部供电状态
 错误码维护
 任务健康检查
-看门狗喂狗
+看门狗状态汇总
 DataManager 统计信息监控
 系统运行状态上报
 ```
@@ -89,7 +88,7 @@ DataManager 统计信息监控
 周期：
 
 ```text
-300 ms 
+10 ms
 ```
 
 该任务不应该执行耗时数据处理，也不应该阻塞采集任务。
@@ -225,3 +224,38 @@ IMU 和触觉采样频率不一致
 | StorageTask | `osPriorityLow` | SD 写入抖动大 不应影响采集 |
 | SystemManagerTask | `osPriorityLow` | 低频状态管理任务 |
 | TestTask | `osPriorityLow` | 仅调试阶段使用 |
+
+---
+
+## 5. 数据采集调试输出
+
+当前量产配置已关闭全部调试输出。需要检查触觉原始值时，可将 `APP_BUILD_PRODUCTION` 设为 `0`，并将 `APP_ENABLE_DEBUG_UART_OUTPUT`、`APP_ENABLE_UART_DEBUG_TASK` 和 `APP_ENABLE_TOUCH_1_30_STREAM` 设为 `1`。调试串口为 `USART2`（`PD5/TX`、`PD6/RX`）、`921600 baud`、`8N1`，每个触觉采样周期输出第1～30点（数组下标0～29）：
+
+```text
+[TOUCH_01_30] value1,value2,...,value30
+```
+
+目标输出频率约为 `200 Hz`，30个数依次对应第1～30点。当前全部68个触觉点均采用3帧滑动均值滤波，串口输出与发布给后续任务的数据一致。启动、IMU、完整帧、健康状态及其他触觉点输出均已暂时关闭。
+
+如需恢复完整采集诊断，将 `APP_ENABLE_TOUCH_1_30_STREAM` 设为 `0`，将 `APP_ENABLE_ACQUISITION_DEBUG` 设为 `1`。完整诊断输出格式如下：
+
+```text
+[ACQ] status=OK ...
+[HEALTH] state=... current_err=... source=... target=...
+[RATE] imu_pub=... touch_pub=... raw=... full=... processed=...
+[IMU_SAMPLE] node=... acc_mg=(...) gyro_mdps=(...) quat_1e4=(...)
+[IMU01] ... 至 [IMU16] ...
+[FULL] ...
+```
+
+`[ACQ] status=OK` 表示 IMU、触觉、合帧和算法输出均达到至少 `180 Hz`，16 个 IMU 在本周期内都有新数据，且没有新增丢帧、超时或关键健康告警。正常情况下重点检查：
+
+- `fresh=0xffff`，表示 16 个 IMU 均有新数据；
+- `new_err=0`、`health=0x00000000`、`uart_drop=0`；
+- `[RATE]` 各级速率稳定在目标 `200 Hz` 附近；
+- `[IMU_SAMPLE]` 的加速度、角速度和四元数会随手套运动变化；
+- `[IMU01]` 至 `[IMU16]` 可逐路检查 IMU 数据。
+
+若出现 `status=WARN`，结合 `imu_ok`、`touch_ok`、`pipe_ok`、`fresh`、`new_err` 和 `health` 判断异常所在。`uart_drop` 非零表示调试信息来不及发送，不等同于传感器丢帧。
+
+联调完成后，在 `App/inc/app_config.h` 中恢复量产配置：将 `APP_BUILD_PRODUCTION` 设为 `1`，并将所有 `APP_ENABLE_*DEBUG*` 和 `APP_ENABLE_TOUCH_1_30_STREAM` 调试开关设为 `0`。

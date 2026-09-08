@@ -157,9 +157,14 @@ void MX_FREERTOS_Init(void) {
   SystemHealth_Init();
   GloveStatus_t dm_status = DataManager_Init();
   GloveStatus_t storage_control_status = StorageTask_ControlInit();
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[RTOS] DataManager_Init status=%u\r\n", (unsigned int)dm_status);
   printf("[RTOS] StorageTask_ControlInit status=%u\r\n",
          (unsigned int)storage_control_status);
+#else
+  (void)dm_status;
+  (void)storage_control_status;
+#endif
 
   /* USER CODE END Init */
 
@@ -181,7 +186,7 @@ void MX_FREERTOS_Init(void) {
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
-  /* MCU长期由电池供电，看门狗任务不受外设电源开关影响。 */
+  /* 看门狗独立于各采集任务运行，持续监控系统调度状态。 */
   watchdogTaskHandle = osThreadNew(WatchdogTask, NULL, &watchdogTask_attributes);
 
 #if (APP_ENABLE_UART_DEBUG_TASK != 0U)
@@ -226,6 +231,7 @@ void MX_FREERTOS_Init(void) {
 #endif
 
   /* USER CODE BEGIN RTOS_THREADS */
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
   printf("[RTOS] handles default=0x%08lX watchdog=0x%08lX test=0x%08lX frame=0x%08lX sys=0x%08lX time=0x%08lX imu=0x%08lX touch=0x%08lX data=0x%08lX rs485=0x%08lX storage=0x%08lX\r\n",
          (unsigned long)(uintptr_t)defaultTaskHandle,
          (unsigned long)(uintptr_t)watchdogTaskHandle,
@@ -238,6 +244,7 @@ void MX_FREERTOS_Init(void) {
          (unsigned long)(uintptr_t)dataProcessTaskHandle,
          (unsigned long)(uintptr_t)rs485TaskHandle,
          (unsigned long)(uintptr_t)storageTaskHandle);
+#endif
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 

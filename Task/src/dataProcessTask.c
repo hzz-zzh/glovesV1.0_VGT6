@@ -9,6 +9,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "app_config.h"
 #include "data_manager.h"
 #include "glove_hand_config.h"
 #include "hand_solve.h"
@@ -17,8 +18,8 @@
 #define DATA_PROCESS_GET_RAW_TIMEOUT_MS         (10U)
 #define DATA_PROCESS_IDLE_DELAY_MS              (1U)
 #define DATA_PROCESS_FULL_PUBLISH_TIMEOUT_MS    (0U)
-#define DATA_PROCESS_FULL_DEBUG_PRINT_ENABLE    (0U)
-#define DATA_PROCESS_FULL_DEBUG_PRINT_PERIOD    (50U)
+#define DATA_PROCESS_FULL_DEBUG_PRINT_ENABLE    APP_ENABLE_ACQUISITION_DEBUG
+#define DATA_PROCESS_FULL_DEBUG_PRINT_PERIOD    (200U)
 #define DATA_PROCESS_FULL_DEBUG_IMU_PRINT_COUNT (2U)
 #define DATA_PROCESS_FULL_DEBUG_TOUCH_COUNT     (16U)
 #define DATA_PROCESS_HEALTH_FAILURE_LIMIT       (3U)
