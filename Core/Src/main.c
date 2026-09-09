@@ -26,7 +26,6 @@
 #include "data_manager.h"
 #include "glove_hand_config.h"
 #include "modbus_time_sync.h"
-#include "systemManagerTask.h"
 #include "system_watchdog.h"
 #include "uart_redirect.h"
 
@@ -1066,8 +1065,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOB, TOUCH_COL_SEL0_Pin|TOUCH_COL_SEL1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  /* 充电参数回读确认前保持禁止充电，SystemManagerTask配置成功后再放开。 */
-  HAL_GPIO_WritePin(DISABLE_CHARGE_GPIO_Port, DISABLE_CHARGE_Pin, GPIO_PIN_SET);
+  /* DISABLE_CHARGE低电平允许充电控制。 */
+  HAL_GPIO_WritePin(DISABLE_CHARGE_GPIO_Port, DISABLE_CHARGE_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(TOUCH_COL_SEL2_GPIO_Port, TOUCH_COL_SEL2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
@@ -1085,9 +1084,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : POWER_ON_OFF_Pin */
+  /* 外部常供电模式不使用电源按键。 */
   GPIO_InitStruct.Pin = POWER_ON_OFF_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(POWER_ON_OFF_GPIO_Port, &GPIO_InitStruct);
 
@@ -1124,9 +1123,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(USER_LED_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : INT_GAUGE_BQ_Pin */
+  /* 外部常供电模式不使用电量计/充电芯片中断。 */
   GPIO_InitStruct.Pin = INT_GAUGE_BQ_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(INT_GAUGE_BQ_GPIO_Port, &GPIO_InitStruct);
 
@@ -1136,21 +1135,15 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(USER_KEY_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : STATUS_CHARGE_Pin */
+  /* 外部常供电模式不使用充电状态中断。 */
   GPIO_InitStruct.Pin = STATUS_CHARGE_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(STATUS_CHARGE_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI15_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_IRQn);
-  HAL_NVIC_SetPriority(EXTI2_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
-  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-  HAL_NVIC_SetPriority(EXTI3_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -1160,29 +1153,9 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == POWER_ON_OFF_Pin)
-  {
-    SystemManagerTask_OnPowerKeyEdgeFromIsr();
-  }
-  else if (GPIO_Pin == PPS_IN_Pin)
+  if (GPIO_Pin == PPS_IN_Pin)
   {
     ModbusTimeSync_OnPpsEdge(GPIO_Pin);
-  }
-  else if (GPIO_Pin == STATUS_CHARGE_Pin)
-  {
-    SystemManagerTask_OnChargeStatusEdgeFromIsr();
-  }
-}
-
-void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
-{
-  if (GPIO_Pin == POWER_ON_OFF_Pin)
-  {
-    SystemManagerTask_OnPowerKeyEdgeFromIsr();
-  }
-  else if (GPIO_Pin == INT_GAUGE_BQ_Pin)
-  {
-    SystemManagerTask_OnBqInterruptFromIsr();
   }
 }
 
