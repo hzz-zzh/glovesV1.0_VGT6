@@ -54,7 +54,9 @@ REG_TIME_SYNC_UTC_US = 0x000A
 MODBUS_ROS_TIME_REG_COUNT = 4
 REG_FW_VERSION_START = 0x000E
 REG_FW_VERSION_COUNT = 3
-REG_BASIC_AND_FW_COUNT = REG_FW_VERSION_START + REG_FW_VERSION_COUNT
+REG_DEVICE_INFO_START = 0x0011
+REG_DEVICE_INFO_COUNT = 11
+REG_BASIC_FW_DEVICE_COUNT = REG_DEVICE_INFO_START + REG_DEVICE_INFO_COUNT
 REG_CMD_START = 0x0020
 REG_CMD_ACK_START = 0x0023
 REG_CMD_ACK_COUNT = 3
@@ -67,8 +69,6 @@ REG_SYSTEM_STATUS_START = 0x0040
 REG_SYSTEM_STATUS_COUNT = 10
 REG_HEALTH_STATUS_START = 0x004A
 REG_HEALTH_STATUS_COUNT = 22
-REG_POWER_STATUS_START = 0x0060
-REG_POWER_STATUS_COUNT = 18
 REG_SD_STATUS_START = 0x0081
 REG_SD_STATUS_COUNT = 63
 REG_WORK_STATE = 0x0500
@@ -113,10 +113,12 @@ MODBUS_TOUCH_DATA_REG_COUNT = 68
 
 MB_FC_READ_SENSOR_SNAPSHOT = 0x41
 SENSOR_SNAPSHOT_METADATA_REG_COUNT = 10
-SENSOR_SNAPSHOT_POWER_STATE_INDEX = 6
+SENSOR_SNAPSHOT_STATUS_INDEX = 6
 SENSOR_SNAPSHOT_IMU_STATUS_INDEX = 7
 SENSOR_SNAPSHOT_JOINT_STATUS_INDEX = 8
 SENSOR_SNAPSHOT_TOUCH_STATUS_INDEX = 9
+SENSOR_SNAPSHOT_STATUS_VALID = 1 << 0
+SENSOR_SNAPSHOT_STATUS_UTC_VALID = 1 << 1
 SENSOR_SNAPSHOT_SENSOR_REG_COUNT = (
     MODBUS_IMU_DATA_REG_COUNT
     + MODBUS_JOINT_DATA_REG_COUNT
@@ -153,17 +155,6 @@ TOUCH_FLAG_NAMES = (
     (0x0002, "touch"),
 )
 
-POWER_STATE_NAMES = {
-    0: "INIT",
-    1: "ON_NORMAL",
-    2: "ON_LOW",
-    3: "USER_OFF",
-    4: "LOW_BAT_LOCKOUT",
-    5: "STOPPING",
-    6: "RECOVERING",
-    7: "RECOVERY_FAULT",
-}
-
 HEALTH_STATE_NAMES = {
     0: "INIT",
     1: "OK",
@@ -171,8 +162,6 @@ HEALTH_STATE_NAMES = {
     3: "DEGRADED",
     4: "RECOVERING",
     5: "FAULT",
-    6: "OFF",
-    7: "LOCKOUT",
 }
 
 HEALTH_SOURCE_NAMES = {
@@ -182,9 +171,6 @@ HEALTH_SOURCE_NAMES = {
     3: "CAN2",
     4: "touch",
     5: "pipeline",
-    6: "power",
-    7: "battery",
-    8: "charger",
     9: "watchdog",
     10: "RS485",
     11: "time_sync",
@@ -200,11 +186,6 @@ RECOVERY_STAGE_NAMES = {
     4: "reinitializing CAN bus",
     5: "configuring CAN bus nodes",
     6: "verifying CAN bus",
-    7: "stopping acquisition safely",
-    8: "peripheral power-off hold",
-    9: "starting peripheral power",
-    10: "waiting for sensors",
-    11: "verifying complete frames",
     12: "recovery failed",
 }
 
@@ -220,14 +201,6 @@ HEALTH_FLAG_NAMES = (
     (1 << 8, "can2_bus_off"),
     (1 << 9, "imu_config_failed"),
     (1 << 10, "can_reinit_failed"),
-    (1 << 11, "power_recovery_failed"),
-    (1 << 12, "low_battery"),
-    (1 << 13, "critical_battery"),
-    (1 << 14, "bq_comm"),
-    (1 << 15, "gauge_comm"),
-    (1 << 16, "voltage_mismatch"),
-    (1 << 17, "temperature_limit"),
-    (1 << 18, "charge_fault"),
     (1 << 19, "watchdog_warning"),
     (1 << 20, "time_unsynced"),
     (1 << 21, "calibration_error"),
@@ -244,7 +217,6 @@ READY_FLAG_NAMES = (
     (1 << 1, "touch"),
     (1 << 2, "full_frame"),
     (1 << 3, "joint"),
-    (1 << 4, "power"),
     (1 << 5, "time_sync"),
     (1 << 6, "rs485"),
 )
@@ -252,13 +224,13 @@ READY_FLAG_NAMES = (
 HEALTH_ERROR_INFO = {
     0x0000: ("no error", "No action is required."),
     0x1001: ("IMU node data stale", "Check the indicated IMU node and CAN wiring if recovery does not finish."),
-    0x1002: ("IMU node configuration failed", "Check the indicated node, its power, and CAN wiring."),
+    0x1002: ("IMU node configuration failed", "Check the indicated node and CAN wiring."),
     0x2001: ("CAN entered error-passive", "Inspect CAN termination, wiring, and bus load."),
     0x2002: ("CAN bus-off", "The device will reinitialize the bus automatically; inspect wiring if it repeats."),
-    0x2003: ("CAN reinitialization failed", "Power-cycle the device and inspect the indicated CAN bus."),
+    0x2003: ("CAN reinitialization failed", "Restart the device and inspect the indicated CAN bus."),
     0x2004: ("CAN recovery verification failed", "Inspect all nodes on the indicated CAN bus."),
-    0x3001: ("touch sync timeout", "Check acquisition sync and peripheral power."),
-    0x3002: ("touch ADC DMA timeout", "Check ADC/DMA operation and peripheral power."),
+    0x3001: ("touch sync timeout", "Check acquisition sync and touch wiring."),
+    0x3002: ("touch ADC DMA timeout", "Check ADC/DMA operation and touch wiring."),
     0x3003: ("touch ADC DMA error", "Check ADC wiring and DMA configuration."),
     0x4001: ("complete sensor frame stale", "Wait for recovery; then inspect IMU/touch readiness."),
     0x4002: ("IMU/touch timestamps do not match", "Check the shared acquisition sync signal."),
@@ -267,14 +239,6 @@ HEALTH_ERROR_INFO = {
     0x4005: ("joint algorithm input invalid", "Restore all required IMU data and verify calibration."),
     0x5001: ("acquisition pause timeout", "A producer did not stop safely; inspect IMU and touch tasks."),
     0x5002: ("acquisition sync start failed", "Restart the device and inspect the sync timer/output."),
-    0x5003: ("peripheral recovery timeout", "Inspect peripheral power, all IMUs, touch ADC, and sync wiring."),
-    0x6001: ("battery low", "Charge the battery soon."),
-    0x6002: ("battery critical", "Charge the battery before enabling peripherals."),
-    0x6003: ("charger communication failed", "Inspect the BQ25622 and I2C bus."),
-    0x6004: ("fuel-gauge communication failed", "Inspect the MAX17043 and I2C bus."),
-    0x6005: ("battery voltage readings disagree", "Inspect battery measurement paths."),
-    0x6006: ("charging temperature limit", "Allow the battery to return to a safe temperature."),
-    0x6007: ("charging fault", "Disconnect power and inspect the charger and battery."),
     0x7001: ("watchdog configuration warning", "Verify watchdog startup and task heartbeat configuration."),
     0x8001: ("RS485 receive frame overwritten", "Reduce request rate or wait for each response."),
     0x8002: ("RS485 UART error", "Inspect baud rate, grounding, termination, and cabling."),
@@ -284,87 +248,25 @@ HEALTH_ERROR_INFO = {
     0xA001: ("SD logging error", "Inspect the SD card and filesystem, then retry logging."),
 }
 
-SENSOR_READY_POWER_STATES = frozenset((1, 2))
 IMU_ALL_VALID_MASK = (1 << MODBUS_IMU_COUNT) - 1
 
-CHARGE_STATE_NAMES = {
-    0: "UNKNOWN",
-    1: "NO_INPUT",
-    2: "IDLE",
-    3: "CC",
-    4: "CV",
-    5: "TOPOFF",
-    6: "FULL",
-    7: "SUSPENDED",
-    8: "FAULT",
-}
-
-BQ_DIAG_STAGE_NAMES = {
-    0: "none",
-    1: "init",
-    2: "watchdog",
-    3: "input_current",
-    4: "external_ilim",
-    5: "charge_voltage",
-    6: "charge_current",
-    7: "termination_current",
-    8: "charge_safety",
-    9: "adc",
-    10: "status_read",
-    11: "interrupt_config",
-    12: "interrupt_read",
-}
-
-GLOVE_STATUS_NAMES = {
-    0: "OK",
-    1: "ERROR",
-    2: "TIMEOUT",
-    3: "NO_MEMORY",
-    4: "INVALID_PARAM",
-    5: "QUEUE_FULL",
-    6: "QUEUE_EMPTY",
-    7: "NOT_READY",
-}
-
-POWER_FLAG_NAMES = (
-    (1 << 0, "voltage_valid"),
-    (1 << 1, "soc_valid"),
-    (1 << 2, "current_valid"),
-    (1 << 3, "vbus_present"),
-    (1 << 4, "charging"),
-    (1 << 5, "low"),
-    (1 << 6, "critical"),
-    (1 << 7, "lockout"),
-    (1 << 8, "peripheral_on"),
-    (1 << 9, "bq_comm_fault"),
-    (1 << 10, "gauge_comm_fault"),
-    (1 << 11, "voltage_mismatch"),
-    (1 << 12, "temp_limited"),
-    (1 << 13, "charge_fault"),
-    (1 << 14, "safety_timer"),
-    (1 << 15, "charge_full"),
+CAPABILITY_FLAG_NAMES = (
+    (1 << 0, "sensor_snapshot"),
+    (1 << 1, "time_sync"),
+    (1 << 2, "imu_calibration"),
+    (1 << 3, "sd_log"),
 )
 
-BQ_CHARGER_EVENT_NAMES = (
-    (1 << 0, "watchdog"),
-    (1 << 1, "safety_timer"),
-    (1 << 2, "vindpm"),
-    (1 << 3, "iindpm"),
-    (1 << 4, "vsys"),
-    (1 << 5, "thermal_regulation"),
-    (1 << 6, "adc_done"),
-    (1 << 8, "vbus_changed"),
-    (1 << 11, "charge_changed"),
+SNAPSHOT_STATUS_NAMES = (
+    (SENSOR_SNAPSHOT_STATUS_VALID, "valid"),
+    (SENSOR_SNAPSHOT_STATUS_UTC_VALID, "utc_valid"),
 )
 
-BQ_FAULT_EVENT_NAMES = (
-    (1 << 0, "ts_changed"),
-    (1 << 3, "thermal_shutdown"),
-    (1 << 4, "otg_fault"),
-    (1 << 5, "system_fault"),
-    (1 << 6, "battery_fault"),
-    (1 << 7, "vbus_fault"),
-)
+HAND_SIDE_NAMES = {
+    0: "unknown",
+    1: "left",
+    2: "right",
+}
 
 RESET_CAUSE_NAMES = (
     (1 << 0, "pin_reset"),
@@ -1241,21 +1143,29 @@ class ModbusRtuClient:
 
 
 @dataclass
-class PowerSnapshot:
-    battery_voltage_v: float
-    battery_current_a: float
-    soc_percent: float
-    system_state: int
-    charge_state: int
-    flags: int
-    fault_code: int
-    vbus_voltage_v: float
-    input_current_a: float
-    bq_diag_stage: int
-    bq_diag_status: int
-    bq_charger_events: int
-    bq_fault_events: int
-    bq_interrupt_count: int
+class DeviceInfoSnapshot:
+    available: bool
+    protocol_version: int
+    snapshot_version: int
+    capabilities: int
+    hand_side: int
+    hardware_version: int
+    uid: str
+
+
+def decode_device_info(regs: list[int]) -> DeviceInfoSnapshot:
+    available = len(regs) >= REG_DEVICE_INFO_COUNT
+    values = (list(regs) + [0] * REG_DEVICE_INFO_COUNT)[:REG_DEVICE_INFO_COUNT]
+    uid_words = [regs_to_u32_le_words(values, offset) for offset in (5, 7, 9)]
+    return DeviceInfoSnapshot(
+        available=available,
+        protocol_version=values[0],
+        snapshot_version=values[1],
+        capabilities=values[2],
+        hand_side=values[3],
+        hardware_version=values[4],
+        uid="".join(f"{word:08X}" for word in uid_words),
+    )
 
 
 @dataclass
@@ -1354,35 +1264,14 @@ def format_health_target(source: int, target: int) -> str:
     return str(target)
 
 
-def decode_power(regs: list[int]) -> PowerSnapshot:
-    if len(regs) < REG_POWER_STATUS_COUNT:
-        raise ModbusError(f"power status needs {REG_POWER_STATUS_COUNT} registers")
-    return PowerSnapshot(
-        battery_voltage_v=regs_to_f32_le_words(regs[0], regs[1]),
-        battery_current_a=regs_to_f32_le_words(regs[2], regs[3]),
-        soc_percent=regs_to_f32_le_words(regs[4], regs[5]),
-        system_state=regs[6],
-        charge_state=regs[7],
-        flags=regs[8],
-        fault_code=regs[9],
-        vbus_voltage_v=regs_to_f32_le_words(regs[10], regs[11]),
-        input_current_a=regs_to_f32_le_words(regs[12], regs[13]),
-        bq_diag_stage=(regs[14] >> 8) & 0xFF,
-        bq_diag_status=regs[14] & 0xFF,
-        bq_charger_events=regs[15],
-        bq_fault_events=regs[16],
-        bq_interrupt_count=regs[17],
-    )
-
-
 @dataclass
 class GloveSnapshot:
     timestamp: float
     basic: list[int]
     firmware_regs: list[int]
+    device_info_regs: list[int]
     system: list[int]
     health_regs: list[int]
-    power_regs: list[int]
     sd_regs: list[int]
     work_state: int
     imu_status_regs: list[int]
@@ -1397,6 +1286,7 @@ class GloveSnapshot:
     sensor_hz: float = 0.0
     sensor_frame_id: int = 0
     sensor_timestamp_us: int = 0
+    sensor_snapshot_status: int = 0
     duplicate_responses: int = 0
     comm_requests: int = 0
     comm_timeouts: int = 0
@@ -1409,17 +1299,13 @@ class GloveSnapshot:
 
 
 def evaluate_sensor_validity(
-    power_state: int,
-    sensor_timestamp_us: int,
+    snapshot_status: int,
     imu_status: int,
     joint_status: int,
     touch_status: int,
 ) -> tuple[bool, str]:
-    if power_state not in SENSOR_READY_POWER_STATES:
-        state_name = POWER_STATE_NAMES.get(power_state, f"UNKNOWN({power_state})")
-        return False, f"power state {state_name}"
-    if sensor_timestamp_us <= 0:
-        return False, "sensor snapshot timestamp is invalid"
+    if (snapshot_status & SENSOR_SNAPSHOT_STATUS_VALID) == 0:
+        return False, f"snapshot status 0x{snapshot_status:04X} is invalid"
     if (imu_status & IMU_ALL_VALID_MASK) != IMU_ALL_VALID_MASK:
         return False, f"IMU valid mask 0x{imu_status:04X} is incomplete"
     if (joint_status & (JOINT_STATUS_SNAPSHOT_VALID | JOINT_STATUS_ALGORITHM_VALID)) != (
@@ -1432,22 +1318,24 @@ def evaluate_sensor_validity(
 
 
 def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> GloveSnapshot:
-    # 基础状态和固件版本地址连续，合并读取可避免增加一次Modbus请求。
-    basic_and_firmware = client.read_holding_registers(
-        slave, REG_BASIC_STATUS_START, REG_BASIC_AND_FW_COUNT, timeout_s
+    # 基础状态、固件版本和设备信息连续，合并读取可减少Modbus请求次数。
+    basic_fw_device = client.read_holding_registers(
+        slave, REG_BASIC_STATUS_START, REG_BASIC_FW_DEVICE_COUNT, timeout_s
     )
     snapshot = GloveSnapshot(
         timestamp=time.time(),
-        basic=basic_and_firmware[:REG_BASIC_STATUS_COUNT],
-        firmware_regs=basic_and_firmware[REG_BASIC_STATUS_COUNT:],
+        basic=basic_fw_device[:REG_BASIC_STATUS_COUNT],
+        firmware_regs=basic_fw_device[
+            REG_FW_VERSION_START : REG_FW_VERSION_START + REG_FW_VERSION_COUNT
+        ],
+        device_info_regs=basic_fw_device[
+            REG_DEVICE_INFO_START : REG_DEVICE_INFO_START + REG_DEVICE_INFO_COUNT
+        ],
         system=client.read_holding_registers(
             slave, REG_SYSTEM_STATUS_START, REG_SYSTEM_STATUS_COUNT, timeout_s
         ),
         health_regs=client.read_holding_registers(
             slave, REG_HEALTH_STATUS_START, REG_HEALTH_STATUS_COUNT, timeout_s
-        ),
-        power_regs=client.read_holding_registers(
-            slave, REG_POWER_STATUS_START, REG_POWER_STATUS_COUNT, timeout_s
         ),
         sd_regs=client.read_holding_registers(
             slave, REG_SD_STATUS_START, REG_SD_STATUS_COUNT, timeout_s
@@ -1475,16 +1363,21 @@ def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> Glov
             slave, REG_TOUCH_DATA_START, MODBUS_TOUCH_DATA_REG_COUNT, timeout_s
         ),
     )
-    power_state = decode_power(snapshot.power_regs).system_state
     sensor_timestamp_us = ros_time_to_us(snapshot.imu_status_regs[0:4])
+    snapshot_status = 0
+    if ((snapshot.joint_status_regs[4] & JOINT_STATUS_SNAPSHOT_VALID) != 0 and
+            (snapshot.touch_status_regs[4] & 0x0001) != 0):
+        snapshot_status |= SENSOR_SNAPSHOT_STATUS_VALID
+    if sensor_timestamp_us > 0:
+        snapshot_status |= SENSOR_SNAPSHOT_STATUS_UTC_VALID
     snapshot.sensor_data_valid, snapshot.sensor_invalid_reason = evaluate_sensor_validity(
-        power_state,
-        sensor_timestamp_us,
+        snapshot_status,
         snapshot.imu_status_regs[4],
         snapshot.joint_status_regs[4],
         snapshot.touch_status_regs[4],
     )
     snapshot.sensor_timestamp_us = sensor_timestamp_us
+    snapshot.sensor_snapshot_status = snapshot_status
     return snapshot
 
 
@@ -1493,9 +1386,9 @@ def empty_snapshot() -> GloveSnapshot:
         timestamp=time.time(),
         basic=[0] * REG_BASIC_STATUS_COUNT,
         firmware_regs=[],
+        device_info_regs=[],
         system=[0] * REG_SYSTEM_STATUS_COUNT,
         health_regs=[0] * REG_HEALTH_STATUS_COUNT,
-        power_regs=[0] * REG_POWER_STATUS_COUNT,
         sd_regs=[0] * REG_SD_STATUS_COUNT,
         work_state=0,
         imu_status_regs=[0] * 5,
@@ -1525,7 +1418,7 @@ def read_sensor_snapshot_poll(
     sensor_frame_id = snapshot_regs[0] | (snapshot_regs[1] << 16)
     sensor_time_regs = snapshot_regs[2:6]
     sensor_timestamp_us = ros_time_to_us(sensor_time_regs)
-    power_state = snapshot_regs[SENSOR_SNAPSHOT_POWER_STATE_INDEX]
+    snapshot_status = snapshot_regs[SENSOR_SNAPSHOT_STATUS_INDEX]
     imu_status = snapshot_regs[SENSOR_SNAPSHOT_IMU_STATUS_INDEX]
     joint_status = snapshot_regs[SENSOR_SNAPSHOT_JOINT_STATUS_INDEX]
     touch_status = snapshot_regs[SENSOR_SNAPSHOT_TOUCH_STATUS_INDEX]
@@ -1537,15 +1430,11 @@ def read_sensor_snapshot_poll(
     received_touch_regs = sensor_regs[joint_end:]
 
     sensor_data_valid, invalid_reason = evaluate_sensor_validity(
-        power_state,
-        sensor_timestamp_us,
+        snapshot_status,
         imu_status,
         joint_status,
         touch_status,
     )
-
-    power_regs = list(base.power_regs)
-    power_regs[6] = power_state
 
     joint_valid_bits = 0
     if sensor_data_valid:
@@ -1576,9 +1465,9 @@ def read_sensor_snapshot_poll(
         timestamp=time.time(),
         basic=base.basic,
         firmware_regs=base.firmware_regs,
+        device_info_regs=base.device_info_regs,
         system=base.system,
         health_regs=base.health_regs,
-        power_regs=power_regs,
         sd_regs=base.sd_regs,
         work_state=base.work_state,
         imu_status_regs=[*sensor_time_regs, imu_status],
@@ -1603,6 +1492,7 @@ def read_sensor_snapshot_poll(
         actual_hz=actual_hz,
         sensor_frame_id=displayed_frame_id,
         sensor_timestamp_us=displayed_timestamp_us,
+        sensor_snapshot_status=snapshot_status,
         comm_requests=comm_stats.requests,
         comm_timeouts=comm_stats.timeouts,
         comm_retries=comm_stats.retries,
@@ -1914,8 +1804,8 @@ class ModbusMonitorApp(tk.Tk):
         self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         self.summary_text = self._add_text_tab("Summary")
+        self.device_text = self._add_text_tab("Device")
         self.health_text = self._add_health_tab()
-        self.power_text = self._add_text_tab("Power")
         self.sd_text = self._add_sd_tab()
         self.imu_text = self._add_text_tab("IMU")
         self.joint_text = self._add_text_tab("Joint")
@@ -2742,6 +2632,10 @@ class ModbusMonitorApp(tk.Tk):
                 lambda: self._test_read_firmware_version(slave, timeout_s),
             )
             step(
+                "FC03 device information 0x0011+11",
+                lambda: self._test_read_device_info(slave, timeout_s),
+            )
+            step(
                 "FC03 ROS time block 0x0002+12",
                 lambda: self._test_read_time_block(slave, timeout_s),
             )
@@ -2752,10 +2646,6 @@ class ModbusMonitorApp(tk.Tk):
             step(
                 "FC03 health status 0x004A+22",
                 lambda: self._test_read_health_status(slave, timeout_s),
-            )
-            step(
-                "FC03 power status 0x0060+18",
-                lambda: self._test_read_power_status(slave, timeout_s),
             )
             step(
                 "FC03 work state 0x0500",
@@ -2799,6 +2689,11 @@ class ModbusMonitorApp(tk.Tk):
             )
 
         if do_negative:
+            step(
+                "FC03 retired range 0x0060",
+                lambda: self.client.read_holding_registers(slave, 0x0060, 1, timeout_s),
+                expect_exception=True,
+            )
             step(
                 "FC03 illegal address 0xFFFF",
                 lambda: self.client.read_holding_registers(slave, 0xFFFF, 1, timeout_s),
@@ -2866,15 +2761,14 @@ class ModbusMonitorApp(tk.Tk):
             f"count/cap={regs[5]}/{regs[6]}"
         )
 
-    def _test_read_power_status(self, slave: int, timeout_s: float) -> str:
+    def _test_read_device_info(self, slave: int, timeout_s: float) -> str:
         regs = self.client.read_holding_registers(
-            slave, REG_POWER_STATUS_START, REG_POWER_STATUS_COUNT, timeout_s
+            slave, REG_DEVICE_INFO_START, REG_DEVICE_INFO_COUNT, timeout_s
         )
-        power = decode_power(regs)
+        device = decode_device_info(regs)
         return (
-            f"VBAT={power.battery_voltage_v:.3f}V "
-            f"IBAT={power.battery_current_a:+.3f}A "
-            f"SOC={power.soc_percent:.2f}%(uncalibrated) flags=0x{power.flags:04X}"
+            f"protocol={device.protocol_version >> 8}.{device.protocol_version & 0xFF} "
+            f"snapshot={device.snapshot_version} uid={device.uid}"
         )
 
     def _test_read_health_status(self, slave: int, timeout_s: float) -> str:
@@ -2969,12 +2863,17 @@ class ModbusMonitorApp(tk.Tk):
 
     def _sensor_poll_worker(self, slave: int, timeout_s: float) -> None:
         previous = self.last_snapshot if self.last_snapshot is not None else empty_snapshot()
-        if not previous.firmware_regs:
+        if not previous.firmware_regs or not previous.device_info_regs:
             try:
-                # 固件版本在高速快照轮询开始前读取一次，避免占用200Hz通信周期。
-                previous.firmware_regs = self.client.read_holding_registers(
-                    slave, REG_FW_VERSION_START, REG_FW_VERSION_COUNT, timeout_s
+                # 静态版本与设备信息在高速轮询前读取一次，避免占用200Hz通信周期。
+                static_regs = self.client.read_holding_registers(
+                    slave,
+                    REG_FW_VERSION_START,
+                    REG_FW_VERSION_COUNT + REG_DEVICE_INFO_COUNT,
+                    timeout_s,
                 )
+                previous.firmware_regs = static_regs[:REG_FW_VERSION_COUNT]
+                previous.device_info_regs = static_regs[REG_FW_VERSION_COUNT:]
             except Exception as exc:
                 self.events.put(("error", exc))
         try:
@@ -3180,7 +3079,7 @@ class ModbusMonitorApp(tk.Tk):
         set_text(self.sd_text, "\n".join(lines))
 
     def _render_snapshot(self, snapshot: GloveSnapshot) -> None:
-        power = decode_power(snapshot.power_regs)
+        device = decode_device_info(snapshot.device_info_regs)
         health = decode_health(snapshot.health_regs)
         firmware_version = format_firmware_version(snapshot.firmware_regs)
         self.firmware_var.set(f"Firmware: {firmware_version}")
@@ -3249,6 +3148,8 @@ class ModbusMonitorApp(tk.Tk):
             f"Sensor frame Hz   : {snapshot.sensor_hz:.3f}",
             f"Sensor frame id   : {snapshot.sensor_frame_id}",
             f"Sensor timestamp  : {snapshot.sensor_timestamp_us} us",
+            f"Snapshot status   : 0x{snapshot.sensor_snapshot_status:04X} "
+            f"({format_flags(snapshot.sensor_snapshot_status, SNAPSHOT_STATUS_NAMES)})",
             f"Sensor data       : {'VALID' if snapshot.sensor_data_valid else 'INVALID'}",
             f"Data reason       : {snapshot.sensor_invalid_reason}",
             f"Duplicate replies : {snapshot.duplicate_responses}",
@@ -3279,21 +3180,13 @@ class ModbusMonitorApp(tk.Tk):
             f"Watchdog status   : 0x{snapshot.system[7]:04X} "
             f"({format_flags(snapshot.system[7], WATCHDOG_STATUS_NAMES)})",
             "",
-            f"Battery voltage   : {power.battery_voltage_v:.3f} V",
-            f"Battery current   : {power.battery_current_a:+.3f} A (+charge)",
-            f"Battery SOC       : {power.soc_percent:.2f} % (uncalibrated estimate)",
-            f"Power state       : {power.system_state} ({POWER_STATE_NAMES.get(power.system_state, 'UNKNOWN_VALUE')})",
-            f"Charge state      : {power.charge_state} ({CHARGE_STATE_NAMES.get(power.charge_state, 'UNKNOWN_VALUE')})",
-            f"Power flags       : 0x{power.flags:04X} ({format_flags(power.flags, POWER_FLAG_NAMES)})",
-            f"Power fault       : 0x{power.fault_code:04X}",
-            f"BQ diagnostic     : {power.bq_diag_stage} ({BQ_DIAG_STAGE_NAMES.get(power.bq_diag_stage, 'unknown')}) / "
-            f"{power.bq_diag_status} ({GLOVE_STATUS_NAMES.get(power.bq_diag_status, 'unknown')})",
-            f"BQ charger event  : 0x{power.bq_charger_events:04X} "
-            f"({format_flags(power.bq_charger_events, BQ_CHARGER_EVENT_NAMES)})",
-            f"BQ fault event    : 0x{power.bq_fault_events:02X} "
-            f"({format_flags(power.bq_fault_events, BQ_FAULT_EVENT_NAMES)})",
-            f"BQ INT count      : {power.bq_interrupt_count} (low 16 bits)",
-            f"VBUS/input        : {power.vbus_voltage_v:.3f} V / {power.input_current_a:+.3f} A",
+            f"Protocol version  : {device.protocol_version >> 8}.{device.protocol_version & 0xFF}",
+            f"Snapshot schema   : {device.snapshot_version}",
+            f"Capabilities      : 0x{device.capabilities:04X} "
+            f"({format_flags(device.capabilities, CAPABILITY_FLAG_NAMES)})",
+            f"Hand side         : {device.hand_side} ({HAND_SIDE_NAMES.get(device.hand_side, 'unknown')})",
+            f"Hardware version  : 0x{device.hardware_version:04X}",
+            f"MCU UID           : {device.uid}",
             "",
             f"IMU timestamp     : {imu_time}",
             f"IMU status bits   : 0x{imu_status:04X}",
@@ -3354,32 +3247,21 @@ class ModbusMonitorApp(tk.Tk):
         ]
         set_text(self.health_text, "\n".join(health_lines))
 
-        power_lines = [
-            "Battery and charger status",
+        device_lines = [
+            "Device and protocol information",
             "",
-            f"Battery voltage : {power.battery_voltage_v:.3f} V",
-            f"Battery current : {power.battery_current_a:+.3f} A (positive=charging)",
-            f"SOC             : {power.soc_percent:.2f} % (uncalibrated estimate)",
-            f"VBUS voltage    : {power.vbus_voltage_v:.3f} V",
-            f"Input current   : {power.input_current_a:+.3f} A",
-            f"System state    : {power.system_state} ({POWER_STATE_NAMES.get(power.system_state, 'UNKNOWN_VALUE')})",
-            f"Charge state    : {power.charge_state} ({CHARGE_STATE_NAMES.get(power.charge_state, 'UNKNOWN_VALUE')})",
-            f"Flags           : 0x{power.flags:04X}",
-            f"                  {format_flags(power.flags, POWER_FLAG_NAMES)}",
-            f"Fault code      : 0x{power.fault_code:04X}",
-            f"BQ diagnostic   : stage={power.bq_diag_stage} "
-            f"({BQ_DIAG_STAGE_NAMES.get(power.bq_diag_stage, 'unknown')}), "
-            f"status={power.bq_diag_status} "
-            f"({GLOVE_STATUS_NAMES.get(power.bq_diag_status, 'unknown')})",
-            f"BQ events       : charger=0x{power.bq_charger_events:04X} "
-            f"({format_flags(power.bq_charger_events, BQ_CHARGER_EVENT_NAMES)})",
-            f"                  fault=0x{power.bq_fault_events:02X} "
-            f"({format_flags(power.bq_fault_events, BQ_FAULT_EVENT_NAMES)})",
-            f"BQ INT count    : {power.bq_interrupt_count} (low 16 bits)",
+            f"Register block   : {'available' if device.available else 'unavailable'}",
+            f"Protocol version : {device.protocol_version >> 8}.{device.protocol_version & 0xFF}",
+            f"Snapshot schema  : {device.snapshot_version}",
+            f"Capabilities     : 0x{device.capabilities:04X}",
+            f"                   {format_flags(device.capabilities, CAPABILITY_FLAG_NAMES)}",
+            f"Hand side        : {device.hand_side} ({HAND_SIDE_NAMES.get(device.hand_side, 'unknown')})",
+            f"Hardware version : 0x{device.hardware_version:04X}",
+            f"MCU UID          : {device.uid}",
             "",
-            "Fault high bits: bit8=BQ comm, bit9=MAX17043 comm, bit10=voltage mismatch",
+            "Hardware version 0 means that no board revision was programmed.",
         ]
-        set_text(self.power_text, "\n".join(power_lines))
+        set_text(self.device_text, "\n".join(device_lines))
 
         imus = decode_imu(snapshot.imu_regs)
         if snapshot.sensor_data_valid:
@@ -3442,9 +3324,11 @@ class ModbusMonitorApp(tk.Tk):
             self._format_regs(
                 "firmware 0x000E", REG_FW_VERSION_START, snapshot.firmware_regs
             ),
+            self._format_regs(
+                "device 0x0011", REG_DEVICE_INFO_START, snapshot.device_info_regs
+            ),
             self._format_regs("system 0x0040", REG_SYSTEM_STATUS_START, snapshot.system),
             self._format_regs("health 0x004A", REG_HEALTH_STATUS_START, snapshot.health_regs),
-            self._format_regs("power 0x0060", REG_POWER_STATUS_START, snapshot.power_regs),
             self._format_regs("SD 0x0081", REG_SD_STATUS_START, snapshot.sd_regs),
             self._format_regs("imu status 0x1140", REG_IMU_TIMESTAMP_US, snapshot.imu_status_regs),
             self._format_regs(
@@ -3560,7 +3444,7 @@ class ModbusMonitorApp(tk.Tk):
             return
 
         snapshot = self.last_snapshot
-        power = decode_power(snapshot.power_regs)
+        device = decode_device_info(snapshot.device_info_regs)
         health = decode_health(snapshot.health_regs)
         firmware_version = format_firmware_version(snapshot.firmware_regs)
         imus = decode_imu(snapshot.imu_regs)
@@ -3584,22 +3468,15 @@ class ModbusMonitorApp(tk.Tk):
             writer.writerow(("meta", "sensor", "frame_hz", snapshot.sensor_hz))
             writer.writerow(("meta", "sensor", "frame_id", snapshot.sensor_frame_id))
             writer.writerow(("meta", "sensor", "timestamp_us", snapshot.sensor_timestamp_us))
+            writer.writerow(("meta", "sensor", "snapshot_status", f"0x{snapshot.sensor_snapshot_status:04X}"))
             writer.writerow(("meta", "sensor", "duplicate_responses", snapshot.duplicate_responses))
             writer.writerow(("meta", "sensor", "schedule_overruns", snapshot.schedule_overruns))
-            writer.writerow(("status", "power", "battery_voltage_v", power.battery_voltage_v))
-            writer.writerow(("status", "power", "battery_current_a", power.battery_current_a))
-            writer.writerow(("status", "power", "soc_percent", power.soc_percent))
-            writer.writerow(("status", "power", "system_state", power.system_state))
-            writer.writerow(("status", "power", "charge_state", power.charge_state))
-            writer.writerow(("status", "power", "flags", f"0x{power.flags:04X}"))
-            writer.writerow(("status", "power", "fault_code", f"0x{power.fault_code:04X}"))
-            writer.writerow(("status", "power", "vbus_voltage_v", power.vbus_voltage_v))
-            writer.writerow(("status", "power", "input_current_a", power.input_current_a))
-            writer.writerow(("status", "power", "bq_diag_stage", power.bq_diag_stage))
-            writer.writerow(("status", "power", "bq_diag_status", power.bq_diag_status))
-            writer.writerow(("status", "power", "bq_charger_events", f"0x{power.bq_charger_events:04X}"))
-            writer.writerow(("status", "power", "bq_fault_events", f"0x{power.bq_fault_events:02X}"))
-            writer.writerow(("status", "power", "bq_interrupt_count", power.bq_interrupt_count))
+            writer.writerow(("status", "device", "protocol_version", f"0x{device.protocol_version:04X}"))
+            writer.writerow(("status", "device", "snapshot_version", device.snapshot_version))
+            writer.writerow(("status", "device", "capabilities", f"0x{device.capabilities:04X}"))
+            writer.writerow(("status", "device", "hand_side", device.hand_side))
+            writer.writerow(("status", "device", "hardware_version", f"0x{device.hardware_version:04X}"))
+            writer.writerow(("status", "device", "mcu_uid", device.uid))
             writer.writerow(("status", "system", "reset_cause", f"0x{snapshot.system[6]:04X}"))
             writer.writerow(("status", "system", "watchdog_status", f"0x{snapshot.system[7]:04X}"))
             writer.writerow(("status", "health", "version", f"0x{health.version:04X}"))

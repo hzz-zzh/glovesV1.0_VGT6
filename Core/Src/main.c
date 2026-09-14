@@ -1091,7 +1091,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(USER_KEY_GPIO_Port, &GPIO_InitStruct);
 
-  /* 新板未连接旧电源管理信号，设为模拟模式避免悬空输入和误中断。 */
+  /* 当前板未使用这些引脚，设为模拟模式以降低悬空输入带来的干扰。 */
   GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;

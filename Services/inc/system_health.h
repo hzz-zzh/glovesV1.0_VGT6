@@ -7,7 +7,7 @@ extern "C" {
 
 #include <stdint.h>
 
-#define SYSTEM_HEALTH_VERSION                    (0x0102U)
+#define SYSTEM_HEALTH_VERSION                    (0x0200U)
 
 typedef enum
 {
@@ -16,9 +16,7 @@ typedef enum
     SYSTEM_HEALTH_WARNING = 2,
     SYSTEM_HEALTH_DEGRADED = 3,
     SYSTEM_HEALTH_RECOVERING = 4,
-    SYSTEM_HEALTH_FAULT = 5,
-    SYSTEM_HEALTH_OFF = 6,
-    SYSTEM_HEALTH_LOCKOUT = 7
+    SYSTEM_HEALTH_FAULT = 5
 } SystemHealthState_t;
 
 typedef enum
@@ -29,9 +27,7 @@ typedef enum
     SYSTEM_HEALTH_SOURCE_CAN2 = 3,
     SYSTEM_HEALTH_SOURCE_TOUCH = 4,
     SYSTEM_HEALTH_SOURCE_PIPELINE = 5,
-    SYSTEM_HEALTH_SOURCE_POWER = 6,
-    SYSTEM_HEALTH_SOURCE_BATTERY = 7,
-    SYSTEM_HEALTH_SOURCE_CHARGER = 8,
+    /* 6~8为历史版本保留编号，不再分配。 */
     SYSTEM_HEALTH_SOURCE_WATCHDOG = 9,
     SYSTEM_HEALTH_SOURCE_RS485 = 10,
     SYSTEM_HEALTH_SOURCE_TIME_SYNC = 11,
@@ -48,11 +44,7 @@ typedef enum
     SYSTEM_RECOVERY_BUS_REINIT = 4,
     SYSTEM_RECOVERY_BUS_CONFIG = 5,
     SYSTEM_RECOVERY_BUS_VERIFY = 6,
-    SYSTEM_RECOVERY_SAFE_STOP = 7,
-    SYSTEM_RECOVERY_POWER_OFF_HOLD = 8,
-    SYSTEM_RECOVERY_POWER_START = 9,
-    SYSTEM_RECOVERY_SENSOR_WAIT = 10,
-    SYSTEM_RECOVERY_FRAME_VERIFY = 11,
+    /* 7~11为历史版本保留编号，不再分配。 */
     SYSTEM_RECOVERY_FAILED = 12
 } SystemRecoveryStage_t;
 
@@ -67,14 +59,7 @@ typedef enum
 #define SYSTEM_HEALTH_FLAG_CAN2_BUS_OFF         (1UL << 8)
 #define SYSTEM_HEALTH_FLAG_IMU_CONFIG_FAILED    (1UL << 9)
 #define SYSTEM_HEALTH_FLAG_CAN_REINIT_FAILED    (1UL << 10)
-#define SYSTEM_HEALTH_FLAG_POWER_RECOVERY_FAIL  (1UL << 11)
-#define SYSTEM_HEALTH_FLAG_LOW_BATTERY          (1UL << 12)
-#define SYSTEM_HEALTH_FLAG_CRITICAL_BATTERY     (1UL << 13)
-#define SYSTEM_HEALTH_FLAG_BQ_COMM              (1UL << 14)
-#define SYSTEM_HEALTH_FLAG_GAUGE_COMM           (1UL << 15)
-#define SYSTEM_HEALTH_FLAG_VOLTAGE_MISMATCH     (1UL << 16)
-#define SYSTEM_HEALTH_FLAG_TEMP_LIMIT           (1UL << 17)
-#define SYSTEM_HEALTH_FLAG_CHARGE_FAULT         (1UL << 18)
+/* bit11~bit18为历史版本保留位，不再定义。 */
 #define SYSTEM_HEALTH_FLAG_WATCHDOG_WARNING     (1UL << 19)
 #define SYSTEM_HEALTH_FLAG_TIME_UNSYNCED         (1UL << 20)
 #define SYSTEM_HEALTH_FLAG_CALIBRATION_ERROR     (1UL << 21)
@@ -89,7 +74,7 @@ typedef enum
 #define SYSTEM_SENSOR_READY_TOUCH                (1U << 1)
 #define SYSTEM_SENSOR_READY_FULL_FRAME           (1U << 2)
 #define SYSTEM_SENSOR_READY_JOINT                 (1U << 3)
-#define SYSTEM_SENSOR_READY_POWER                (1U << 4)
+/* bit4为历史版本保留位，不再定义。 */
 #define SYSTEM_SENSOR_READY_TIME_SYNC            (1U << 5)
 #define SYSTEM_SENSOR_READY_RS485                (1U << 6)
 
@@ -110,14 +95,7 @@ typedef enum
 #define SYSTEM_ERROR_ALGORITHM_INVALID           (0x4005U)
 #define SYSTEM_ERROR_ACQ_PAUSE_TIMEOUT           (0x5001U)
 #define SYSTEM_ERROR_SYNC_START_FAILED           (0x5002U)
-#define SYSTEM_ERROR_POWER_RECOVERY_TIMEOUT      (0x5003U)
-#define SYSTEM_ERROR_BATTERY_LOW                 (0x6001U)
-#define SYSTEM_ERROR_BATTERY_CRITICAL            (0x6002U)
-#define SYSTEM_ERROR_BQ_COMM                     (0x6003U)
-#define SYSTEM_ERROR_GAUGE_COMM                  (0x6004U)
-#define SYSTEM_ERROR_VOLTAGE_MISMATCH            (0x6005U)
-#define SYSTEM_ERROR_TEMPERATURE_LIMIT           (0x6006U)
-#define SYSTEM_ERROR_CHARGE_FAULT                (0x6007U)
+/* 0x5003及0x6001~0x6007为历史版本保留错误码，不再使用。 */
 #define SYSTEM_ERROR_WATCHDOG_CONFIG             (0x7001U)
 #define SYSTEM_ERROR_RS485_RX_OVERWRITE          (0x8001U)
 #define SYSTEM_ERROR_RS485_UART                  (0x8002U)
@@ -151,7 +129,6 @@ typedef struct
 
 void SystemHealth_Init(void);
 void SystemHealth_Service(void);
-void SystemHealth_SetPowerState(uint8_t power_state);
 void SystemHealth_SetFault(uint32_t flag,
                            uint16_t error,
                            SystemHealthSource_t source,
@@ -164,7 +141,6 @@ void SystemHealth_SetRecovery(SystemRecoveryStage_t stage,
                               uint16_t target,
                               uint8_t attempt,
                               uint8_t attempt_limit);
-void SystemHealth_SetPowerRecovery(SystemRecoveryStage_t stage);
 void SystemHealth_SetLiveImuMask(uint16_t mask);
 void SystemHealth_SetSensorReady(uint16_t ready_flag, uint8_t ready);
 void SystemHealth_SetRs485UartDetail(uint16_t detail);

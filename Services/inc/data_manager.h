@@ -111,7 +111,6 @@ GloveStatus_t DataManager_ReleaseRawFrame(GloveRawFrameBlock_t *block);
 GloveStatus_t DataManager_ReleaseFullFrame(GloveFullFrameBlock_t *block);
 
 void DataManager_GetStats(DataManagerStats_t *stats);
-void DataManager_FlushAcquisitionQueues(void);
 
 #ifdef __cplusplus
 }

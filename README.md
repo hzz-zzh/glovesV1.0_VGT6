@@ -1,10 +1,10 @@
 ﻿# 数据采集手套嵌入式软件任务设计
 
-当前硬件由外部电源直接供电，不安装电量计、充电管理芯片和外设电源开关。旧版电池供电板说明保留在 [旧版电源管理使用说明](POWER_MANAGEMENT_USER_GUIDE.md)，不适用于当前硬件。
+当前硬件由外部电源直接供电。历史硬件资料归档在 [旧版硬件说明](docs/legacy/POWER_MANAGEMENT_USER_GUIDE.md)，不适用于当前硬件和Modbus 2.0协议。
 
 RS485寄存器、统一健康状态和历史错误清除命令见 [Modbus485协议](MODBUS485_PROTOCOL.md)。
 
-固件版本统一定义在 `App/inc/app_version.h`，当前版本为 `V1.0.0`。
+固件版本统一定义在 `App/inc/app_version.h`，当前版本为 `V3.0.0`。
 
 本文档说明当前 FreeRTOS 工程中的任务划分、任务之间的数据流关系，以及推荐的任务优先级设置。
 
@@ -13,7 +13,7 @@ RS485寄存器、统一健康状态和历史错误清除命令见 [Modbus485协�
 当前系统建议包含以下任务：
 
 ```text
-SystemManagerTask      系统管理任务
+SystemHealthTask       系统健康监测任务
 TimeSyncTask           时间同步任务
 ImuCanTask             IMU 数据获取任务
 TouchAdcTask           触觉数据获取任务
@@ -64,20 +64,19 @@ StorageTask
     -> DataManager_GetFullFrame(DATA_CONSUMER_STORAGE)
     -> 写入 SD 卡缓存和文件
 
-SystemManagerTask
-    -> 固定供电状态 错误状态 看门狗 运行统计
+SystemHealthTask
+    -> 汇总错误状态 看门狗和运行健康信息
 ```
 
 ---
 
 ## 3. 任务职责说明
 
-### 3.1 SystemManagerTask
+### 3.1 SystemHealthTask
 
 职责：
 
 ```text
-维护固定外部供电状态
 错误码维护
 任务健康检查
 看门狗状态汇总
@@ -222,7 +221,7 @@ IMU 和触觉采样频率不一致
 | AttitudeTask | `osPriorityNormal` | 算法耗时较大 不能压制采集 |
 | Rs485Task | `osPriorityBelowNormal` | 通讯重要但可由队列缓存削峰 |
 | StorageTask | `osPriorityLow` | SD 写入抖动大 不应影响采集 |
-| SystemManagerTask | `osPriorityLow` | 低频状态管理任务 |
+| SystemHealthTask | `osPriorityLow` | 低频健康监测任务 |
 | TestTask | `osPriorityLow` | 仅调试阶段使用 |
 
 ---

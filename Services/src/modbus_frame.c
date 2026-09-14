@@ -9,13 +9,14 @@
 
 #include "app_version.h"
 #include "dataProcessTask.h"
+#include "glove_hand_config.h"
 #include "imuCanTask.h"
+#include "main.h"
 #include "RS485_uasrt.h"
 #include "modbus_registers.h"
 #include "modbus_time_sync.h"
 #include "sd_log.h"
 #include "storageTask.h"
-#include "systemManagerTask.h"
 #include "system_health.h"
 #include "system_watchdog.h"
 
@@ -64,7 +65,6 @@ typedef struct
   ModbusImuSnapshot_t imu;
   ModbusJointSnapshot_t joint;
   ModbusTouchSnapshot_t touch;
-  GlovePowerStatus_t power;
   SystemWatchdogStatus_t watchdog;
   SystemHealthSnapshot_t health;
   SdLogStatusSnapshot_t sd;
@@ -99,12 +99,6 @@ static uint16_t modbus_cmd_ack = CMD_ACK_IDLE;
 static uint16_t modbus_cmd_ack_seq;
 static uint16_t modbus_cmd_error = CMD_ERROR_NONE;
 
-static uint8_t Modbus_IsSensorOutputReady(uint8_t power_state)
-{
-  return ((power_state == GLOVE_POWER_STATE_ON_NORMAL) ||
-          (power_state == GLOVE_POWER_STATE_ON_LOW)) ? 1U : 0U;
-}
-
 static uint32_t Modbus_MsToTicks(uint32_t timeout_ms)
 {
   uint64_t ticks = ((uint64_t)timeout_ms * (uint64_t)osKernelGetTickFreq() + 999ULL) / 1000ULL;
@@ -122,7 +116,6 @@ static void Modbus_CaptureReadSnapshot(uint8_t capture_diagnostics)
   uint32_t snapshot_timeout_ticks;
 
   /* 这些接口各自负责并发保护，避免在临界区内嵌套调用。 */
-  SystemManagerTask_GetPowerStatus(&modbus_read_snapshot.power);
   SystemWatchdog_GetStatus(&modbus_read_snapshot.watchdog);
   if (capture_diagnostics != 0U)
   {
@@ -140,13 +133,12 @@ static void Modbus_CaptureReadSnapshot(uint8_t capture_diagnostics)
   modbus_read_snapshot.imu = modbus_imu_snapshot;
   modbus_read_snapshot.joint = modbus_joint_snapshot;
   modbus_read_snapshot.touch = modbus_touch_snapshot;
-  if ((Modbus_IsSensorOutputReady(modbus_read_snapshot.power.system_state) == 0U) ||
-      (modbus_read_snapshot.imu.valid == 0U) ||
+  if ((modbus_read_snapshot.imu.valid == 0U) ||
       (modbus_read_snapshot.joint.valid == 0U) ||
       (modbus_read_snapshot.touch.valid == 0U) ||
       ((uint32_t)(now_tick - modbus_sensor_snapshot_tick) > snapshot_timeout_ticks))
   {
-    /* 电源未就绪或整组快照超时后统一返回无效零值，避免新旧传感器数据混用。 */
+    /* 整组快照超时后统一返回无效零值，避免新旧传感器数据混用。 */
     modbus_read_snapshot.imu_fresh_mask = 0U;
     (void)memset(&modbus_read_snapshot.imu, 0, sizeof(modbus_read_snapshot.imu));
     (void)memset(&modbus_read_snapshot.joint, 0, sizeof(modbus_read_snapshot.joint));
@@ -215,6 +207,11 @@ static uint8_t Modbus_IsReadableRegister(uint16_t reg_addr)
     return 1U;
   }
 
+  if ((reg_addr >= REG_DEVICE_INFO_START) && (reg_addr <= REG_DEVICE_INFO_END))
+  {
+    return 1U;
+  }
+
   if ((reg_addr >= REG_CMD_AREA_START) && (reg_addr <= REG_CMD_AREA_END))
   {
     return 1U;
@@ -226,11 +223,6 @@ static uint8_t Modbus_IsReadableRegister(uint16_t reg_addr)
   }
 
   if ((reg_addr >= REG_HEALTH_STATUS_START) && (reg_addr <= REG_HEALTH_STATUS_END))
-  {
-    return 1U;
-  }
-
-  if ((reg_addr >= REG_POWER_STATUS_START) && (reg_addr <= REG_POWER_STATUS_END))
   {
     return 1U;
   }
@@ -956,6 +948,25 @@ static uint16_t Modbus_ReadTouchStatusFlags(void)
   return status;
 }
 
+static uint16_t Modbus_ReadSensorSnapshotStatus(void)
+{
+  uint16_t status = 0U;
+
+  if ((modbus_read_snapshot.imu.valid != 0U) &&
+      (modbus_read_snapshot.joint.valid != 0U) &&
+      (modbus_read_snapshot.touch.valid != 0U))
+  {
+    status |= SENSOR_SNAPSHOT_STATUS_VALID;
+  }
+  if ((ModbusTimeSync_IsSynced() != 0U) &&
+      (modbus_read_snapshot.imu.timestamp_us != 0ULL))
+  {
+    status |= SENSOR_SNAPSHOT_STATUS_UTC_VALID;
+  }
+
+  return status;
+}
+
 static uint32_t Modbus_GetJointValidBits(void)
 {
   uint32_t valid_bits = 0UL;
@@ -1161,6 +1172,9 @@ static uint16_t Modbus_ReadTextReg(const char *text, uint16_t word_offset)
 
 static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
 {
+  uint16_t uid_offset;
+  uint32_t uid_word;
+
   if (reg_addr == REG_SLAVE_ADDR)
   {
     return (uint16_t)modbus_slave_address;
@@ -1194,6 +1208,15 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
     case REG_FW_VERSION_MAJOR: return (uint16_t)GLOVE_FW_VERSION_MAJOR;
     case REG_FW_VERSION_MINOR: return (uint16_t)GLOVE_FW_VERSION_MINOR;
     case REG_FW_VERSION_PATCH: return (uint16_t)GLOVE_FW_VERSION_PATCH;
+    case REG_PROTOCOL_VERSION: return MODBUS_PROTOCOL_VERSION;
+    case REG_SENSOR_SNAPSHOT_VERSION: return MODBUS_SENSOR_SNAPSHOT_VERSION;
+    case REG_DEVICE_CAPABILITIES:
+      return MODBUS_CAP_SENSOR_SNAPSHOT |
+             MODBUS_CAP_TIME_SYNC |
+             MODBUS_CAP_IMU_CALIBRATION |
+             MODBUS_CAP_SD_LOG;
+    case REG_DEVICE_HAND_SIDE: return (uint16_t)GloveHandConfig_GetHandSide();
+    case REG_HARDWARE_VERSION: return MODBUS_HARDWARE_VERSION_UNKNOWN;
 
     case REG_CMD: return modbus_cmd_command;
     case REG_CMD_PARAM: return modbus_cmd_param;
@@ -1231,18 +1254,12 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
       return modbus_read_snapshot.watchdog.status_flags;
 
     case REG_WORK_STATE:
-      if (modbus_read_snapshot.power.system_state == GLOVE_POWER_STATE_STOPPING)
-      {
-        return WORK_STATE_STOPPING;
-      }
-      if ((modbus_read_snapshot.health.state == SYSTEM_HEALTH_FAULT) ||
-          (modbus_read_snapshot.health.state == SYSTEM_HEALTH_LOCKOUT))
+      if (modbus_read_snapshot.health.state == SYSTEM_HEALTH_FAULT)
       {
         return WORK_STATE_ERROR;
       }
-      if ((Modbus_IsSensorOutputReady(modbus_read_snapshot.power.system_state) != 0U) &&
-          ((modbus_read_snapshot.health.sensor_ready_flags &
-            SYSTEM_SENSOR_READY_FULL_FRAME) != 0U))
+      if ((modbus_read_snapshot.health.sensor_ready_flags &
+           SYSTEM_SENSOR_READY_FULL_FRAME) != 0U)
       {
         return WORK_STATE_ACQUIRING;
       }
@@ -1294,6 +1311,19 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
       break;
   }
 
+  if ((reg_addr >= REG_DEVICE_UID_START) && (reg_addr <= REG_DEVICE_UID_END))
+  {
+    uid_offset = (uint16_t)(reg_addr - REG_DEVICE_UID_START);
+    switch (uid_offset / MODBUS_REGS_U32)
+    {
+      case 0U: uid_word = HAL_GetUIDw0(); break;
+      case 1U: uid_word = HAL_GetUIDw1(); break;
+      default: uid_word = HAL_GetUIDw2(); break;
+    }
+    return Modbus_ReadU32Reg(uid_word,
+                             (uint16_t)(uid_offset % MODBUS_REGS_U32));
+  }
+
   if ((reg_addr >= REG_HEALTH_STATUS_START) && (reg_addr <= REG_HEALTH_STATUS_END))
   {
     return Modbus_ReadHealthRegister(reg_addr);
@@ -1307,54 +1337,6 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
   if ((reg_addr >= REG_TEMPERATURE_BOARD) && (reg_addr < (REG_TEMPERATURE_BOARD + MODBUS_REGS_FLOAT32)))
   {
     return Modbus_ReadFloatReg(25.0f, (uint16_t)(reg_addr - REG_TEMPERATURE_BOARD));
-  }
-
-  if ((reg_addr >= REG_BAT_VOLTAGE) && (reg_addr < (REG_BAT_VOLTAGE + MODBUS_REGS_FLOAT32)))
-  {
-    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.battery_voltage_mv / 1000.0f,
-                               (uint16_t)(reg_addr - REG_BAT_VOLTAGE));
-  }
-
-  if ((reg_addr >= REG_BAT_CURRENT) && (reg_addr < (REG_BAT_CURRENT + MODBUS_REGS_FLOAT32)))
-  {
-    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.battery_current_ma / 1000.0f,
-                               (uint16_t)(reg_addr - REG_BAT_CURRENT));
-  }
-
-  if ((reg_addr >= REG_BAT_SOC) && (reg_addr < (REG_BAT_SOC + MODBUS_REGS_FLOAT32)))
-  {
-    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.soc_centi_percent / 100.0f,
-                               (uint16_t)(reg_addr - REG_BAT_SOC));
-  }
-
-  switch (reg_addr)
-  {
-    case REG_POWER_STATE: return modbus_read_snapshot.power.system_state;
-    case REG_CHARGE_STATE: return modbus_read_snapshot.power.charge_state;
-    case REG_POWER_FLAGS: return modbus_read_snapshot.power.flags;
-    case REG_POWER_FAULT: return modbus_read_snapshot.power.fault_code;
-    case REG_BQ_DIAGNOSTIC:
-      return (uint16_t)(((uint16_t)modbus_read_snapshot.power.bq_diagnostic_stage << 8) |
-                        modbus_read_snapshot.power.bq_last_status);
-    case REG_BQ_CHARGER_EVENTS:
-      return modbus_read_snapshot.power.bq_charger_events;
-    case REG_BQ_FAULT_EVENTS:
-      return modbus_read_snapshot.power.bq_fault_events;
-    case REG_BQ_INTERRUPT_COUNT:
-      return modbus_read_snapshot.power.bq_interrupt_count;
-    default: break;
-  }
-
-  if ((reg_addr >= REG_VBUS_VOLTAGE) && (reg_addr < (REG_VBUS_VOLTAGE + MODBUS_REGS_FLOAT32)))
-  {
-    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.vbus_voltage_mv / 1000.0f,
-                               (uint16_t)(reg_addr - REG_VBUS_VOLTAGE));
-  }
-
-  if ((reg_addr >= REG_INPUT_CURRENT) && (reg_addr < (REG_INPUT_CURRENT + MODBUS_REGS_FLOAT32)))
-  {
-    return Modbus_ReadFloatReg((float)modbus_read_snapshot.power.input_current_ma / 1000.0f,
-                               (uint16_t)(reg_addr - REG_INPUT_CURRENT));
   }
 
   if ((reg_addr >= REG_SD_TOTAL_SIZE_MB) && (reg_addr < (REG_SD_TOTAL_SIZE_MB + 2U)))
@@ -1607,7 +1589,7 @@ static ModbusResult_t Modbus_HandleReadSensorSnapshot(uint8_t response_addr,
   tx_buf[3] = (uint8_t)(MODBUS_SENSOR_SNAPSHOT_DATA_SIZE & 0xFFU);
 
   write_offset = 4U;
-  /* 元数据依次为帧号、时间戳、电源状态、IMU掩码、关节状态和触摸状态。 */
+  /* 元数据依次为帧号、时间戳、快照状态、IMU掩码、关节状态和触摸状态。 */
   Modbus_WriteU16(&tx_buf[write_offset],
                   (uint16_t)(modbus_read_snapshot.imu.frame_id & 0xFFFFU));
   write_offset = (uint16_t)(write_offset + 2U);
@@ -1621,7 +1603,7 @@ static ModbusResult_t Modbus_HandleReadSensorSnapshot(uint8_t response_addr,
                                                 index));
     write_offset = (uint16_t)(write_offset + 2U);
   }
-  Modbus_WriteU16(&tx_buf[write_offset], modbus_read_snapshot.power.system_state);
+  Modbus_WriteU16(&tx_buf[write_offset], Modbus_ReadSensorSnapshotStatus());
   write_offset = (uint16_t)(write_offset + 2U);
   Modbus_WriteU16(&tx_buf[write_offset], Modbus_ReadImuStatusBits());
   write_offset = (uint16_t)(write_offset + 2U);
@@ -2012,17 +1994,9 @@ void Modbus_InvalidateSensorSnapshots(void)
 void Modbus_UpdateFullFrameSnapshot(const GloveFullFrame_t *frame)
 {
   GloveTimestampUs_t frame_timestamp_us;
-  GlovePowerStatus_t power;
 
   if (frame == 0)
   {
-    return;
-  }
-
-  SystemManagerTask_GetPowerStatus(&power);
-  if (Modbus_IsSensorOutputReady(power.system_state) == 0U)
-  {
-    /* 恢复完成前拒绝旧队列或中间帧重新激活485快照。 */
     return;
   }
 

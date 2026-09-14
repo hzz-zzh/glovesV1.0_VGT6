@@ -12,7 +12,7 @@ static I2C_HandleTypeDef *I2cBus_GetHandle(I2cBusId_t bus_id)
         return &hi2c2;
     }
 
-    /* I2C1随电量计和充电管理芯片一起移除，不再映射到HAL句柄。 */
+    /* 当前硬件未使用I2C1，不映射到HAL句柄。 */
     return NULL;
 }
 

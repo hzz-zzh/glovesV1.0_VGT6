@@ -9,12 +9,18 @@ extern "C" {
  * 固件版本采用 V主版本.次版本.修订版本 格式。
  * 发布新固件时只需在此处修改，串口日志和通信接口会同步更新。
  */
-#define GLOVE_FW_VERSION_MAJOR             2
-#define GLOVE_FW_VERSION_MINOR             3
+#define GLOVE_FW_VERSION_MAJOR             3
+#define GLOVE_FW_VERSION_MINOR             0
 #define GLOVE_FW_VERSION_PATCH             0
 
 /*
     版本说明
+    V3.0.0：
+        1. Modbus协议升级到2.0，移除已退役的0x0060~0x0071状态区
+        2. 传感器快照升级到Schema 2，以快照有效和UTC有效标志替代旧元数据
+        3. 增加协议版本、能力、左右手配置和MCU唯一标识寄存器
+        4. 系统管理任务精简为健康监测任务，移除历史兼容状态
+
     V2.3.0：
         1. 适配外部直接供电的新硬件，移除电量计和充电管理芯片逻辑
         2. 移除按键控制外设电源及外设断电恢复流程

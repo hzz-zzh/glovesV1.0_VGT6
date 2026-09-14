@@ -92,10 +92,10 @@ const osThreadAttr_t frameAssemblerTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
   .stack_size = 1024 * 4
 };
-/* Definitions for systemManagerTask */
-osThreadId_t systemManagerTaskHandle;
-const osThreadAttr_t systemManagerTask_attributes = {
-  .name = "systemManagerTask",
+/* Definitions for systemHealthTask */
+osThreadId_t systemHealthTaskHandle;
+const osThreadAttr_t systemHealthTask_attributes = {
+  .name = "systemHealthTask",
   .priority = (osPriority_t) osPriorityLow,
   .stack_size = 512 * 4
 };
@@ -206,8 +206,8 @@ void MX_FREERTOS_Init(void) {
   /* creation of frameAssemblerTask */
   frameAssemblerTaskHandle = osThreadNew(FrameAssemblerTask, NULL, &frameAssemblerTask_attributes);
 
-  /* creation of systemManagerTask */
-  systemManagerTaskHandle = osThreadNew(SystemManagerTask, NULL, &systemManagerTask_attributes);
+  /* creation of systemHealthTask */
+  systemHealthTaskHandle = osThreadNew(SystemHealthTask, NULL, &systemHealthTask_attributes);
 
   /* creation of timeSyncTask */
   timeSyncTaskHandle = osThreadNew(TimeSyncTask, NULL, &timeSyncTask_attributes);
@@ -237,7 +237,7 @@ void MX_FREERTOS_Init(void) {
          (unsigned long)(uintptr_t)watchdogTaskHandle,
          (unsigned long)(uintptr_t)testTaskHandle,
          (unsigned long)(uintptr_t)frameAssemblerTaskHandle,
-         (unsigned long)(uintptr_t)systemManagerTaskHandle,
+         (unsigned long)(uintptr_t)systemHealthTaskHandle,
          (unsigned long)(uintptr_t)timeSyncTaskHandle,
          (unsigned long)(uintptr_t)imuCanTaskHandle,
          (unsigned long)(uintptr_t)touchAdcTaskHandle,
@@ -325,22 +325,22 @@ __weak void FrameAssemblerTask(void *argument)
   /* USER CODE END frameAssemblerTask */
 }
 
-/* USER CODE BEGIN Header_SystemManagerTask */
+/* USER CODE BEGIN Header_SystemHealthTask */
 /**
-* @brief Function implementing the systemManagerTask thread.
+* @brief Function implementing the systemHealthTask thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_SystemManagerTask */
-__weak void SystemManagerTask(void *argument)
+/* USER CODE END Header_SystemHealthTask */
+__weak void SystemHealthTask(void *argument)
 {
-  /* USER CODE BEGIN systemManagerTask */
+  /* USER CODE BEGIN systemHealthTask */
   /* Infinite loop */
   for(;;)
   {
     osDelay(1);
   }
-  /* USER CODE END systemManagerTask */
+  /* USER CODE END systemHealthTask */
 }
 
 /* USER CODE BEGIN Header_TimeSyncTask */

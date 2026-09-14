@@ -36,6 +36,28 @@ extern "C" {
 #define REG_FW_INFO_END                REG_FW_VERSION_PATCH
 #define REG_FW_INFO_COUNT              3U
 
+/* 协议和设备静态信息：0x0011 ~ 0x001B，只读。 */
+#define MODBUS_PROTOCOL_VERSION        0x0200U
+#define MODBUS_SENSOR_SNAPSHOT_VERSION 0x0002U
+
+#define MODBUS_CAP_SENSOR_SNAPSHOT     (1U << 0)
+#define MODBUS_CAP_TIME_SYNC           (1U << 1)
+#define MODBUS_CAP_IMU_CALIBRATION     (1U << 2)
+#define MODBUS_CAP_SD_LOG              (1U << 3)
+
+#define REG_PROTOCOL_VERSION           0x0011U
+#define REG_SENSOR_SNAPSHOT_VERSION    0x0012U
+#define REG_DEVICE_CAPABILITIES        0x0013U
+#define REG_DEVICE_HAND_SIDE           0x0014U
+#define REG_HARDWARE_VERSION           0x0015U
+#define REG_DEVICE_UID_START           0x0016U
+#define REG_DEVICE_UID_END             0x001BU
+
+#define REG_DEVICE_INFO_START          REG_PROTOCOL_VERSION
+#define REG_DEVICE_INFO_END            REG_DEVICE_UID_END
+#define REG_DEVICE_INFO_COUNT          11U
+#define MODBUS_HARDWARE_VERSION_UNKNOWN 0x0000U
+
 /* Command registers: 0x0020 ~ 0x003E. */
 #define REG_CMD                        0x0020U
 #define REG_CMD_PARAM                  0x0021U
@@ -51,8 +73,8 @@ extern "C" {
 #define REG_CMD_ACK_START              REG_CMD_ACK
 #define REG_CMD_ACK_COUNT              3U
 
-#if REG_FW_INFO_END >= REG_CMD_AREA_START
-#error "Firmware information registers overlap command registers"
+#if REG_DEVICE_INFO_END >= REG_CMD_AREA_START
+#error "Device information registers overlap command registers"
 #endif
 
 /* System status registers: 0x0040 ~ 0x0049. */
@@ -101,7 +123,7 @@ extern "C" {
 #define REG_HEALTH_STATUS_COUNT        22U
 
 #if REG_HEALTH_STATUS_END >= 0x0060U
-#error "Health status registers overlap power status registers"
+#error "Health status registers exceed the assigned address range"
 #endif
 
 /* System status values. */
@@ -113,25 +135,6 @@ extern "C" {
 #define SENSOR_STATE_ALL_OK            0xFFFFU
 #define COMM_STATE_OK                  0x0001U
 #define COMM_STATE_DEGRADED            0x0002U
-
-/* Power status registers: 0x0060 ~ 0x0071. */
-#define REG_BAT_VOLTAGE                0x0060U
-#define REG_BAT_CURRENT                0x0062U
-#define REG_BAT_SOC                    0x0064U
-#define REG_POWER_STATE                0x0066U
-#define REG_CHARGE_STATE               0x0067U
-#define REG_POWER_FLAGS                0x0068U
-#define REG_POWER_FAULT                0x0069U
-#define REG_VBUS_VOLTAGE               0x006AU
-#define REG_INPUT_CURRENT              0x006CU
-#define REG_BQ_DIAGNOSTIC              0x006EU
-#define REG_BQ_CHARGER_EVENTS          0x006FU
-#define REG_BQ_FAULT_EVENTS            0x0070U
-#define REG_BQ_INTERRUPT_COUNT         0x0071U
-
-#define REG_POWER_STATUS_START         REG_BAT_VOLTAGE
-#define REG_POWER_STATUS_END           0x0071U
-#define REG_POWER_STATUS_COUNT         18U
 
 /* SD card and log status registers: 0x0081 ~ 0x00BF. */
 #define REG_SD_FS_STATUS               0x0081U
@@ -277,6 +280,10 @@ extern "C" {
 #define R_STATUS_SNAPSHOT_VALID        0x0001U
 #define R_STATUS_TOUCH_VALID           0x0002U
 
+/* 0x41高速快照公共状态，传感数据有效性与UTC同步状态分开表示。 */
+#define SENSOR_SNAPSHOT_STATUS_VALID       (1U << 0)
+#define SENSOR_SNAPSHOT_STATUS_UTC_VALID   (1U << 1)
+
 #if MODBUS_R_POINT_COUNT > MODBUS_R_DATA_REG_COUNT
 #error "MODBUS_R_DATA_REG_COUNT must cover all touch points"
 #endif
@@ -314,7 +321,6 @@ extern "C" {
 /* Work state values returned by REG_WORK_STATE. */
 #define WORK_STATE_IDLE                0x0000U
 #define WORK_STATE_ACQUIRING           0x0001U
-#define WORK_STATE_STOPPING            0x0002U
 #define WORK_STATE_ERROR               0x8000U
 
 #ifdef __cplusplus

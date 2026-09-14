@@ -459,9 +459,9 @@
               <FilePath>..\Task\src\uartDebugTask.c</FilePath>
             </File>
             <File>
-              <FileName>systemManagerTask.c</FileName>
+              <FileName>systemHealthTask.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Task\src\systemManagerTask.c</FilePath>
+              <FilePath>..\Task\src\systemHealthTask.c</FilePath>
             </File>
             <File>
               <FileName>dataProcessTask.c</FileName>

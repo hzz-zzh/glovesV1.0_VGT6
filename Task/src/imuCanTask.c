@@ -165,7 +165,6 @@ typedef struct
     volatile uint32_t recovery_state;
     volatile uint32_t recovery_target_node;
     volatile uint32_t recovery_bus_reinit_count;
-    volatile uint32_t recovery_power_cycle_count;
     uint32_t cfg_step_ack_count[6];
     uint32_t cfg_step_ack_id[6];
     uint8_t cfg_step_ack_data[6][8];
@@ -2114,7 +2113,6 @@ static void ImuCanTask_CopyStatsToSnapshot(ImuCanTaskDebugSnapshot_t *snapshot)
     snapshot->recovery_state = s_imu_can_stats.recovery_state;
     snapshot->recovery_target_node = s_imu_can_stats.recovery_target_node;
     snapshot->recovery_bus_reinit_count = s_imu_can_stats.recovery_bus_reinit_count;
-    snapshot->recovery_power_cycle_count = s_imu_can_stats.recovery_power_cycle_count;
     (void)memcpy(snapshot->cfg_last_reply_data,
                  s_imu_can_stats.cfg_last_reply_data,
                  sizeof(snapshot->cfg_last_reply_data));
@@ -2317,7 +2315,7 @@ void ImuCanTask(void *argument)
         {
             if (s_imu_acquisition_paused == 0U)
             {
-                /* FDCAN完全释放后再确认暂停，保证跨电源周期不保留错误和待发送帧。 */
+                /* FDCAN完全释放后再确认暂停，避免恢复采集时残留错误和待发送帧。 */
                 ImuCanTask_ShutdownAllFdcans();
                 ImuCanTask_ResetConfigurationMonitor();
                 s_imu_acquisition_paused = 1U;
