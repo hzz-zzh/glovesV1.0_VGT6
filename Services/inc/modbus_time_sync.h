@@ -11,6 +11,7 @@ extern "C" {
 HAL_StatusTypeDef ModbusTimeSync_Init(void);
 void ModbusTimeSync_OnTimPeriodElapsed(TIM_HandleTypeDef *htim);
 void ModbusTimeSync_OnPpsEdge(uint16_t gpio_pin);
+void ModbusTimeSync_OnPpsLost(void);
 
 uint64_t ModbusTimeSync_GetLocalUptimeUs(void);
 uint64_t ModbusTimeSync_GetUtcTimestampUs(void);
@@ -18,6 +19,7 @@ uint64_t ModbusTimeSync_GetUtcTimestampUsFromIsr(void);
 uint64_t ModbusTimeSync_GetLastSyncUtcUs(void);
 uint64_t ModbusTimeSync_GetLastSyncEdgeLocalUs(void);
 uint64_t ModbusTimeSync_GetLastLocalIntervalUs(void);
+uint64_t ModbusTimeSync_GetLastLocalIntervalUsFromIsr(void);
 uint64_t ModbusTimeSync_GetPredictedEdgeUtcUs(void);
 int64_t ModbusTimeSync_GetLastSyncErrorUs(void);
 int32_t ModbusTimeSync_GetFreqCorrPpb(void);

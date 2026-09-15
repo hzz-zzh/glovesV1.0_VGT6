@@ -195,7 +195,6 @@ void Rs485Task(void *argument)
   (void)argument;
   rs485_task_id = osThreadGetId();
 
-  (void)ModbusTimeSync_Init();
   while (RS485_Init() != HAL_OK)
   {
     init_failure_count++;

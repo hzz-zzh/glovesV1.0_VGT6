@@ -100,10 +100,39 @@ static void MX_TIM5_Init(void);
 static void MX_SDMMC1_SD_Init(void);
 /* USER CODE BEGIN PFP */
 
+static HAL_StatusTypeDef TIM2_StartPpsSampling(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static HAL_StatusTypeDef TIM2_StartPpsSampling(void)
+{
+  TIM_SlaveConfigTypeDef slave_config = {0};
+
+  slave_config.SlaveMode = TIM_SLAVEMODE_COMBINED_RESETTRIGGER;
+  slave_config.InputTrigger = TIM_TS_ETRF;
+  slave_config.TriggerPolarity = TIM_TRIGGERPOLARITY_NONINVERTED;
+  slave_config.TriggerPrescaler = TIM_TRIGGERPRESCALER_DIV1;
+  /* 约百纳秒级数字滤波用于抑制接口尖峰，正常PPS脉宽不会受影响。 */
+  slave_config.TriggerFilter = 8U;
+  if (HAL_TIM_SlaveConfigSynchro_IT(&htim2, &slave_config) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+
+  /* 先进入硬件触发模式再使能CH2，HAL不会提前启动计数器。 */
+  __HAL_TIM_SET_COUNTER(&htim2, __HAL_TIM_GET_COMPARE(&htim2, TIM_CHANNEL_2));
+  if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+
+  __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE | TIM_FLAG_TRIGGER | TIM_FLAG_CC2);
+  __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_UPDATE);
+  return HAL_OK;
+}
 
 /* USER CODE END 0 */
 
@@ -181,15 +210,17 @@ int main(void)
   printf("[Boot] after imu delay\r\n");
 #endif
   AcqSync_Reset();
-#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
-  printf("[Boot] before pwm\r\n");
-#endif
-  if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
+  if (ModbusTimeSync_Init() != HAL_OK)
   {
     Error_Handler();
   }
-  __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
-  __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_UPDATE);
+#if (APP_ENABLE_GENERAL_DEBUG_OUTPUT != 0U)
+  printf("[Boot] before pwm\r\n");
+#endif
+  if (TIM2_StartPpsSampling() != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
@@ -799,12 +830,13 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  /* 250MHz直接计数1250000次，得到精确的200Hz同步脉冲。 */
+  /* 250MHz直接计数1250000次，得到标称200Hz同步脉冲。 */
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim2.Init.Period = 1249999;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  /* 关闭ARR预装载，使PPS中断测得的周期能用于当前采样窗口。 */
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
   {
     Error_Handler();
@@ -1072,12 +1104,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PPS_IN_Pin */
-  GPIO_InitStruct.Pin = PPS_IN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(PPS_IN_GPIO_Port, &GPIO_InitStruct);
-
   /*Configure GPIO pin : USER_LED_Pin */
   GPIO_InitStruct.Pin = USER_LED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -1103,21 +1129,25 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = GPIO_PIN_0;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI15_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI15_IRQn);
-
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
+void HAL_TIM_TriggerCallback(TIM_HandleTypeDef *htim)
 {
-  if (GPIO_Pin == PPS_IN_Pin)
+  if (htim->Instance == TIM2)
   {
-    ModbusTimeSync_OnPpsEdge(GPIO_Pin);
+    AcqSync_OnTim2PpsTriggerFromIsr();
+  }
+}
+
+void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
+{
+  if ((htim->Instance == TIM2) && (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_2))
+  {
+    AcqSync_OnTim2PulseFinishedFromIsr();
   }
 }
 

@@ -669,7 +669,9 @@ void TouchAdcTask(void *argument)
   uint32_t alloc_fail_count = 0U;
   uint32_t publish_fail_count = 0U;
   uint8_t health_success_count = 0U;
+  uint8_t pps_was_absent = 1U;
   AcqSyncSnapshot_t sync = {0};
+  AcqSyncStatus_t acq_status;
   GloveStatus_t status;
   GloveStatus_t publish_status;
 
@@ -711,6 +713,30 @@ void TouchAdcTask(void *argument)
       AcqSync_RegisterTouchTask(s_touch_adc_task_id);
     }
     s_touch_acquisition_paused = 0U;
+
+    AcqSync_GetStatus(&acq_status);
+    if (acq_status.pps_present == 0U)
+    {
+      if (pps_was_absent == 0U)
+      {
+        /* PPS中断期间丢弃均值历史，恢复后的首帧不混入停采前数据。 */
+        TouchAdcTask_ResetMeanFilter();
+        (void)memset(&sync, 0, sizeof(sync));
+      }
+      pps_was_absent = 1U;
+      error_count = 0U;
+      health_success_count = 0U;
+      SystemHealth_SetSensorReady(SYSTEM_SENSOR_READY_TOUCH, 0U);
+      osDelay(10U);
+      continue;
+    }
+    if (pps_was_absent != 0U)
+    {
+      TouchAdcTask_ResetMeanFilter();
+      (void)memset(&sync, 0, sizeof(sync));
+      error_count = 0U;
+      pps_was_absent = 0U;
+    }
 
     if (AcqSync_WaitForTouchSync(&sync, TOUCH_ADC_SYNC_WAIT_TIMEOUT_MS) != osOK)
     {

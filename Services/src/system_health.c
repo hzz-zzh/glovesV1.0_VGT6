@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "FreeRTOS.h"
+#include "acq_sync.h"
 #include "main.h"
 #include "task.h"
 
@@ -27,7 +28,7 @@ static uint16_t s_imu_recovery_attempt;
 static const uint8_t s_fault_priority[] =
 {
     10U, 6U, 8U, 9U, 1U, 2U, 3U, 4U, 0U,
-    19U, 23U, 24U, 22U, 26U, 25U, 27U, 5U, 7U, 20U, 21U
+    11U, 19U, 23U, 24U, 22U, 26U, 25U, 27U, 5U, 7U, 20U, 21U
 };
 
 static uint8_t SystemHealth_FlagIndex(uint32_t flag, uint8_t *index)
@@ -87,6 +88,7 @@ static uint16_t SystemHealth_ComputeState(void)
         SYSTEM_HEALTH_FLAG_CAN1_BUS_OFF |
         SYSTEM_HEALTH_FLAG_CAN2_ERROR_PASSIVE |
         SYSTEM_HEALTH_FLAG_CAN2_BUS_OFF |
+        SYSTEM_HEALTH_FLAG_PPS_LOST |
         SYSTEM_HEALTH_FLAG_QUEUE_PRESSURE |
         SYSTEM_HEALTH_FLAG_POOL_EXHAUSTED;
     const uint32_t warning_flags =
@@ -292,6 +294,7 @@ void SystemHealth_MarkFullFrame(uint8_t joint_valid)
 
 void SystemHealth_Service(void)
 {
+    AcqSyncStatus_t acq_status;
     uint8_t frame_seen;
     uint32_t last_frame_ms;
     uint32_t age_ms;
@@ -301,17 +304,27 @@ void SystemHealth_Service(void)
     last_frame_ms = s_last_full_frame_ms;
     taskEXIT_CRITICAL();
 
-    /* 完整帧更新时间直接反映采集链路健康状态。 */
+    AcqSync_GetStatus(&acq_status);
+    SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_PPS_LOST,
+                           SYSTEM_ERROR_PPS_LOST,
+                           SYSTEM_HEALTH_SOURCE_ACQUISITION,
+                           0U,
+                           (acq_status.state == ACQ_SYNC_STATE_PPS_LOST) ? 1U : 0U);
+
+    /* 没有PPS时停止产帧是预期行为，避免再把同一根因误报为流水线故障。 */
     age_ms = (frame_seen != 0U) ? (uint32_t)(HAL_GetTick() - last_frame_ms) : 0xFFFFFFFFUL;
     SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_FRAME_STALE,
                            SYSTEM_ERROR_FRAME_STALE,
                            SYSTEM_HEALTH_SOURCE_PIPELINE,
                            0U,
-                           ((frame_seen == 0U) ||
-                            (age_ms > SYSTEM_HEALTH_FULL_FRAME_TIMEOUT_MS)) ? 1U : 0U);
+                           ((acq_status.pps_present != 0U) &&
+                            (acq_status.last_pps_age_ms > SYSTEM_HEALTH_FULL_FRAME_TIMEOUT_MS) &&
+                            ((frame_seen == 0U) ||
+                             (age_ms > SYSTEM_HEALTH_FULL_FRAME_TIMEOUT_MS))) ? 1U : 0U);
 
     taskENTER_CRITICAL();
-    if ((frame_seen != 0U) &&
+    if ((acq_status.pps_present != 0U) &&
+        (frame_seen != 0U) &&
         (age_ms <= SYSTEM_HEALTH_FULL_FRAME_TIMEOUT_MS))
     {
         s_health.sensor_ready_flags |= SYSTEM_SENSOR_READY_FULL_FRAME;
@@ -320,7 +333,20 @@ void SystemHealth_Service(void)
     {
         s_health.sensor_ready_flags &= (uint16_t)~SYSTEM_SENSOR_READY_FULL_FRAME;
     }
+    if (acq_status.pps_present != 0U)
+    {
+        s_health.sensor_ready_flags |= SYSTEM_SENSOR_READY_PPS;
+    }
+    else
+    {
+        s_health.sensor_ready_flags &= (uint16_t)~SYSTEM_SENSOR_READY_PPS;
+    }
     s_health.state = SystemHealth_ComputeState();
+    if ((acq_status.has_seen_pps == 0U) && (s_health.current_flags == 0UL))
+    {
+        /* 上电尚未等到第一个PPS时属于未就绪，不把它显示成已经正常采集。 */
+        s_health.state = SYSTEM_HEALTH_INIT;
+    }
     taskEXIT_CRITICAL();
 }
 

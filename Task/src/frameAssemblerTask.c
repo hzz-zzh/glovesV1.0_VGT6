@@ -27,6 +27,25 @@
 static FrameAssemblerStats_t s_frame_assembler_stats;
 static uint32_t s_next_frame_id;
 
+static void FrameAssembler_DiscardQueuedSensorFrames(void)
+{
+    GloveImuSensorBlock_t *imu = NULL;
+    GloveTouchSensorBlock_t *touch = NULL;
+
+    while (DataManager_GetImuSensor(&imu, 0U) == GLOVE_STATUS_OK)
+    {
+        s_frame_assembler_stats.imu_stale_drops++;
+        (void)DataManager_ReleaseImuSensor(imu);
+        imu = NULL;
+    }
+    while (DataManager_GetTouchSensor(&touch, 0U) == GLOVE_STATUS_OK)
+    {
+        s_frame_assembler_stats.touch_stale_drops++;
+        (void)DataManager_ReleaseTouchSensor(touch);
+        touch = NULL;
+    }
+}
+
 #if (FRAME_ASSEMBLER_DEBUG_PRINT_ENABLE != 0U)
 static int32_t FrameAssembler_FloatToMilli(float value)
 {
@@ -359,6 +378,7 @@ void FrameAssemblerTask(void *argument)
 {
     GloveImuSensorBlock_t *pending_imu = NULL;
     GloveTouchSensorBlock_t *pending_touch = NULL;
+    AcqSyncStatus_t acq_status;
     uint32_t pending_imu_tick = 0U;
     uint32_t pending_touch_tick = 0U;
     GloveStatus_t status;
@@ -369,6 +389,18 @@ void FrameAssemblerTask(void *argument)
 
     for (;;)
     {
+        AcqSync_GetStatus(&acq_status);
+        if (acq_status.pps_present == 0U)
+        {
+            /* PPS消失后释放半帧并排空输入队列，恢复时只接受新采样窗的数据。 */
+            FrameAssembler_ReleaseImu(&pending_imu);
+            FrameAssembler_ReleaseTouch(&pending_touch);
+            FrameAssembler_DiscardQueuedSensorFrames();
+            assemble_failure_count = 0U;
+            osDelay(10U);
+            continue;
+        }
+
         if (pending_imu == NULL)
         {
             status = DataManager_GetImuSensor(&pending_imu, FRAME_ASSEMBLER_GET_TIMEOUT_MS);

@@ -7,7 +7,7 @@ extern "C" {
 
 #include <stdint.h>
 
-#define SYSTEM_HEALTH_VERSION                    (0x0200U)
+#define SYSTEM_HEALTH_VERSION                    (0x0201U)
 
 typedef enum
 {
@@ -27,7 +27,8 @@ typedef enum
     SYSTEM_HEALTH_SOURCE_CAN2 = 3,
     SYSTEM_HEALTH_SOURCE_TOUCH = 4,
     SYSTEM_HEALTH_SOURCE_PIPELINE = 5,
-    /* 6~8为历史版本保留编号，不再分配。 */
+    SYSTEM_HEALTH_SOURCE_ACQUISITION = 6,
+    /* 7~8为历史版本保留编号，不再分配。 */
     SYSTEM_HEALTH_SOURCE_WATCHDOG = 9,
     SYSTEM_HEALTH_SOURCE_RS485 = 10,
     SYSTEM_HEALTH_SOURCE_TIME_SYNC = 11,
@@ -59,7 +60,8 @@ typedef enum
 #define SYSTEM_HEALTH_FLAG_CAN2_BUS_OFF         (1UL << 8)
 #define SYSTEM_HEALTH_FLAG_IMU_CONFIG_FAILED    (1UL << 9)
 #define SYSTEM_HEALTH_FLAG_CAN_REINIT_FAILED    (1UL << 10)
-/* bit11~bit18为历史版本保留位，不再定义。 */
+#define SYSTEM_HEALTH_FLAG_PPS_LOST             (1UL << 11)
+/* bit12~bit18为历史版本保留位，不再定义。 */
 #define SYSTEM_HEALTH_FLAG_WATCHDOG_WARNING     (1UL << 19)
 #define SYSTEM_HEALTH_FLAG_TIME_UNSYNCED         (1UL << 20)
 #define SYSTEM_HEALTH_FLAG_CALIBRATION_ERROR     (1UL << 21)
@@ -74,7 +76,7 @@ typedef enum
 #define SYSTEM_SENSOR_READY_TOUCH                (1U << 1)
 #define SYSTEM_SENSOR_READY_FULL_FRAME           (1U << 2)
 #define SYSTEM_SENSOR_READY_JOINT                 (1U << 3)
-/* bit4为历史版本保留位，不再定义。 */
+#define SYSTEM_SENSOR_READY_PPS                   (1U << 4)
 #define SYSTEM_SENSOR_READY_TIME_SYNC            (1U << 5)
 #define SYSTEM_SENSOR_READY_RS485                (1U << 6)
 
@@ -95,7 +97,8 @@ typedef enum
 #define SYSTEM_ERROR_ALGORITHM_INVALID           (0x4005U)
 #define SYSTEM_ERROR_ACQ_PAUSE_TIMEOUT           (0x5001U)
 #define SYSTEM_ERROR_SYNC_START_FAILED           (0x5002U)
-/* 0x5003及0x6001~0x6007为历史版本保留错误码，不再使用。 */
+#define SYSTEM_ERROR_PPS_LOST                    (0x5003U)
+/* 0x6001~0x6007为历史版本保留错误码，不再使用。 */
 #define SYSTEM_ERROR_WATCHDOG_CONFIG             (0x7001U)
 #define SYSTEM_ERROR_RS485_RX_OVERWRITE          (0x8001U)
 #define SYSTEM_ERROR_RS485_UART                  (0x8002U)

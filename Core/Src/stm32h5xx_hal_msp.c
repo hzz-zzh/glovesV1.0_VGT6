@@ -717,8 +717,22 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef* htim_pwm)
     /* USER CODE BEGIN TIM2_MspInit 0 */
 
     /* USER CODE END TIM2_MspInit 0 */
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
     /* Peripheral clock enable */
     __HAL_RCC_TIM2_CLK_ENABLE();
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    /**TIM2 GPIO Configuration
+    PA15(JTDI)     ------> TIM2_ETR
+    */
+    GPIO_InitStruct.Pin = PPS_IN_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    /* 板上R326已提供10k下拉，MCU内部保持无上下拉。 */
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF14_TIM2;
+    HAL_GPIO_Init(PPS_IN_GPIO_Port, &GPIO_InitStruct);
+
     /* TIM2 interrupt Init */
     HAL_NVIC_SetPriority(TIM2_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(TIM2_IRQn);

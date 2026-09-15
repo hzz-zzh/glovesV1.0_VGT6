@@ -40,7 +40,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define IMU_CAN_TASK_QUEUE_TIMEOUT_MS           (0U)
 #define IMU_CAN_TASK_FRAME_FLAGS_REQUIRED       (HI04_SEEN_ACCEL | HI04_SEEN_GYRO)
 #define IMU_CAN_TASK_VALID_FLAGS_REQUIRED       (IMU_CAN_TASK_FRAME_FLAGS_REQUIRED | HI04_SEEN_QUAT)
-/* 任一数据分量超过100ms未更新，即认为该IMU失联并清除485输出。 */
+/* 任一数据分量超过100ms未更新即认为该IMU失联；485保留末值但清除有效状态。 */
 #define IMU_CAN_TASK_DATA_TIMEOUT_MS             (100U)
 #define IMU_CAN_TASK_G_TO_MPS2                  (9.80665f)
 #define IMU_CAN_TASK_DEG_TO_RAD                 (0.01745329251994329577f)
@@ -70,6 +70,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define IMU_CAN_TASK_ACTIVE_LOSS_CONFIRM_MS     (200U)
 #define IMU_CAN_TASK_ACTIVE_CONFIG_STEP_MS      (50U)
 #define IMU_CAN_TASK_ACTIVE_VERIFY_MS           (500U)
+#define IMU_CAN_TASK_PPS_RECOVERY_GRACE_MS      (50U)
 #define IMU_CAN_TASK_ACTIVE_TX_RETRY_LIMIT      (3U)
 #define IMU_CAN_TASK_ACTIVE_CONFIG_STEP_COUNT   (7U)
 #define IMU_CAN_TASK_QUAT_SOURCE_NONE           (0U)
@@ -1591,15 +1592,30 @@ static uint8_t ImuCanTask_FindBusOff(uint8_t *bus_index)
 static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_ms)
 {
     const uint16_t expected_mask = (uint16_t)GLOVE_IMU_VALID_ALL_MASK;
+    static uint8_t previous_pps_present;
+    static uint32_t pps_recovery_grace_until_ms;
+    AcqSyncStatus_t acq_status;
     ImuCanTaskBusRuntime_t *bus;
     uint8_t bus_off_index;
     uint8_t node_id;
     uint8_t missing_bus = 0U;
     uint8_t missing_local = 0U;
     uint16_t missing_target = 0U;
+    uint8_t data_recovery_allowed;
 
-    SystemHealth_SetLiveImuMask(fresh_mask);
-    if ((fresh_mask != expected_mask) &&
+    AcqSync_GetStatus(&acq_status);
+    if ((acq_status.pps_present != 0U) && (previous_pps_present == 0U))
+    {
+        pps_recovery_grace_until_ms = now_ms + IMU_CAN_TASK_PPS_RECOVERY_GRACE_MS;
+    }
+    previous_pps_present = acq_status.pps_present;
+    data_recovery_allowed = ((acq_status.pps_present != 0U) &&
+                             ((int32_t)(now_ms - pps_recovery_grace_until_ms) >= 0)) ?
+                            1U : 0U;
+
+    SystemHealth_SetLiveImuMask((data_recovery_allowed != 0U) ? fresh_mask : 0U);
+    if ((data_recovery_allowed != 0U) &&
+        (fresh_mask != expected_mask) &&
         (ImuCanTask_FindMissingNode((uint16_t)(expected_mask & ~fresh_mask),
                                     &missing_bus,
                                     &missing_local) != false))
@@ -1610,16 +1626,19 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
                           SYSTEM_ERROR_IMU_NODE_STALE,
                           SYSTEM_HEALTH_SOURCE_IMU,
                           0U,
-                          (fresh_mask == 0U) ? 1U : 0U);
+                          ((data_recovery_allowed != 0U) && (fresh_mask == 0U)) ? 1U : 0U);
     SystemHealth_SetFault(SYSTEM_HEALTH_FLAG_IMU_PARTIAL,
                           SYSTEM_ERROR_IMU_NODE_STALE,
                           SYSTEM_HEALTH_SOURCE_IMU,
                           missing_target,
-                          ((fresh_mask != 0U) && (fresh_mask != expected_mask)) ? 1U : 0U);
+                          ((data_recovery_allowed != 0U) &&
+                           (fresh_mask != 0U) && (fresh_mask != expected_mask)) ? 1U : 0U);
     ImuCanTask_UpdateCanHealth();
 
-    s_imu_can_stats.cfg_verified_node_mask = fresh_mask;
-    s_imu_can_stats.cfg_failed_node_mask = (uint16_t)(expected_mask & ~fresh_mask);
+    s_imu_can_stats.cfg_verified_node_mask =
+        (data_recovery_allowed != 0U) ? fresh_mask : 0U;
+    s_imu_can_stats.cfg_failed_node_mask =
+        (data_recovery_allowed != 0U) ? (uint16_t)(expected_mask & ~fresh_mask) : 0U;
 
     if ((s_active_recovery.state != IMU_CAN_RECOVERY_BUS_REINIT) &&
         (s_active_recovery.state != IMU_CAN_RECOVERY_BUS_CONFIG) &&
@@ -1629,6 +1648,26 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
     {
         s_imu_can_stats.last_error = 91U;
         ImuCanTask_StartBusRecovery(bus_off_index, now_ms);
+    }
+
+    if (data_recovery_allowed == 0U)
+    {
+        if ((s_active_recovery.state == IMU_CAN_RECOVERY_NODE_CONFIG) ||
+            (s_active_recovery.state == IMU_CAN_RECOVERY_NODE_VERIFY) ||
+            (s_active_recovery.state == IMU_CAN_RECOVERY_IDLE))
+        {
+            /* 无PPS时没有新IMU数据是预期状态，撤销节点失联恢复但保留CAN硬故障恢复。 */
+            s_active_recovery.last_missing_mask = 0U;
+            s_active_recovery.missing_since_ms = 0U;
+            ImuCanTask_SetRecoveryState(IMU_CAN_RECOVERY_IDLE);
+            return;
+        }
+        if (s_active_recovery.state == IMU_CAN_RECOVERY_BUS_VERIFY)
+        {
+            /* 总线已恢复但当前无法靠采样验证，PPS回来后再开始计算验证超时。 */
+            s_active_recovery.verify_started_ms = now_ms;
+            return;
+        }
     }
 
     switch (s_active_recovery.state)
@@ -2397,7 +2436,12 @@ void ImuCanTask(void *argument)
         {
             AcqSyncSnapshot_t sync;
 
-            if (AcqSync_GetLatest(&sync) != 0U)
+            if (AcqSync_IsPpsPresent() == 0U)
+            {
+                active_sync_seq = 0U;
+                last_published_sync_seq = 0U;
+            }
+            else if (AcqSync_GetLatest(&sync) != 0U)
             {
                 if (active_sync_seq == 0U)
                 {

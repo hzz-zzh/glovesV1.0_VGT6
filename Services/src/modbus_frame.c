@@ -7,6 +7,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "acq_sync.h"
 #include "app_version.h"
 #include "dataProcessTask.h"
 #include "glove_hand_config.h"
@@ -27,12 +28,12 @@
 #define MODBUS_TIME_US_PER_SEC          1000000ULL
 #define MODBUS_TIME_NS_PER_US           1000ULL
 #define MODBUS_TIME_NS_PER_SEC          1000000000UL
-#define MODBUS_SENSOR_SNAPSHOT_METADATA_REG_COUNT 10U
+#define MODBUS_SENSOR_SNAPSHOT_METADATA_REG_COUNT 11U
 #define MODBUS_SENSOR_SNAPSHOT_REG_COUNT \
   (MODBUS_SENSOR_SNAPSHOT_METADATA_REG_COUNT + MODBUS_IMU_DATA_REG_COUNT + \
    MODBUS_JOINT_DATA_REG_COUNT + MODBUS_R_POINT_COUNT)
 #define MODBUS_SENSOR_SNAPSHOT_DATA_SIZE (MODBUS_SENSOR_SNAPSHOT_REG_COUNT * 2U)
-#define MODBUS_SENSOR_SNAPSHOT_TIMEOUT_MS 100U
+#define MODBUS_SENSOR_SNAPSHOT_TIMEOUT_MS 30U
 
 typedef struct
 {
@@ -72,6 +73,10 @@ typedef struct
   GloveTimestampUs_t local_uptime_us;
   GloveTimestampUs_t last_sync_utc_us;
   uint16_t imu_fresh_mask;
+  uint8_t time_synced;
+  AcqSyncStatus_t acquisition;
+  uint32_t sensor_frame_age_ms;
+  uint8_t sensor_data_valid;
 } ModbusReadSnapshot_t;
 
 static uint8_t modbus_slave_address = MODBUS_SLAVE_ADDR_DEFAULT;
@@ -79,6 +84,7 @@ static ModbusImuSnapshot_t modbus_imu_snapshot;
 static ModbusJointSnapshot_t modbus_joint_snapshot;
 static ModbusTouchSnapshot_t modbus_touch_snapshot;
 static uint32_t modbus_sensor_snapshot_tick;
+static uint8_t modbus_sensor_snapshot_seen;
 /* 每个读请求只抓取一次数据，保证多字寄存器来自同一采样帧。 */
 static ModbusReadSnapshot_t modbus_read_snapshot;
 static uint8_t modbus_calib_initialized;
@@ -110,6 +116,13 @@ static uint32_t Modbus_MsToTicks(uint32_t timeout_ms)
   return (ticks > 0xFFFFFFFEULL) ? 0xFFFFFFFEUL : (uint32_t)ticks;
 }
 
+static uint32_t Modbus_TicksToMs(uint32_t ticks)
+{
+  uint64_t milliseconds = ((uint64_t)ticks * 1000ULL) / osKernelGetTickFreq();
+
+  return (milliseconds > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)milliseconds;
+}
+
 static void Modbus_CaptureReadSnapshot(uint8_t capture_diagnostics)
 {
   uint32_t now_tick;
@@ -125,6 +138,8 @@ static void Modbus_CaptureReadSnapshot(uint8_t capture_diagnostics)
   modbus_read_snapshot.utc_timestamp_us = ModbusTimeSync_GetUtcTimestampUs();
   modbus_read_snapshot.local_uptime_us = ModbusTimeSync_GetLocalUptimeUs();
   modbus_read_snapshot.last_sync_utc_us = ModbusTimeSync_GetLastSyncUtcUs();
+  modbus_read_snapshot.time_synced = ModbusTimeSync_IsSynced();
+  AcqSync_GetStatus(&modbus_read_snapshot.acquisition);
   now_tick = osKernelGetTickCount();
   snapshot_timeout_ticks = Modbus_MsToTicks(MODBUS_SENSOR_SNAPSHOT_TIMEOUT_MS);
 
@@ -133,16 +148,22 @@ static void Modbus_CaptureReadSnapshot(uint8_t capture_diagnostics)
   modbus_read_snapshot.imu = modbus_imu_snapshot;
   modbus_read_snapshot.joint = modbus_joint_snapshot;
   modbus_read_snapshot.touch = modbus_touch_snapshot;
+  modbus_read_snapshot.sensor_frame_age_ms = (modbus_sensor_snapshot_seen != 0U) ?
+      Modbus_TicksToMs((uint32_t)(now_tick - modbus_sensor_snapshot_tick)) :
+      0xFFFFFFFFUL;
+  modbus_read_snapshot.sensor_data_valid = 0U;
   if ((modbus_read_snapshot.imu.valid == 0U) ||
       (modbus_read_snapshot.joint.valid == 0U) ||
       (modbus_read_snapshot.touch.valid == 0U) ||
-      ((uint32_t)(now_tick - modbus_sensor_snapshot_tick) > snapshot_timeout_ticks))
+      ((uint32_t)(now_tick - modbus_sensor_snapshot_tick) > snapshot_timeout_ticks) ||
+      (modbus_read_snapshot.acquisition.pps_present == 0U) ||
+      (modbus_read_snapshot.imu_fresh_mask != (uint16_t)GLOVE_IMU_VALID_ALL_MASK))
   {
-    /* 整组快照超时后统一返回无效零值，避免新旧传感器数据混用。 */
-    modbus_read_snapshot.imu_fresh_mask = 0U;
-    (void)memset(&modbus_read_snapshot.imu, 0, sizeof(modbus_read_snapshot.imu));
-    (void)memset(&modbus_read_snapshot.joint, 0, sizeof(modbus_read_snapshot.joint));
-    (void)memset(&modbus_read_snapshot.touch, 0, sizeof(modbus_read_snapshot.touch));
+    /* 保留最后一帧供诊断显示，只通过状态位明确禁止主机用于实时控制。 */
+  }
+  else
+  {
+    modbus_read_snapshot.sensor_data_valid = 1U;
   }
   taskEXIT_CRITICAL();
 }
@@ -886,7 +907,7 @@ static uint16_t Modbus_ReadImuStatusBits(void)
   uint32_t valid_flags;
   uint16_t snapshot_mask;
 
-  valid_flags = (modbus_read_snapshot.imu.valid != 0U) ?
+  valid_flags = (modbus_read_snapshot.sensor_data_valid != 0U) ?
                 modbus_read_snapshot.imu.valid_flags : 0U;
 
   snapshot_mask = (uint16_t)((valid_flags & GLOVE_FRAME_VALID_IMU_ALL_MASK) >>
@@ -918,7 +939,8 @@ static uint16_t Modbus_ReadJointStatusFlags(void)
 {
   uint16_t status = 0U;
 
-  if (modbus_read_snapshot.joint.valid != 0U)
+  if ((modbus_read_snapshot.sensor_data_valid != 0U) &&
+      (modbus_read_snapshot.joint.valid != 0U))
   {
     status |= JOINT_STATUS_SNAPSHOT_VALID;
     if ((modbus_read_snapshot.joint.valid_flags & GLOVE_FRAME_FLAG_ALGORITHM_VALID) != 0U)
@@ -937,7 +959,8 @@ static uint16_t Modbus_ReadTouchStatusFlags(void)
 {
   uint16_t status = 0U;
 
-  if (modbus_read_snapshot.touch.valid != 0U)
+  if ((modbus_read_snapshot.sensor_data_valid != 0U) &&
+      (modbus_read_snapshot.touch.valid != 0U))
   {
     status |= R_STATUS_SNAPSHOT_VALID;
     if ((modbus_read_snapshot.touch.valid_flags & GLOVE_FRAME_FLAG_TOUCH_VALID) != 0U)
@@ -952,16 +975,22 @@ static uint16_t Modbus_ReadSensorSnapshotStatus(void)
 {
   uint16_t status = 0U;
 
-  if ((modbus_read_snapshot.imu.valid != 0U) &&
-      (modbus_read_snapshot.joint.valid != 0U) &&
-      (modbus_read_snapshot.touch.valid != 0U))
+  if (modbus_read_snapshot.sensor_data_valid != 0U)
   {
     status |= SENSOR_SNAPSHOT_STATUS_VALID;
   }
-  if ((ModbusTimeSync_IsSynced() != 0U) &&
+  if ((modbus_read_snapshot.time_synced != 0U) &&
       (modbus_read_snapshot.imu.timestamp_us != 0ULL))
   {
     status |= SENSOR_SNAPSHOT_STATUS_UTC_VALID;
+  }
+  if (modbus_read_snapshot.acquisition.pps_present != 0U)
+  {
+    status |= SENSOR_SNAPSHOT_STATUS_PPS_PRESENT;
+  }
+  if (modbus_read_snapshot.acquisition.window_active != 0U)
+  {
+    status |= SENSOR_SNAPSHOT_STATUS_ACQ_ACTIVE;
   }
 
   return status;
@@ -971,7 +1000,8 @@ static uint32_t Modbus_GetJointValidBits(void)
 {
   uint32_t valid_bits = 0UL;
 
-  if (modbus_read_snapshot.joint.valid != 0U)
+  if ((modbus_read_snapshot.sensor_data_valid != 0U) &&
+      (modbus_read_snapshot.joint.valid != 0U))
   {
     for (uint32_t index = 0U; index < GLOVE_JOINT_DOF_COUNT; index++)
     {
@@ -995,12 +1025,7 @@ static float Modbus_GetImuFloat(uint16_t imu_index, uint16_t float_index)
     return 0.0f;
   }
 
-  /* IMU超时或失联后直接返回0，禁止485继续输出历史缓存。 */
-  if ((modbus_read_snapshot.imu_fresh_mask & (uint16_t)(1U << imu_index)) == 0U)
-  {
-    return 0.0f;
-  }
-
+  /* 无效时仍返回最后缓存值，主机必须依据状态位和帧龄决定是否使用。 */
   if (modbus_read_snapshot.imu.valid != 0U)
   {
     switch (float_index)
@@ -1589,7 +1614,7 @@ static ModbusResult_t Modbus_HandleReadSensorSnapshot(uint8_t response_addr,
   tx_buf[3] = (uint8_t)(MODBUS_SENSOR_SNAPSHOT_DATA_SIZE & 0xFFU);
 
   write_offset = 4U;
-  /* 元数据依次为帧号、时间戳、快照状态、IMU掩码、关节状态和触摸状态。 */
+  /* 元数据依次为帧号、时间戳、四类状态和最后完整帧帧龄。 */
   Modbus_WriteU16(&tx_buf[write_offset],
                   (uint16_t)(modbus_read_snapshot.imu.frame_id & 0xFFFFU));
   write_offset = (uint16_t)(write_offset + 2U);
@@ -1610,6 +1635,10 @@ static ModbusResult_t Modbus_HandleReadSensorSnapshot(uint8_t response_addr,
   Modbus_WriteU16(&tx_buf[write_offset], Modbus_ReadJointStatusFlags());
   write_offset = (uint16_t)(write_offset + 2U);
   Modbus_WriteU16(&tx_buf[write_offset], Modbus_ReadTouchStatusFlags());
+  write_offset = (uint16_t)(write_offset + 2U);
+  Modbus_WriteU16(&tx_buf[write_offset],
+                  (modbus_read_snapshot.sensor_frame_age_ms > 0xFFFFUL) ?
+                  0xFFFFU : (uint16_t)modbus_read_snapshot.sensor_frame_age_ms);
   write_offset = (uint16_t)(write_offset + 2U);
 
   write_offset = Modbus_WriteSnapshotRegisterRange(tx_buf,
@@ -1988,6 +2017,7 @@ void Modbus_InvalidateSensorSnapshots(void)
   (void)memset(&modbus_joint_snapshot, 0, sizeof(modbus_joint_snapshot));
   (void)memset(&modbus_touch_snapshot, 0, sizeof(modbus_touch_snapshot));
   modbus_sensor_snapshot_tick = 0U;
+  modbus_sensor_snapshot_seen = 0U;
   taskEXIT_CRITICAL();
 }
 
@@ -2028,6 +2058,7 @@ void Modbus_UpdateFullFrameSnapshot(const GloveFullFrame_t *frame)
                sizeof(modbus_touch_snapshot.touch));
   modbus_touch_snapshot.valid = 1U;
   modbus_sensor_snapshot_tick = osKernelGetTickCount();
+  modbus_sensor_snapshot_seen = 1U;
   taskEXIT_CRITICAL();
 }
 

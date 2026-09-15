@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - shown in GUI at runtime
     list_ports = None
 
 
-# 与手套USART1保持一致，减少910字节传感快照的传输占时。
+# 与手套USART1保持一致，减少912字节传感快照的传输占时。
 DEFAULT_BAUD = 6000000
 DEFAULT_SLAVE = 1
 DEFAULT_TIMEOUT_S = 0.20
@@ -112,13 +112,16 @@ MODBUS_TOUCH_COUNT = 68
 MODBUS_TOUCH_DATA_REG_COUNT = 68
 
 MB_FC_READ_SENSOR_SNAPSHOT = 0x41
-SENSOR_SNAPSHOT_METADATA_REG_COUNT = 10
+SENSOR_SNAPSHOT_METADATA_REG_COUNT = 11
 SENSOR_SNAPSHOT_STATUS_INDEX = 6
 SENSOR_SNAPSHOT_IMU_STATUS_INDEX = 7
 SENSOR_SNAPSHOT_JOINT_STATUS_INDEX = 8
 SENSOR_SNAPSHOT_TOUCH_STATUS_INDEX = 9
+SENSOR_SNAPSHOT_FRAME_AGE_MS_INDEX = 10
 SENSOR_SNAPSHOT_STATUS_VALID = 1 << 0
 SENSOR_SNAPSHOT_STATUS_UTC_VALID = 1 << 1
+SENSOR_SNAPSHOT_STATUS_PPS_PRESENT = 1 << 2
+SENSOR_SNAPSHOT_STATUS_ACQ_ACTIVE = 1 << 3
 SENSOR_SNAPSHOT_SENSOR_REG_COUNT = (
     MODBUS_IMU_DATA_REG_COUNT
     + MODBUS_JOINT_DATA_REG_COUNT
@@ -171,6 +174,7 @@ HEALTH_SOURCE_NAMES = {
     3: "CAN2",
     4: "touch",
     5: "pipeline",
+    6: "acquisition",
     9: "watchdog",
     10: "RS485",
     11: "time_sync",
@@ -201,6 +205,7 @@ HEALTH_FLAG_NAMES = (
     (1 << 8, "can2_bus_off"),
     (1 << 9, "imu_config_failed"),
     (1 << 10, "can_reinit_failed"),
+    (1 << 11, "pps_lost"),
     (1 << 19, "watchdog_warning"),
     (1 << 20, "time_unsynced"),
     (1 << 21, "calibration_error"),
@@ -217,6 +222,7 @@ READY_FLAG_NAMES = (
     (1 << 1, "touch"),
     (1 << 2, "full_frame"),
     (1 << 3, "joint"),
+    (1 << 4, "pps"),
     (1 << 5, "time_sync"),
     (1 << 6, "rs485"),
 )
@@ -239,6 +245,7 @@ HEALTH_ERROR_INFO = {
     0x4005: ("joint algorithm input invalid", "Restore all required IMU data and verify calibration."),
     0x5001: ("acquisition pause timeout", "A producer did not stop safely; inspect IMU and touch tasks."),
     0x5002: ("acquisition sync start failed", "Restart the device and inspect the sync timer/output."),
+    0x5003: ("PPS input lost", "Inspect the host PPS output, cable, and PPS input circuitry."),
     0x7001: ("watchdog configuration warning", "Verify watchdog startup and task heartbeat configuration."),
     0x8001: ("RS485 receive frame overwritten", "Reduce request rate or wait for each response."),
     0x8002: ("RS485 UART error", "Inspect baud rate, grounding, termination, and cabling."),
@@ -260,6 +267,8 @@ CAPABILITY_FLAG_NAMES = (
 SNAPSHOT_STATUS_NAMES = (
     (SENSOR_SNAPSHOT_STATUS_VALID, "valid"),
     (SENSOR_SNAPSHOT_STATUS_UTC_VALID, "utc_valid"),
+    (SENSOR_SNAPSHOT_STATUS_PPS_PRESENT, "pps_present"),
+    (SENSOR_SNAPSHOT_STATUS_ACQ_ACTIVE, "acq_active"),
 )
 
 HAND_SIDE_NAMES = {
@@ -549,7 +558,7 @@ class ModbusRtuClient:
             if self.low_latency_saved_timeout is None:
                 self.low_latency_saved_timeout = self.port.timeout
                 self.low_latency_saved_inter_byte_timeout = self.port.inter_byte_timeout
-            # 一次等待完整910字节响应，避免短分片引入多次Windows串口驱动往返。
+            # 一次等待完整912字节响应，避免短分片引入多次Windows串口驱动往返。
             self.port.timeout = SENSOR_POLL_SERIAL_TIMEOUT_S
             self.port.inter_byte_timeout = None
             self.port.reset_input_buffer()
@@ -1287,6 +1296,7 @@ class GloveSnapshot:
     sensor_frame_id: int = 0
     sensor_timestamp_us: int = 0
     sensor_snapshot_status: int = 0
+    sensor_frame_age_ms: int = 0xFFFF
     duplicate_responses: int = 0
     comm_requests: int = 0
     comm_timeouts: int = 0
@@ -1303,9 +1313,12 @@ def evaluate_sensor_validity(
     imu_status: int,
     joint_status: int,
     touch_status: int,
+    frame_age_ms: int,
 ) -> tuple[bool, str]:
+    if (snapshot_status & SENSOR_SNAPSHOT_STATUS_PPS_PRESENT) == 0:
+        return False, "PPS input is absent"
     if (snapshot_status & SENSOR_SNAPSHOT_STATUS_VALID) == 0:
-        return False, f"snapshot status 0x{snapshot_status:04X} is invalid"
+        return False, f"snapshot is stale (age={frame_age_ms} ms)"
     if (imu_status & IMU_ALL_VALID_MASK) != IMU_ALL_VALID_MASK:
         return False, f"IMU valid mask 0x{imu_status:04X} is incomplete"
     if (joint_status & (JOINT_STATUS_SNAPSHOT_VALID | JOINT_STATUS_ALGORITHM_VALID)) != (
@@ -1368,13 +1381,20 @@ def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> Glov
     if ((snapshot.joint_status_regs[4] & JOINT_STATUS_SNAPSHOT_VALID) != 0 and
             (snapshot.touch_status_regs[4] & 0x0001) != 0):
         snapshot_status |= SENSOR_SNAPSHOT_STATUS_VALID
-    if sensor_timestamp_us > 0:
+    if ((snapshot.health_regs[19] & (1 << 5)) != 0 or
+            (snapshot.health_regs[0] < 0x0201 and sensor_timestamp_us > 0)):
         snapshot_status |= SENSOR_SNAPSHOT_STATUS_UTC_VALID
+    if ((snapshot.health_regs[19] & (1 << 4)) != 0 or
+            (snapshot.health_regs[0] < 0x0201 and
+             (snapshot_status & SENSOR_SNAPSHOT_STATUS_VALID) != 0)):
+        snapshot_status |= SENSOR_SNAPSHOT_STATUS_PPS_PRESENT
+    snapshot.sensor_frame_age_ms = snapshot.health_regs[20]
     snapshot.sensor_data_valid, snapshot.sensor_invalid_reason = evaluate_sensor_validity(
         snapshot_status,
         snapshot.imu_status_regs[4],
         snapshot.joint_status_regs[4],
         snapshot.touch_status_regs[4],
+        snapshot.sensor_frame_age_ms,
     )
     snapshot.sensor_timestamp_us = sensor_timestamp_us
     snapshot.sensor_snapshot_status = snapshot_status
@@ -1422,6 +1442,7 @@ def read_sensor_snapshot_poll(
     imu_status = snapshot_regs[SENSOR_SNAPSHOT_IMU_STATUS_INDEX]
     joint_status = snapshot_regs[SENSOR_SNAPSHOT_JOINT_STATUS_INDEX]
     touch_status = snapshot_regs[SENSOR_SNAPSHOT_TOUCH_STATUS_INDEX]
+    sensor_frame_age_ms = snapshot_regs[SENSOR_SNAPSHOT_FRAME_AGE_MS_INDEX]
     sensor_regs = snapshot_regs[SENSOR_SNAPSHOT_METADATA_REG_COUNT:]
     imu_end = MODBUS_IMU_DATA_REG_COUNT
     joint_end = imu_end + MODBUS_JOINT_DATA_REG_COUNT
@@ -1434,6 +1455,7 @@ def read_sensor_snapshot_poll(
         imu_status,
         joint_status,
         touch_status,
+        sensor_frame_age_ms,
     )
 
     joint_valid_bits = 0
@@ -1453,12 +1475,19 @@ def read_sensor_snapshot_poll(
         displayed_frame_id = sensor_frame_id
         displayed_timestamp_us = sensor_timestamp_us
     else:
-        # 无效响应只更新状态，不让固件返回的占位0覆盖最后一帧有效数据。
-        imu_regs = base.imu_regs
-        joint_regs = base.joint_regs
-        touch_regs = base.touch_regs
-        displayed_frame_id = base.sensor_frame_id
-        displayed_timestamp_us = base.sensor_timestamp_us
+        # Schema 3会携带最后一帧载荷；从未产帧时才继续使用界面已有缓存。
+        if sensor_frame_id != 0 or sensor_timestamp_us != 0:
+            imu_regs = received_imu_regs
+            joint_regs = received_joint_regs
+            touch_regs = received_touch_regs
+            displayed_frame_id = sensor_frame_id
+            displayed_timestamp_us = sensor_timestamp_us
+        else:
+            imu_regs = base.imu_regs
+            joint_regs = base.joint_regs
+            touch_regs = base.touch_regs
+            displayed_frame_id = base.sensor_frame_id
+            displayed_timestamp_us = base.sensor_timestamp_us
 
     comm_stats = client.get_low_latency_stats()
     return GloveSnapshot(
@@ -1493,6 +1522,7 @@ def read_sensor_snapshot_poll(
         sensor_frame_id=displayed_frame_id,
         sensor_timestamp_us=displayed_timestamp_us,
         sensor_snapshot_status=snapshot_status,
+        sensor_frame_age_ms=sensor_frame_age_ms,
         comm_requests=comm_stats.requests,
         comm_timeouts=comm_stats.timeouts,
         comm_retries=comm_stats.retries,
@@ -3150,6 +3180,7 @@ class ModbusMonitorApp(tk.Tk):
             f"Sensor timestamp  : {snapshot.sensor_timestamp_us} us",
             f"Snapshot status   : 0x{snapshot.sensor_snapshot_status:04X} "
             f"({format_flags(snapshot.sensor_snapshot_status, SNAPSHOT_STATUS_NAMES)})",
+            f"Sensor frame age  : {snapshot.sensor_frame_age_ms} ms",
             f"Sensor data       : {'VALID' if snapshot.sensor_data_valid else 'INVALID'}",
             f"Data reason       : {snapshot.sensor_invalid_reason}",
             f"Duplicate replies : {snapshot.duplicate_responses}",
@@ -3469,6 +3500,7 @@ class ModbusMonitorApp(tk.Tk):
             writer.writerow(("meta", "sensor", "frame_id", snapshot.sensor_frame_id))
             writer.writerow(("meta", "sensor", "timestamp_us", snapshot.sensor_timestamp_us))
             writer.writerow(("meta", "sensor", "snapshot_status", f"0x{snapshot.sensor_snapshot_status:04X}"))
+            writer.writerow(("meta", "sensor", "frame_age_ms", snapshot.sensor_frame_age_ms))
             writer.writerow(("meta", "sensor", "duplicate_responses", snapshot.duplicate_responses))
             writer.writerow(("meta", "sensor", "schedule_overruns", snapshot.schedule_overruns))
             writer.writerow(("status", "device", "protocol_version", f"0x{device.protocol_version:04X}"))

@@ -37,8 +37,8 @@ extern "C" {
 #define REG_FW_INFO_COUNT              3U
 
 /* 协议和设备静态信息：0x0011 ~ 0x001B，只读。 */
-#define MODBUS_PROTOCOL_VERSION        0x0200U
-#define MODBUS_SENSOR_SNAPSHOT_VERSION 0x0002U
+#define MODBUS_PROTOCOL_VERSION        0x0201U
+#define MODBUS_SENSOR_SNAPSHOT_VERSION 0x0003U
 
 #define MODBUS_CAP_SENSOR_SNAPSHOT     (1U << 0)
 #define MODBUS_CAP_TIME_SYNC           (1U << 1)
@@ -280,9 +280,11 @@ extern "C" {
 #define R_STATUS_SNAPSHOT_VALID        0x0001U
 #define R_STATUS_TOUCH_VALID           0x0002U
 
-/* 0x41高速快照公共状态，传感数据有效性与UTC同步状态分开表示。 */
+/* 0x41高速快照公共状态，数据、PPS和时间同步状态分开表示。 */
 #define SENSOR_SNAPSHOT_STATUS_VALID       (1U << 0)
 #define SENSOR_SNAPSHOT_STATUS_UTC_VALID   (1U << 1)
+#define SENSOR_SNAPSHOT_STATUS_PPS_PRESENT (1U << 2)
+#define SENSOR_SNAPSHOT_STATUS_ACQ_ACTIVE  (1U << 3)
 
 #if MODBUS_R_POINT_COUNT > MODBUS_R_DATA_REG_COUNT
 #error "MODBUS_R_DATA_REG_COUNT must cover all touch points"

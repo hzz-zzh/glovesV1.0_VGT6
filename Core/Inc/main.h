@@ -51,6 +51,7 @@ extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern I2C_HandleTypeDef hi2c2;
 extern XSPI_HandleTypeDef hxspi1;
+extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim5;
 extern SD_HandleTypeDef hsd1;
 /* USER CODE END EM */
@@ -105,7 +106,6 @@ void Error_Handler(void);
 #define TOUCH_COL_SEL2_GPIO_Port GPIOA
 #define PPS_IN_Pin GPIO_PIN_15
 #define PPS_IN_GPIO_Port GPIOA
-#define PPS_IN_EXTI_IRQn EXTI15_IRQn
 #define USER_LED_Pin GPIO_PIN_0
 #define USER_LED_GPIO_Port GPIOD
 #define USER_KEY_Pin GPIO_PIN_4

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include "acq_sync.h"
 #include "cmsis_os2.h"
 #include "system_health.h"
 #include "system_watchdog.h"
@@ -29,6 +30,8 @@ void SystemHealthTask(void *argument)
 
     for (;;)
     {
+        /* PPS超时检测放在独立周期任务中，不依赖485是否正在收发。 */
+        AcqSync_Service();
         SystemHealth_Service();
 
         /* 看门狗刷新由独立高优先级任务负责，此处只汇总配置诊断状态。 */
