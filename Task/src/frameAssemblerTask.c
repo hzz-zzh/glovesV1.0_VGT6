@@ -334,6 +334,24 @@ static GloveStatus_t FrameAssembler_TryAssemble(GloveImuSensorBlock_t **imu,
         return GLOVE_STATUS_INVALID_PARAM;
     }
 
+    if ((*imu)->data.sensor_seq != (*touch)->data.sensor_seq)
+    {
+        /* UTC基准尚未建立时多个时间戳都可能为0，必须先按采样序号配对。 */
+        s_frame_assembler_stats.timestamp_mismatch_drops++;
+        if ((int32_t)((*imu)->data.sensor_seq - (*touch)->data.sensor_seq) < 0)
+        {
+            /* 队列中的序号差远小于半个32位周期，此比较同时兼容序号回卷。 */
+            s_frame_assembler_stats.imu_stale_drops++;
+            FrameAssembler_ReleaseImu(imu);
+        }
+        else
+        {
+            s_frame_assembler_stats.touch_stale_drops++;
+            FrameAssembler_ReleaseTouch(touch);
+        }
+        return GLOVE_STATUS_TIMEOUT;
+    }
+
     time_diff_us = FrameAssembler_TimeDiffAbsUs((*imu)->data.timestamp_us, (*touch)->data.timestamp_us);
     s_frame_assembler_stats.last_time_diff_us = time_diff_us;
 

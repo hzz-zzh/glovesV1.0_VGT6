@@ -100,6 +100,7 @@ typedef struct
     uint8_t node_last_rx_data[IMU_CAN_TASK_MAX_NODES_PER_BUS][8];
     uint32_t node_sync_seq[IMU_CAN_TASK_MAX_NODES_PER_BUS];
     GloveTimestampUs_t node_sync_timestamp_us[IMU_CAN_TASK_MAX_NODES_PER_BUS];
+    uint8_t node_sync_utc_valid[IMU_CAN_TASK_MAX_NODES_PER_BUS];
     uint32_t node_sync_seen_mask[IMU_CAN_TASK_MAX_NODES_PER_BUS];
     uint8_t node_sync_valid[IMU_CAN_TASK_MAX_NODES_PER_BUS];
     uint32_t node_accel_rx_ms[IMU_CAN_TASK_MAX_NODES_PER_BUS];
@@ -1062,6 +1063,7 @@ static bool ImuCanTask_ResetBusDevices(ImuCanTaskBusRuntime_t *bus)
     (void)memset(bus->node_last_rx_data, 0, sizeof(bus->node_last_rx_data));
     (void)memset(bus->node_sync_seq, 0, sizeof(bus->node_sync_seq));
     (void)memset(bus->node_sync_timestamp_us, 0, sizeof(bus->node_sync_timestamp_us));
+    (void)memset(bus->node_sync_utc_valid, 0, sizeof(bus->node_sync_utc_valid));
     (void)memset(bus->node_sync_seen_mask, 0, sizeof(bus->node_sync_seen_mask));
     (void)memset(bus->node_sync_valid, 0, sizeof(bus->node_sync_valid));
     (void)memset(bus->node_accel_rx_ms, 0, sizeof(bus->node_accel_rx_ms));
@@ -1142,6 +1144,7 @@ static void ImuCanTask_ProcessFrame(ImuCanTaskBusRuntime_t *bus,
             }
             bus->node_sync_seq[index] = sync.seq;
             bus->node_sync_timestamp_us[index] = sync.timestamp_us;
+            bus->node_sync_utc_valid[index] = sync.utc_valid;
             bus->node_sync_seen_mask[index] |= seen_bit;
             bus->node_sync_valid[index] = 1U;
         }
@@ -1933,6 +1936,7 @@ static void ImuCanTask_PublishSnapshot(uint32_t sync_seq)
     GloveTimestampUs_t block_sync_timestamp_us = 0ULL;
     uint8_t any_valid = 0U;
     uint8_t any_quat_valid = 0U;
+    uint8_t block_sync_utc_valid = 1U;
     uint32_t now_ms = HAL_GetTick();
 
     if (sync_seq == 0U)
@@ -2012,6 +2016,12 @@ static void ImuCanTask_PublishSnapshot(uint32_t sync_seq)
                                        seen_mask,
                                        &bus->devices[local_i].latest);
                 block->data.valid_flags |= GLOVE_FRAME_VALID_IMU_BIT(out_i);
+                /* UTC有效性来自采样触发快照，不能改用CAN数据到达时的全局状态。 */
+                if ((bus->node_sync_utc_valid[local_i] == 0U) ||
+                    (bus->node_sync_timestamp_us[local_i] != block_sync_timestamp_us))
+                {
+                    block_sync_utc_valid = 0U;
+                }
                 any_quat_valid = 1U;
                 any_valid = 1U;
             }
@@ -2022,6 +2032,11 @@ static void ImuCanTask_PublishSnapshot(uint32_t sync_seq)
     {
         block->data.sensor_seq = sync_seq;
         block->data.timestamp_us = block_sync_timestamp_us;
+
+        if ((block_sync_utc_valid != 0U) && (block_sync_timestamp_us != 0ULL))
+        {
+            block->data.valid_flags |= GLOVE_FRAME_FLAG_UTC_VALID;
+        }
 
         block->data.valid_flags |= GLOVE_FRAME_FLAG_IMU_VALID;
         if (any_quat_valid != 0U)
@@ -2401,6 +2416,8 @@ void ImuCanTask(void *argument)
                 (void)memset(s_buses[i].node_sync_seq, 0, sizeof(s_buses[i].node_sync_seq));
                 (void)memset(s_buses[i].node_sync_timestamp_us, 0,
                              sizeof(s_buses[i].node_sync_timestamp_us));
+                (void)memset(s_buses[i].node_sync_utc_valid, 0,
+                             sizeof(s_buses[i].node_sync_utc_valid));
                 (void)memset(s_buses[i].node_sync_seen_mask, 0,
                              sizeof(s_buses[i].node_sync_seen_mask));
                 (void)memset(s_buses[i].node_sync_valid, 0,

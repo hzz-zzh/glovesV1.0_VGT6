@@ -19,7 +19,8 @@
 #define DATA_PROCESS_IDLE_DELAY_MS              (1U)
 #define DATA_PROCESS_FULL_PUBLISH_TIMEOUT_MS    (0U)
 #define DATA_PROCESS_FULL_DEBUG_PRINT_ENABLE    APP_ENABLE_ACQUISITION_DEBUG
-#define DATA_PROCESS_FULL_DEBUG_PRINT_PERIOD    (200U)
+/* 按帧数抽样打印，在正常采样下约每秒输出一次完整帧诊断。 */
+#define DATA_PROCESS_FULL_DEBUG_PRINT_PERIOD    GLOVE_SENSOR_SAMPLE_RATE_HZ
 #define DATA_PROCESS_FULL_DEBUG_IMU_PRINT_COUNT (2U)
 #define DATA_PROCESS_FULL_DEBUG_TOUCH_COUNT     (16U)
 #define DATA_PROCESS_HEALTH_FAILURE_LIMIT       (3U)
@@ -348,6 +349,7 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
     AppData_ClearProcessedFrame(processed);
     processed->frame_id = raw->frame_id;
     processed->timestamp_us = raw->timestamp_us;
+    processed->valid_flags = raw->valid_flags & GLOVE_FRAME_FLAG_UTC_VALID;
     processed->process_status = GLOVE_STATUS_NOT_READY;
 
     if ((raw->valid_flags & GLOVE_FRAME_FLAG_QUAT_VALID) != 0U)
@@ -370,7 +372,8 @@ static GloveStatus_t DataProcess_BuildProcessedFrame(const GloveRawFrame_t *raw,
         return status;
     }
 
-    processed->valid_flags = GLOVE_FRAME_FLAG_ALGORITHM_VALID;
+    processed->valid_flags = GLOVE_FRAME_FLAG_ALGORITHM_VALID |
+                            (raw->valid_flags & GLOVE_FRAME_FLAG_UTC_VALID);
     if (calibration_applied != 0U)
     {
         processed->valid_flags |= GLOVE_FRAME_FLAG_IMU_CALIB_APPLIED;

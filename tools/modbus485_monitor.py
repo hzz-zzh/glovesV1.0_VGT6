@@ -26,15 +26,16 @@ except ImportError:  # pragma: no cover - shown in GUI at runtime
 
 
 # 与手套USART1保持一致，减少912字节传感快照的传输占时。
-DEFAULT_BAUD = 6000000
+DEFAULT_BAUD = 4000000
 DEFAULT_SLAVE = 1
 DEFAULT_TIMEOUT_S = 0.20
 DEFAULT_POLL_MS = 500
 
 MAX_READ_REGS = 100
 MAX_WRITE_REGS = 100
-# RS485轮询与手套内部FullFrame保持200Hz目标节拍。
-SENSOR_POLL_PERIOD_S = 1.0 / 200.0
+# RS485轮询与手套内部FullFrame保持125Hz目标节拍，标称周期8ms。
+SENSOR_SAMPLE_RATE_HZ = 125
+SENSOR_POLL_PERIOD_S = 1.0 / SENSOR_SAMPLE_RATE_HZ
 SENSOR_POLL_TIMEOUT_S = 0.008
 SENSOR_POLL_SERIAL_TIMEOUT_S = 0.008
 SENSOR_POLL_RETRIES = 0
@@ -501,7 +502,7 @@ class ModbusRtuClient:
             pass
 
     def _wait_low_latency_inter_request_gap(self) -> None:
-        """Only add the missing part of the RTU silent interval in a 200 Hz poll."""
+        """Only add the missing part of the RTU silent interval in a sensor poll."""
         now = time.perf_counter()
         if self.low_latency_last_transaction_end > 0.0:
             deadline = (
@@ -766,7 +767,7 @@ class ModbusRtuClient:
         with self.lock:
             self.last_tx = request
             self.last_rx = b""
-            # 正常5 ms调度间隔已经满足总线静默时间，只在紧邻上一事务时补足。
+            # 正常8 ms调度间隔已经满足总线静默时间，只在紧邻上一事务时补足。
             self._wait_low_latency_inter_request_gap()
             written = self.port.write(request)
             write_finished = time.perf_counter()
@@ -1811,7 +1812,7 @@ class ModbusMonitorApp(tk.Tk):
         ttk.Button(top, text="Start Poll", command=self.start_poll).grid(
             row=0, column=14, padx=2
         )
-        ttk.Button(top, text="200Hz Sensors", command=self.start_sensor_poll).grid(
+        ttk.Button(top, text=f"{SENSOR_SAMPLE_RATE_HZ}Hz Sensors", command=self.start_sensor_poll).grid(
             row=0, column=15, padx=2
         )
         ttk.Button(top, text="Stop", command=self.stop_poll).grid(row=0, column=16, padx=2)
@@ -2875,7 +2876,7 @@ class ModbusMonitorApp(tk.Tk):
             daemon=True,
         )
         self.worker.start()
-        self.status_var.set(self.status_var.get() + " | 200Hz IMU+Joint+Touch")
+        self.status_var.set(self.status_var.get() + f" | {SENSOR_SAMPLE_RATE_HZ}Hz IMU+Joint+Touch")
 
     def stop_poll(self) -> None:
         self.stop_event.set()
@@ -2895,7 +2896,7 @@ class ModbusMonitorApp(tk.Tk):
         previous = self.last_snapshot if self.last_snapshot is not None else empty_snapshot()
         if not previous.firmware_regs or not previous.device_info_regs:
             try:
-                # 静态版本与设备信息在高速轮询前读取一次，避免占用200Hz通信周期。
+                # 静态版本与设备信息在高速轮询前读取一次，避免占用传感器通信周期。
                 static_regs = self.client.read_holding_registers(
                     slave,
                     REG_FW_VERSION_START,
@@ -2907,7 +2908,7 @@ class ModbusMonitorApp(tk.Tk):
             except Exception as exc:
                 self.events.put(("error", exc))
         try:
-            # 健康状态在启动前读取并缓存，200Hz运行期间只发送传感器快照请求。
+            # 健康状态在启动前读取并缓存，高速运行期间只发送传感器快照请求。
             previous.health_regs = self.client.read_holding_registers(
                 slave,
                 REG_HEALTH_STATUS_START,
@@ -3082,7 +3083,9 @@ class ModbusMonitorApp(tk.Tk):
         slow_write_count = regs_to_u32_le_words(regs, 23)
         current_name = regs_to_text(regs[31:47])
         last_name = regs_to_text(regs[47:63])
-        duration_s = write_count / 200.0
+        duration_s = write_count / SENSOR_SAMPLE_RATE_HZ
+        expected_load_bps = regs[18] * SENSOR_SAMPLE_RATE_HZ
+        expected_gib_per_hour = expected_load_bps * 3600 / (1024 ** 3)
 
         lines = [
             "SD recording status",
@@ -3095,7 +3098,7 @@ class ModbusMonitorApp(tk.Tk):
             f"Current filename : {current_name or '<none>'}",
             f"Last filename    : {last_name or '<none>'}",
             f"Current size     : {file_size} bytes ({file_size / (1024 ** 2):.2f} MiB)",
-            f"Record count     : {write_count} (~{duration_s:.1f} s at 200Hz)",
+            f"Record count     : {write_count} (~{duration_s:.1f} s of samples at {SENSOR_SAMPLE_RATE_HZ}Hz)",
             "",
             f"Format version   : {regs[17]}",
             f"Record size      : {regs[18]} bytes",
@@ -3103,7 +3106,7 @@ class ModbusMonitorApp(tk.Tk):
             f"Max batch write  : {max_write_ms} ms",
             f"Slow writes      : {slow_write_count} (>20 ms per 4-record batch)",
             "",
-            "Expected V2 load : 307200 bytes/s at 200Hz (~1.03 GiB/hour)",
+            f"Expected V2 load : {expected_load_bps} bytes/s at {SENSOR_SAMPLE_RATE_HZ}Hz (~{expected_gib_per_hour:.2f} GiB/hour)",
             "Start Recording automatically synchronizes host UTC before creating the file.",
         ]
         set_text(self.sd_text, "\n".join(lines))
@@ -3142,7 +3145,7 @@ class ModbusMonitorApp(tk.Tk):
                 else ""
             )
             poll_text = (
-                f"200Hz Sensors comm={snapshot.actual_hz:.1f}Hz "
+                f"{SENSOR_SAMPLE_RATE_HZ}Hz Sensors comm={snapshot.actual_hz:.1f}Hz "
                 f"sensor={snapshot.sensor_hz:.1f}Hz frame={snapshot.sensor_frame_id} "
                 f"dup={snapshot.duplicate_responses} overrun={snapshot.schedule_overruns} "
                 f"timeout={snapshot.comm_timeouts} retry={snapshot.comm_retries} "

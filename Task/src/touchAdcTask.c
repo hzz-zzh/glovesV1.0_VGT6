@@ -641,6 +641,10 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
 
   TouchAdcTask_DisableColumns();
   block->data.valid_flags = GLOVE_FRAME_FLAG_TOUCH_VALID;
+  if (sync->utc_valid != 0U)
+  {
+    block->data.valid_flags |= GLOVE_FRAME_FLAG_UTC_VALID;
+  }
   TouchAdcTask_Trace("frame_done", seq, 0U);
   s_touch_adc_trace_frame = 0U;
   return GLOVE_STATUS_OK;

@@ -22,6 +22,9 @@ DebugConfig/
 # 日志解析目录
 parsed_log/
 
+# 本地联调和日志分析临时文件，不随固件发布。
+.codex_tmp/
+
 # 上位机和数据解析工具属于项目源码，只忽略工具产生的缓存与IDE配置。
 tools/__pycache__/
 tools/.idea/

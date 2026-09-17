@@ -56,7 +56,7 @@ static SdLogStatusSnapshot_t sd_log_status = {
   .block_size = SD_LOG_BLOCK_SIZE
 };
 
-/* 4帧合并为一次FatFs写入，降低200Hz记录时的文件系统和DMA调用次数。 */
+/* 4帧合并为一次FatFs写入，降低高频记录时的文件系统和DMA调用次数。 */
 static __ALIGNED(4) uint8_t sd_log_write_buffer[SD_LOG_WRITE_BUFFER_SIZE];
 static uint8_t sd_log_buffered_records;
 static uint32_t sd_log_unsynced_bytes;
@@ -156,7 +156,8 @@ static void SdLog_BuildFrameBlock(uint8_t block[SD_LOG_BLOCK_SIZE],
   SdLog_WriteU16Le(&block[12], GLOVE_JOINT_DOF_COUNT);
   SdLog_WriteU16Le(&block[14], GLOVE_TOUCH_COUNT);
   block[16] = (uint8_t)GloveHandConfig_GetHandSide();
-  block[17] = ModbusTimeSync_IsSynced();
+  /* 写卡可能晚于采集多个周期，记录帧自身的UTC有效性而不是当前同步状态。 */
+  block[17] = ((frame->raw.valid_flags & GLOVE_FRAME_FLAG_UTC_VALID) != 0U) ? 1U : 0U;
   SdLog_WriteU16Le(&block[18], GLOVE_FW_VERSION_MAJOR);
   SdLog_WriteU16Le(&block[20], GLOVE_FW_VERSION_MINOR);
   SdLog_WriteU16Le(&block[22], GLOVE_FW_VERSION_PATCH);

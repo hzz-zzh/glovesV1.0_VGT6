@@ -61,6 +61,14 @@ void AppData_BuildRawFrameFromSensors(GloveRawFrame_t *raw,
     raw->frame_id = frame_id;
     raw->timestamp_us = timestamp_us;
     raw->valid_flags = imu->valid_flags | touch->valid_flags;
+    /* 数据有效位可以合并，UTC有效必须由同一次采样的两类输入共同确认。 */
+    raw->valid_flags &= ~GLOVE_FRAME_FLAG_UTC_VALID;
+    if (((imu->valid_flags & touch->valid_flags & GLOVE_FRAME_FLAG_UTC_VALID) != 0U) &&
+        (imu->sensor_seq == touch->sensor_seq) &&
+        (imu->timestamp_us == touch->timestamp_us) && (timestamp_us != 0ULL))
+    {
+        raw->valid_flags |= GLOVE_FRAME_FLAG_UTC_VALID;
+    }
     raw->imu_sensor_seq = imu->sensor_seq;
     raw->touch_sensor_seq = touch->sensor_seq;
     raw->imu_timestamp_us = imu->timestamp_us;
@@ -84,6 +92,8 @@ void AppData_BuildFullFrame(GloveFullFrame_t *full,
     full->frame_id = raw->frame_id;
     full->timestamp_us = raw->timestamp_us;
     full->valid_flags = raw->valid_flags | processed->valid_flags;
+    full->valid_flags = (full->valid_flags & ~GLOVE_FRAME_FLAG_UTC_VALID) |
+                        (raw->valid_flags & GLOVE_FRAME_FLAG_UTC_VALID);
     full->raw = *raw;
     full->processed = *processed;
 }

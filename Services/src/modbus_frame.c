@@ -980,6 +980,7 @@ static uint16_t Modbus_ReadSensorSnapshotStatus(void)
     status |= SENSOR_SNAPSHOT_STATUS_VALID;
   }
   if ((modbus_read_snapshot.time_synced != 0U) &&
+      ((modbus_read_snapshot.imu.valid_flags & GLOVE_FRAME_FLAG_UTC_VALID) != 0U) &&
       (modbus_read_snapshot.imu.timestamp_us != 0ULL))
   {
     status |= SENSOR_SNAPSHOT_STATUS_UTC_VALID;

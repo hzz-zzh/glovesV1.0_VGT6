@@ -15,6 +15,7 @@ typedef struct
     uint32_t seq;
     GloveTimestampUs_t timestamp_us;
     uint8_t valid;
+    uint8_t utc_valid;                /* 采样触发时的UTC有效性，与传感器数据有效性分开。 */
 } AcqSyncSnapshot_t;
 
 typedef enum

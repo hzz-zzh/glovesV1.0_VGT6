@@ -2,11 +2,13 @@
 
 #include <string.h>
 
+#include "app_config.h"
 #include "main.h"
 #include "modbus_time_sync.h"
 
 #define ACQ_SYNC_TOUCH_THREAD_FLAG      (1UL << 8)
-#define ACQ_SYNC_SAMPLES_PER_PPS        (200U)
+/* 每个PPS触发第0点，TIM2补齐剩余124点后停止，等待下一次PPS。 */
+#define ACQ_SYNC_SAMPLES_PER_PPS        GLOVE_SENSOR_SAMPLE_RATE_HZ
 #define ACQ_SYNC_PPS_INTERVAL_MIN_US    (900000ULL)
 #define ACQ_SYNC_PPS_INTERVAL_MAX_US    (1100000ULL)
 #define ACQ_SYNC_DEFAULT_PPS_INTERVAL_US (1000000ULL)
@@ -19,6 +21,7 @@ static osThreadId_t s_acq_sync_touch_task_id;
 static volatile uint16_t s_acq_sync_samples_in_window;
 static volatile uint8_t s_acq_sync_window_active;
 static volatile uint8_t s_acq_sync_stop_after_pulse;
+static volatile uint8_t s_acq_sync_pps_callback_pending;
 static volatile uint8_t s_acq_sync_has_seen_pps;
 static volatile uint8_t s_acq_sync_pps_present;
 static volatile AcqSyncState_t s_acq_sync_state;
@@ -92,19 +95,23 @@ static void AcqSync_UpdateTim2PeriodFromPps(uint64_t interval_us)
 
 static void AcqSync_CopyLatest(AcqSyncSnapshot_t *snapshot)
 {
+    uint32_t irq_mask;
+
     if (snapshot == NULL)
     {
         return;
     }
 
+    irq_mask = __get_PRIMASK();
     __disable_irq();
     *snapshot = s_acq_sync_latest;
-    __enable_irq();
+    __set_PRIMASK(irq_mask);
 }
 
 void AcqSync_Reset(void)
 {
     uint32_t timer_clock_hz = AcqSync_GetApb1TimerClockHz();
+    uint32_t irq_mask = __get_PRIMASK();
 
     __disable_irq();
     (void)memset((void *)&s_acq_sync_latest, 0, sizeof(s_acq_sync_latest));
@@ -112,6 +119,7 @@ void AcqSync_Reset(void)
     s_acq_sync_samples_in_window = 0U;
     s_acq_sync_window_active = 0U;
     s_acq_sync_stop_after_pulse = 0U;
+    s_acq_sync_pps_callback_pending = 0U;
     s_acq_sync_has_seen_pps = 0U;
     s_acq_sync_pps_present = 0U;
     s_acq_sync_state = ACQ_SYNC_STATE_WAIT_FIRST_PPS;
@@ -119,7 +127,7 @@ void AcqSync_Reset(void)
     s_acq_sync_pps_edge_count = 0U;
     s_acq_sync_filtered_pps_interval_us = 0ULL;
     s_acq_sync_tim2_counter_hz = timer_clock_hz / (htim2.Init.Prescaler + 1U);
-    __enable_irq();
+    __set_PRIMASK(irq_mask);
 }
 
 void AcqSync_Service(void)
@@ -128,6 +136,7 @@ void AcqSync_Service(void)
     uint32_t last_pps_ms;
     uint32_t timeout_ms;
     uint64_t expected_interval_us;
+    uint32_t irq_mask;
     uint8_t mark_lost = 0U;
 
     if (s_acq_sync_has_seen_pps == 0U)
@@ -135,11 +144,13 @@ void AcqSync_Service(void)
         return;
     }
 
-    now_ms = HAL_GetTick();
+    irq_mask = __get_PRIMASK();
     __disable_irq();
+    /* 当前时间与上次PPS必须一起读取，避免中断抢占后无符号时间差下溢。 */
+    now_ms = HAL_GetTick();
     last_pps_ms = s_acq_sync_last_pps_tick_ms;
     expected_interval_us = s_acq_sync_filtered_pps_interval_us;
-    __enable_irq();
+    __set_PRIMASK(irq_mask);
 
     if (expected_interval_us == 0ULL)
     {
@@ -150,7 +161,10 @@ void AcqSync_Service(void)
 
     if ((uint32_t)(now_ms - last_pps_ms) > timeout_ms)
     {
+        irq_mask = __get_PRIMASK();
         __disable_irq();
+        /* 判定前重读当前时间，期间到来的新PPS不能被旧时间误判为丢失。 */
+        now_ms = HAL_GetTick();
         if ((s_acq_sync_has_seen_pps != 0U) &&
             ((uint32_t)(now_ms - s_acq_sync_last_pps_tick_ms) > timeout_ms) &&
             (s_acq_sync_state != ACQ_SYNC_STATE_PPS_LOST))
@@ -169,7 +183,7 @@ void AcqSync_Service(void)
             ModbusTimeSync_OnPpsLost();
             mark_lost = 1U;
         }
-        __enable_irq();
+        __set_PRIMASK(irq_mask);
     }
 
     if (mark_lost != 0U)
@@ -183,9 +197,11 @@ void AcqSync_Service(void)
 
 void AcqSync_RegisterTouchTask(osThreadId_t thread_id)
 {
+    uint32_t irq_mask = __get_PRIMASK();
+
     __disable_irq();
     s_acq_sync_touch_task_id = thread_id;
-    __enable_irq();
+    __set_PRIMASK(irq_mask);
 }
 
 void AcqSync_OnTim2PeriodElapsedFromIsr(void)
@@ -197,6 +213,9 @@ void AcqSync_OnTim2PeriodElapsedFromIsr(void)
     pps_triggered = (__HAL_TIM_GET_FLAG(&htim2, TIM_FLAG_TRIGGER) != RESET) ? 1U : 0U;
     if (pps_triggered != 0U)
     {
+        /* HAL先回调更新、后回调触发；先推进UTC再给第0帧打时间戳。 */
+        AcqSync_OnTim2PpsTriggerFromIsr();
+        s_acq_sync_pps_callback_pending = 1U;
         __HAL_TIM_DISABLE_IT(&htim2, TIM_IT_CC2);
         __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_CC2);
         s_acq_sync_stop_after_pulse = 0U;
@@ -216,8 +235,10 @@ void AcqSync_OnTim2PeriodElapsedFromIsr(void)
         s_acq_sync_samples_in_window++;
     }
 
-    s_acq_sync_latest.timestamp_us =
+    s_acq_sync_latest.timestamp_us = (pps_triggered != 0U) ?
+        (GloveTimestampUs_t)ModbusTimeSync_GetPpsEdgeUtcUsFromIsr() :
         (GloveTimestampUs_t)ModbusTimeSync_GetUtcTimestampUsFromIsr();
+    s_acq_sync_latest.utc_valid = ModbusTimeSync_IsSynced();
     s_acq_sync_latest.seq = next_seq;
     s_acq_sync_latest.valid = 1U;
 
@@ -237,6 +258,13 @@ void AcqSync_OnTim2PeriodElapsedFromIsr(void)
 
 void AcqSync_OnTim2PpsTriggerFromIsr(void)
 {
+    if (s_acq_sync_pps_callback_pending != 0U)
+    {
+        /* 同一个PPS已在更新回调中处理，触发回调只消除待处理标记。 */
+        s_acq_sync_pps_callback_pending = 0U;
+        return;
+    }
+
     s_acq_sync_last_pps_tick_ms = HAL_GetTick();
     s_acq_sync_has_seen_pps = 1U;
     s_acq_sync_pps_present = 1U;
@@ -281,14 +309,16 @@ void AcqSync_GetStatus(AcqSyncStatus_t *status)
 {
     uint32_t now_ms;
     uint64_t expected_interval_us;
+    uint32_t irq_mask;
 
     if (status == NULL)
     {
         return;
     }
 
-    now_ms = HAL_GetTick();
+    irq_mask = __get_PRIMASK();
     __disable_irq();
+    now_ms = HAL_GetTick();
     status->state = s_acq_sync_state;
     status->samples_in_window = s_acq_sync_samples_in_window;
     status->pps_present = s_acq_sync_pps_present;
@@ -298,7 +328,7 @@ void AcqSync_GetStatus(AcqSyncStatus_t *status)
                               (uint32_t)(now_ms - s_acq_sync_last_pps_tick_ms) :
                               0xFFFFFFFFUL;
     expected_interval_us = s_acq_sync_filtered_pps_interval_us;
-    __enable_irq();
+    __set_PRIMASK(irq_mask);
 
     if (expected_interval_us == 0ULL)
     {

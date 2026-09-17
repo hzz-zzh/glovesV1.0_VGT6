@@ -830,10 +830,10 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  /* 250MHz直接计数1250000次，得到标称200Hz同步脉冲。 */
+  /* 默认250MHz直接计数2000000次，得到125Hz、8ms周期的同步脉冲。 */
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 1249999;
+  htim2.Init.Period = (250000000U / GLOVE_SENSOR_SAMPLE_RATE_HZ) - 1U;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   /* 关闭ARR预装载，使PPS中断测得的周期能用于当前采样窗口。 */
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -848,7 +848,8 @@ static void MX_TIM2_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 625000;
+  /* 保持50%占空比，最后一帧在同步脉冲下降沿停表。 */
+  sConfigOC.Pulse = (htim2.Init.Period + 1U) / 2U;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
@@ -961,8 +962,8 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  /* 使用6Mbps兼顾高速快照传输和USB-RS485设备兼容性。 */
-  huart1.Init.BaudRate = 6000000;
+  /* 使用4Mbps传输传感器快照，与CubeMX配置和主站默认波特率保持一致。 */
+  huart1.Init.BaudRate = 4000000;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;

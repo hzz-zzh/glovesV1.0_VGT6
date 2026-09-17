@@ -72,6 +72,15 @@ extern "C" {
 #define GLOVE_TOUCH_COUNT                       (68U)
 #define GLOVE_JOINT_DOF_COUNT                   (27U)
 
+/* PPS标称周期为1秒，每个采样窗口包含125点，标称采样间隔为8ms。 */
+#define GLOVE_SENSOR_SAMPLE_RATE_HZ             (125U)
+#define GLOVE_SENSOR_SAMPLE_PERIOD_US           (1000000ULL / GLOVE_SENSOR_SAMPLE_RATE_HZ)
+
+/* 采样窗口计数使用uint16_t，频率必须非零且不能超过计数容量。 */
+#if (GLOVE_SENSOR_SAMPLE_RATE_HZ == 0U) || (GLOVE_SENSOR_SAMPLE_RATE_HZ > 65535U)
+#error "GLOVE_SENSOR_SAMPLE_RATE_HZ must be within 1..65535"
+#endif
+
 #define GLOVE_IMU_SENSOR_POOL_SIZE              (6U)
 #define GLOVE_TOUCH_SENSOR_POOL_SIZE            (6U)
 #define GLOVE_IMU_SENSOR_QUEUE_DEPTH            (4U)
@@ -100,6 +109,8 @@ extern "C" {
 #define GLOVE_FRAME_FLAG_TOUCH_VALID            (0x00000004UL)
 #define GLOVE_FRAME_FLAG_ALGORITHM_VALID        (0x00000008UL)
 #define GLOVE_FRAME_FLAG_IMU_CALIB_APPLIED      (0x00000010UL)
+/* 采集时UTC可信，不受后续写UTC或消费者处理延迟影响。 */
+#define GLOVE_FRAME_FLAG_UTC_VALID              (0x00000020UL)
 
 #define GLOVE_FRAME_VALID_IMU_BIT_SHIFT         (16U)
 #define GLOVE_FRAME_VALID_IMU_BIT(index)        (1UL << (GLOVE_FRAME_VALID_IMU_BIT_SHIFT + (index)))
