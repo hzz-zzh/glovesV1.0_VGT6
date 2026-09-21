@@ -309,7 +309,8 @@ void SystemHealth_Service(void)
                            SYSTEM_ERROR_PPS_LOST,
                            SYSTEM_HEALTH_SOURCE_ACQUISITION,
                            0U,
-                           (acq_status.state == ACQ_SYNC_STATE_PPS_LOST) ? 1U : 0U);
+                           ((acq_status.mode == ACQ_MODE_NORMAL) &&
+                           (acq_status.state == ACQ_SYNC_STATE_PPS_LOST)) ? 1U : 0U);
 
     /* 没有PPS时停止产帧是预期行为，避免再把同一根因误报为流水线故障。 */
     age_ms = (frame_seen != 0U) ? (uint32_t)(HAL_GetTick() - last_frame_ms) : 0xFFFFFFFFUL;
@@ -317,13 +318,15 @@ void SystemHealth_Service(void)
                            SYSTEM_ERROR_FRAME_STALE,
                            SYSTEM_HEALTH_SOURCE_PIPELINE,
                            0U,
-                           ((acq_status.pps_present != 0U) &&
-                            (acq_status.last_pps_age_ms > SYSTEM_HEALTH_FULL_FRAME_TIMEOUT_MS) &&
+                           ((acq_status.sampling_allowed != 0U) &&
+                            ((acq_status.mode == ACQ_MODE_DEBUG) ?
+                             (acq_status.mode_age_ms > SYSTEM_HEALTH_FULL_FRAME_TIMEOUT_MS) :
+                             (acq_status.last_pps_age_ms > SYSTEM_HEALTH_FULL_FRAME_TIMEOUT_MS)) &&
                             ((frame_seen == 0U) ||
                              (age_ms > SYSTEM_HEALTH_FULL_FRAME_TIMEOUT_MS))) ? 1U : 0U);
 
     taskENTER_CRITICAL();
-    if ((acq_status.pps_present != 0U) &&
+    if ((acq_status.sampling_allowed != 0U) &&
         (frame_seen != 0U) &&
         (age_ms <= SYSTEM_HEALTH_FULL_FRAME_TIMEOUT_MS))
     {
@@ -342,7 +345,8 @@ void SystemHealth_Service(void)
         s_health.sensor_ready_flags &= (uint16_t)~SYSTEM_SENSOR_READY_PPS;
     }
     s_health.state = SystemHealth_ComputeState();
-    if ((acq_status.has_seen_pps == 0U) && (s_health.current_flags == 0UL))
+    if ((acq_status.mode != ACQ_MODE_DEBUG) &&
+        (acq_status.has_seen_pps == 0U) && (s_health.current_flags == 0UL))
     {
         /* 上电尚未等到第一个PPS时属于未就绪，不把它显示成已经正常采集。 */
         s_health.state = SYSTEM_HEALTH_INIT;

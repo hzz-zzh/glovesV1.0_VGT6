@@ -1,4 +1,5 @@
 #include "sd_log.h"
+#include "acq_sync.h"
 
 #include "app_config.h"
 #include "app_version.h"
@@ -487,7 +488,7 @@ GloveStatus_t SdLog_Start(void)
     return GLOVE_STATUS_OK;
   }
   /* 文件时间必须可信；上位机开始录制前会自动下发一次UTC时间。 */
-  if (ModbusTimeSync_IsSynced() == 0U)
+  if ((AcqSync_IsNormalMode() == 0U) || (ModbusTimeSync_IsSynced() == 0U))
   {
     SdLog_SetError(SD_LOG_ERROR_TIME_UNSYNCED);
     return GLOVE_STATUS_NOT_READY;
@@ -599,6 +600,11 @@ GloveStatus_t SdLog_WriteFullFrame(const GloveFullFrame_t *frame)
   if (frame == NULL)
   {
     return GLOVE_STATUS_INVALID_PARAM;
+  }
+  if ((AcqSync_IsNormalMode() == 0U) ||
+      ((frame->raw.valid_flags & GLOVE_FRAME_FLAG_DEBUG_LOCAL_TIME) != 0U))
+  {
+    return GLOVE_STATUS_NOT_READY;
   }
   if (sd_log_status.log_status != SD_LOG_RECORD_RECORDING)
   {

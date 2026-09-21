@@ -286,6 +286,11 @@ static GloveStatus_t FrameAssembler_PublishRawFrame(const GloveImuSensorBlock_t 
     GloveStatus_t status;
     GloveTimestampUs_t frame_timestamp_us;
 
+    if ((AcqSync_IsSequenceCurrent(imu->data.sensor_seq) == 0U) ||
+        (AcqSync_IsSequenceCurrent(touch->data.sensor_seq) == 0U))
+    {
+        return GLOVE_STATUS_NOT_READY;
+    }
     raw = DataManager_AllocRawFrame();
     if (raw == NULL)
     {
@@ -401,6 +406,7 @@ void FrameAssemblerTask(void *argument)
     uint32_t pending_touch_tick = 0U;
     GloveStatus_t status;
     uint8_t assemble_failure_count = 0U;
+    uint32_t acquisition_generation = 0U;
 
     (void)argument;
     (void)memset(&s_frame_assembler_stats, 0, sizeof(s_frame_assembler_stats));
@@ -408,7 +414,15 @@ void FrameAssemblerTask(void *argument)
     for (;;)
     {
         AcqSync_GetStatus(&acq_status);
-        if (acq_status.pps_present == 0U)
+        if (acquisition_generation != acq_status.generation)
+        {
+            acquisition_generation = acq_status.generation;
+            FrameAssembler_ReleaseImu(&pending_imu);
+            FrameAssembler_ReleaseTouch(&pending_touch);
+            FrameAssembler_DiscardQueuedSensorFrames();
+            assemble_failure_count = 0U;
+        }
+        if (acq_status.sampling_allowed == 0U)
         {
             /* PPS消失后释放半帧并排空输入队列，恢复时只接受新采样窗的数据。 */
             FrameAssembler_ReleaseImu(&pending_imu);
@@ -453,11 +467,21 @@ void FrameAssemblerTask(void *argument)
             }
         }
 
+        if ((pending_imu != NULL) &&
+            (AcqSync_IsSequenceCurrent(pending_imu->data.sensor_seq) == 0U))
+        {
+            FrameAssembler_ReleaseImu(&pending_imu);
+        }
+        if ((pending_touch != NULL) &&
+            (AcqSync_IsSequenceCurrent(pending_touch->data.sensor_seq) == 0U))
+        {
+            FrameAssembler_ReleaseTouch(&pending_touch);
+        }
         if ((pending_imu != NULL) && (pending_touch != NULL))
         {
             status = FrameAssembler_TryAssemble(&pending_imu, &pending_touch);
             FrameAssembler_SetStatus(status);
-            if (status == GLOVE_STATUS_OK)
+            if ((status == GLOVE_STATUS_OK) || (status == GLOVE_STATUS_NOT_READY))
             {
                 assemble_failure_count = 0U;
             }

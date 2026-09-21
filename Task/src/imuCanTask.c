@@ -1596,6 +1596,7 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
 {
     const uint16_t expected_mask = (uint16_t)GLOVE_IMU_VALID_ALL_MASK;
     static uint8_t previous_pps_present;
+    static uint32_t previous_generation;
     static uint32_t pps_recovery_grace_until_ms;
     AcqSyncStatus_t acq_status;
     ImuCanTaskBusRuntime_t *bus;
@@ -1607,12 +1608,14 @@ static void ImuCanTask_ServiceActiveRecovery(uint16_t fresh_mask, uint32_t now_m
     uint8_t data_recovery_allowed;
 
     AcqSync_GetStatus(&acq_status);
-    if ((acq_status.pps_present != 0U) && (previous_pps_present == 0U))
+    if (((acq_status.sampling_allowed != 0U) && (previous_pps_present == 0U)) ||
+        (previous_generation != acq_status.generation))
     {
         pps_recovery_grace_until_ms = now_ms + IMU_CAN_TASK_PPS_RECOVERY_GRACE_MS;
     }
-    previous_pps_present = acq_status.pps_present;
-    data_recovery_allowed = ((acq_status.pps_present != 0U) &&
+    previous_pps_present = acq_status.sampling_allowed;
+    previous_generation = acq_status.generation;
+    data_recovery_allowed = ((acq_status.sampling_allowed != 0U) &&
                              ((int32_t)(now_ms - pps_recovery_grace_until_ms) >= 0)) ?
                             1U : 0U;
 
@@ -1939,7 +1942,7 @@ static void ImuCanTask_PublishSnapshot(uint32_t sync_seq)
     uint8_t block_sync_utc_valid = 1U;
     uint32_t now_ms = HAL_GetTick();
 
-    if (sync_seq == 0U)
+    if (AcqSync_IsSequenceCurrent(sync_seq) == 0U)
     {
         return;
     }
@@ -2038,6 +2041,10 @@ static void ImuCanTask_PublishSnapshot(uint32_t sync_seq)
             block->data.valid_flags |= GLOVE_FRAME_FLAG_UTC_VALID;
         }
 
+        if (AcqSync_IsDebugMode() != 0U)
+        {
+            block->data.valid_flags |= GLOVE_FRAME_FLAG_DEBUG_LOCAL_TIME;
+        }
         block->data.valid_flags |= GLOVE_FRAME_FLAG_IMU_VALID;
         if (any_quat_valid != 0U)
         {
@@ -2324,6 +2331,7 @@ void ImuCanTask(void *argument)
 {
     uint32_t active_sync_seq = 0U;
     uint32_t last_published_sync_seq = 0U;
+    uint32_t acquisition_generation = 0U;
 
     (void)argument;
     (void)ImuCanTask_LoopJ1939NodeIdConfig;
@@ -2365,6 +2373,42 @@ void ImuCanTask(void *argument)
 
     for (;;)
     {
+        AcqSyncStatus_t acquisition_status;
+        AcqSync_GetStatus(&acquisition_status);
+        if (acquisition_generation != acquisition_status.generation)
+        {
+            acquisition_generation = acquisition_status.generation;
+            active_sync_seq = 0U;
+            last_published_sync_seq = 0U;
+            s_imu_fresh_mask = 0U;
+            s_imu_recovery_ready = 0U;
+            for (uint32_t bus_i = 0U; bus_i < IMU_CAN_TASK_BUS_COUNT; bus_i++)
+            {
+                hi04_can_frame_t discarded;
+                ImuCanTaskBusRuntime_t *bus = &s_buses[bus_i];
+                /* 排空停采前CAN报文，再清除节点的序号、时间戳及新鲜度。 */
+                if (bus->fdcan_started)
+                {
+                    uint32_t pending = HAL_FDCAN_GetRxFifoFillLevel(bus->port.hfdcan,
+                                                                 FDCAN_RX_FIFO0);
+                    /* 只排空当前积压，异常节点持续发送也不能卡死任务。 */
+                    for (uint32_t rx_i = 0U; rx_i < pending; rx_i++)
+                    {
+                        if (!hi04_fdcan_stm32h563_read_fifo0(&bus->port, &discarded))
+                        {
+                            break;
+                        }
+                    }
+                }
+                (void)memset(bus->node_sync_valid, 0, sizeof(bus->node_sync_valid));
+                (void)memset(bus->node_sync_seen_mask, 0, sizeof(bus->node_sync_seen_mask));
+                (void)memset(bus->node_sync_seq, 0, sizeof(bus->node_sync_seq));
+                (void)memset(bus->node_sync_utc_valid, 0, sizeof(bus->node_sync_utc_valid));
+                (void)memset(bus->node_accel_rx_ms, 0, sizeof(bus->node_accel_rx_ms));
+                (void)memset(bus->node_gyro_rx_ms, 0, sizeof(bus->node_gyro_rx_ms));
+                (void)memset(bus->node_quat_rx_ms, 0, sizeof(bus->node_quat_rx_ms));
+            }
+        }
         if (s_imu_acquisition_enabled == 0U)
         {
             if (s_imu_acquisition_paused == 0U)
@@ -2453,7 +2497,7 @@ void ImuCanTask(void *argument)
         {
             AcqSyncSnapshot_t sync;
 
-            if (AcqSync_IsPpsPresent() == 0U)
+            if (AcqSync_IsSamplingAllowed() == 0U)
             {
                 active_sync_seq = 0U;
                 last_published_sync_seq = 0U;

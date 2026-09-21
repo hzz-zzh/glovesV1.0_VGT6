@@ -37,13 +37,14 @@ extern "C" {
 #define REG_FW_INFO_COUNT              3U
 
 /* 协议和设备静态信息：0x0011 ~ 0x001B，只读。 */
-#define MODBUS_PROTOCOL_VERSION        0x0201U
+#define MODBUS_PROTOCOL_VERSION        0x0202U
 #define MODBUS_SENSOR_SNAPSHOT_VERSION 0x0003U
 
 #define MODBUS_CAP_SENSOR_SNAPSHOT     (1U << 0)
 #define MODBUS_CAP_TIME_SYNC           (1U << 1)
 #define MODBUS_CAP_IMU_CALIBRATION     (1U << 2)
 #define MODBUS_CAP_SD_LOG              (1U << 3)
+#define MODBUS_CAP_DEBUG_ACQ           (1U << 4)
 
 #define REG_PROTOCOL_VERSION           0x0011U
 #define REG_SENSOR_SNAPSHOT_VERSION    0x0012U
@@ -65,7 +66,13 @@ extern "C" {
 #define REG_CMD_ACK                    0x0023U
 #define REG_CMD_ACK_SEQ                0x0024U
 #define REG_CMD_ERROR                  0x0025U
-#define REG_CMD_RESERVED_START         0x0026U
+/* 独立调试状态只读；U32/U64仍按低16位寄存器在前。 */
+#define REG_DEBUG_MODE                0x0026U
+#define REG_DEBUG_LEASE_MS            0x0027U
+#define REG_DEBUG_GENERATION          0x0028U
+#define REG_DEBUG_SAMPLE_SEQ          0x002AU
+#define REG_DEBUG_SAMPLE_LOCAL_US     0x002CU
+#define REG_CMD_RESERVED_START         0x0030U
 #define REG_CMD_RESERVED_END           0x003EU
 
 #define REG_CMD_AREA_START             REG_CMD
@@ -129,6 +136,8 @@ extern "C" {
 /* System status values. */
 #define SYSTEM_STATE_READY             0x0001U
 #define WORK_MODE_NORMAL               0x0000U
+#define WORK_MODE_DEBUG_ACQ            0x0001U
+#define WORK_MODE_SWITCHING            0x0002U
 #define LOG_STATE_IDLE                 0x0000U
 #define SD_STATE_NOT_READY             0x0000U
 #define SD_STATE_READY                 0x0001U
@@ -285,6 +294,7 @@ extern "C" {
 #define SENSOR_SNAPSHOT_STATUS_UTC_VALID   (1U << 1)
 #define SENSOR_SNAPSHOT_STATUS_PPS_PRESENT (1U << 2)
 #define SENSOR_SNAPSHOT_STATUS_ACQ_ACTIVE  (1U << 3)
+#define SENSOR_SNAPSHOT_STATUS_DEBUG_MODE  (1U << 4)
 
 #if MODBUS_R_POINT_COUNT > MODBUS_R_DATA_REG_COUNT
 #error "MODBUS_R_DATA_REG_COUNT must cover all touch points"
@@ -295,8 +305,11 @@ extern "C" {
 #define CMD_HEALTH_CLEAR_HISTORY       0x004AU
 #define CMD_LOG_START                  0x0094U
 #define CMD_LOG_STOP                   0x0096U
-#define CMD_ACQ_START                  0x0501U
-#define CMD_ACQ_STOP                   0x0502U
+#define CMD_DEBUG_ACQ_START            0x0501U
+#define CMD_DEBUG_ACQ_STOP             0x0502U
+#define CMD_DEBUG_ACQ_RENEW            0x0503U
+/* START/RENEW需要显式维护口令，STOP参数固定为0。 */
+#define CMD_DEBUG_ACQ_MAGIC            0xD06BU
 
 /* 防止普通寄存器误写触发历史错误清除。 */
 #define CMD_HEALTH_CLEAR_MAGIC         0xC1EAU

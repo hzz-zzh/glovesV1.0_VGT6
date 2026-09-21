@@ -1,4 +1,5 @@
 #include "dataProcessTask.h"
+#include "acq_sync.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -394,6 +395,11 @@ static GloveStatus_t DataProcess_PublishFullFrame(const GloveRawFrame_t *raw,
         return GLOVE_STATUS_INVALID_PARAM;
     }
 
+    if ((AcqSync_IsSequenceCurrent(raw->imu_sensor_seq) == 0U) ||
+        (AcqSync_IsSequenceCurrent(raw->touch_sensor_seq) == 0U))
+    {
+        return GLOVE_STATUS_NOT_READY;
+    }
     full = DataManager_AllocFullFrame();
     if (full == NULL)
     {
@@ -555,6 +561,15 @@ void DataProcessTask(void *argument)
                                              DATA_PROCESS_GET_RAW_TIMEOUT_MS);
         if (raw_status == GLOVE_STATUS_OK)
         {
+            if ((AcqSync_IsSequenceCurrent(raw->frame.imu_sensor_seq) == 0U) ||
+                (AcqSync_IsSequenceCurrent(raw->frame.touch_sensor_seq) == 0U))
+            {
+                (void)DataManager_ReleaseRawFrame(raw);
+                raw = NULL;
+                publish_failure_count = 0U;
+                publish_success_count = 0U;
+                continue;
+            }
             start_us = DataProcess_GetKernelTimeUs();
             s_data_process_stats.raw_frames_received++;
             s_data_process_stats.last_frame_id = raw->frame.frame_id;
@@ -593,6 +608,12 @@ void DataProcessTask(void *argument)
                                           0U,
                                           0U);
                 }
+            }
+            else if (publish_status == GLOVE_STATUS_NOT_READY)
+            {
+                /* 模式切换主动丢弃旧帧，不计为队列或内存故障。 */
+                publish_success_count = 0U;
+                publish_failure_count = 0U;
             }
             else
             {

@@ -1,4 +1,5 @@
 #include "storageTask.h"
+#include "acq_sync.h"
 
 #include "app_config.h"
 #include "cmsis_os2.h"
@@ -235,10 +236,20 @@ static GloveStatus_t StorageTask_StartRecordingInternal(void)
     return GLOVE_STATUS_OK;
   }
 
+  if (AcqSync_IsNormalMode() == 0U)
+  {
+    return GLOVE_STATUS_NOT_READY;
+  }
   /* 文件准备期间不向Storage队列投递数据，开始边界从文件就绪后的首帧算起。 */
   DataManager_SetFullFrameStorageEnabled(0U);
   StorageTask_DiscardPendingFrames();
   result = SdLog_Start();
+  if ((result == GLOVE_STATUS_OK) && (AcqSync_IsNormalMode() == 0U))
+  {
+    /* 异步START入队后才申请调试的竞态：关掉刚创建的文件，不开启投递。 */
+    (void)SdLog_Stop();
+    result = GLOVE_STATUS_NOT_READY;
+  }
   if (result == GLOVE_STATUS_OK)
   {
     StorageTask_DiscardPendingFrames();

@@ -111,6 +111,8 @@ extern "C" {
 #define GLOVE_FRAME_FLAG_IMU_CALIB_APPLIED      (0x00000010UL)
 /* 采集时UTC可信，不受后续写UTC或消费者处理延迟影响。 */
 #define GLOVE_FRAME_FLAG_UTC_VALID              (0x00000020UL)
+/* 内部调试帧使用单调本地时间；485的UTC字段仍返回0，禁止混入SD。 */
+#define GLOVE_FRAME_FLAG_DEBUG_LOCAL_TIME       (0x00000040UL)
 
 #define GLOVE_FRAME_VALID_IMU_BIT_SHIFT         (16U)
 #define GLOVE_FRAME_VALID_IMU_BIT(index)        (1UL << (GLOVE_FRAME_VALID_IMU_BIT_SHIFT + (index)))

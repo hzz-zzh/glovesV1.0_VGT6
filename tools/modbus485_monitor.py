@@ -66,6 +66,14 @@ CMD_HEALTH_CLEAR_MAGIC = 0xC1EA
 CMD_LOG_START = 0x0094
 CMD_LOG_STOP = 0x0096
 CMD_ACK_OK = 0x0001
+CMD_DEBUG_ACQ_START = 0x0501
+CMD_DEBUG_ACQ_STOP = 0x0502
+CMD_DEBUG_ACQ_RENEW = 0x0503
+CMD_DEBUG_ACQ_MAGIC = 0xD06B
+REG_DEBUG_STATUS_START = 0x0026
+REG_DEBUG_STATUS_COUNT = 10
+MODBUS_CAP_DEBUG_ACQ = 1 << 4
+DEBUG_RENEW_PERIOD_S = 3.0
 REG_SYSTEM_STATUS_START = 0x0040
 REG_SYSTEM_STATUS_COUNT = 10
 REG_HEALTH_STATUS_START = 0x004A
@@ -123,6 +131,7 @@ SENSOR_SNAPSHOT_STATUS_VALID = 1 << 0
 SENSOR_SNAPSHOT_STATUS_UTC_VALID = 1 << 1
 SENSOR_SNAPSHOT_STATUS_PPS_PRESENT = 1 << 2
 SENSOR_SNAPSHOT_STATUS_ACQ_ACTIVE = 1 << 3
+SENSOR_SNAPSHOT_STATUS_DEBUG_MODE = 1 << 4
 SENSOR_SNAPSHOT_SENSOR_REG_COUNT = (
     MODBUS_IMU_DATA_REG_COUNT
     + MODBUS_JOINT_DATA_REG_COUNT
@@ -263,6 +272,7 @@ CAPABILITY_FLAG_NAMES = (
     (1 << 1, "time_sync"),
     (1 << 2, "imu_calibration"),
     (1 << 3, "sd_log"),
+    (MODBUS_CAP_DEBUG_ACQ, "standalone_debug"),
 )
 
 SNAPSHOT_STATUS_NAMES = (
@@ -270,6 +280,7 @@ SNAPSHOT_STATUS_NAMES = (
     (SENSOR_SNAPSHOT_STATUS_UTC_VALID, "utc_valid"),
     (SENSOR_SNAPSHOT_STATUS_PPS_PRESENT, "pps_present"),
     (SENSOR_SNAPSHOT_STATUS_ACQ_ACTIVE, "acq_active"),
+    (SENSOR_SNAPSHOT_STATUS_DEBUG_MODE, "standalone_debug"),
 )
 
 HAND_SIDE_NAMES = {
@@ -1316,7 +1327,8 @@ def evaluate_sensor_validity(
     touch_status: int,
     frame_age_ms: int,
 ) -> tuple[bool, str]:
-    if (snapshot_status & SENSOR_SNAPSHOT_STATUS_PPS_PRESENT) == 0:
+    if ((snapshot_status & SENSOR_SNAPSHOT_STATUS_PPS_PRESENT) == 0 and
+            (snapshot_status & SENSOR_SNAPSHOT_STATUS_DEBUG_MODE) == 0):
         return False, "PPS input is absent"
     if (snapshot_status & SENSOR_SNAPSHOT_STATUS_VALID) == 0:
         return False, f"snapshot is stale (age={frame_age_ms} ms)"
@@ -1379,11 +1391,14 @@ def read_snapshot(client: ModbusRtuClient, slave: int, timeout_s: float) -> Glov
     )
     sensor_timestamp_us = ros_time_to_us(snapshot.imu_status_regs[0:4])
     snapshot_status = 0
+    if snapshot.system[1] == 1:
+        snapshot_status |= SENSOR_SNAPSHOT_STATUS_DEBUG_MODE | SENSOR_SNAPSHOT_STATUS_ACQ_ACTIVE
     if ((snapshot.joint_status_regs[4] & JOINT_STATUS_SNAPSHOT_VALID) != 0 and
             (snapshot.touch_status_regs[4] & 0x0001) != 0):
         snapshot_status |= SENSOR_SNAPSHOT_STATUS_VALID
-    if ((snapshot.health_regs[19] & (1 << 5)) != 0 or
-            (snapshot.health_regs[0] < 0x0201 and sensor_timestamp_us > 0)):
+    if (snapshot.system[1] == 0 and
+            ((snapshot.health_regs[19] & (1 << 5)) != 0 or
+             (snapshot.health_regs[0] < 0x0201 and sensor_timestamp_us > 0))):
         snapshot_status |= SENSOR_SNAPSHOT_STATUS_UTC_VALID
     if ((snapshot.health_regs[19] & (1 << 4)) != 0 or
             (snapshot.health_regs[0] < 0x0201 and
@@ -1738,6 +1753,9 @@ class ModbusMonitorApp(tk.Tk):
         self.last_calibration: tuple[list[list[float]], list[list[float]], list[int]] | None = None
         self.read_count = 0
         self.error_count = 0
+        self.debug_session_active = False
+        self.debug_stop_pending = False
+        self.debug_status_var = tk.StringVar(value="独立调试未启动；正常采集仍需要PPS")
 
         self.port_var = tk.StringVar()
         self.baud_var = tk.StringVar(value=str(DEFAULT_BAUD))
@@ -1819,6 +1837,14 @@ class ModbusMonitorApp(tk.Tk):
         ttk.Button(top, text="Save CSV", command=self.save_csv).grid(
             row=0, column=17, padx=(10, 0)
         )
+
+        debug_bar = ttk.Frame(self, padding=(8, 2))
+        debug_bar.pack(side=tk.TOP, fill=tk.X)
+        ttk.Button(debug_bar, text="启动独立采集（无PPS）",
+                   command=self.start_debug_acquisition).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(debug_bar, text="停止独立采集",
+                   command=self.stop_debug_acquisition).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(debug_bar, textvariable=self.debug_status_var).pack(side=tk.LEFT)
 
         status_bar = ttk.Frame(self, padding=(8, 0))
         status_bar.pack(side=tk.TOP, fill=tk.X)
@@ -2128,7 +2154,10 @@ class ModbusMonitorApp(tk.Tk):
             self.firmware_var.set("Firmware: unavailable")
 
     def disconnect(self) -> None:
+        self.debug_stop_pending = False
         self.stop_poll()
+        if self.debug_session_active and self.worker is not None:
+            self.worker.join(timeout=1.0)
         self.client.close()
         self.status_var.set("Disconnected")
         self.firmware_var.set("Firmware: unavailable")
@@ -2857,6 +2886,107 @@ class ModbusMonitorApp(tk.Tk):
         self.worker.start()
         self.status_var.set(self.status_var.get() + " | polling")
 
+    def _debug_command(self, slave: int, timeout_s: float, command: int) -> None:
+        # 使用设备ACK序号的下一值，避免毫秒时间截断导致STOP/RENEW被当成START重发。
+        ack_regs = self.client.read_holding_registers(
+            slave, REG_CMD_ACK_START, REG_CMD_ACK_COUNT, timeout_s
+        )
+        seq = (ack_regs[1] + 1) & 0xFFFF
+        param = 0 if command == CMD_DEBUG_ACQ_STOP else CMD_DEBUG_ACQ_MAGIC
+        self.client.write_multiple_registers(slave, REG_CMD_START, [command, param, seq], timeout_s)
+        ack, ack_seq, error = self.client.read_holding_registers(
+            slave, REG_CMD_ACK_START, REG_CMD_ACK_COUNT, timeout_s
+        )
+        if ack != CMD_ACK_OK or ack_seq != seq or error:
+            raise ModbusError(
+                f"debug command 0x{command:04X} rejected: ack=0x{ack:04X}, "
+                f"seq=0x{ack_seq:04X}, error=0x{error:04X}"
+            )
+
+    def _wait_debug_mode(self, slave: int, timeout_s: float, target: int) -> list[int]:
+        deadline = time.monotonic() + 2.0
+        while True:
+            regs = self.client.read_holding_registers(
+                slave, REG_DEBUG_STATUS_START, REG_DEBUG_STATUS_COUNT, timeout_s
+            )
+            self.events.put(("debug_status", regs))
+            if regs[0] == target:
+                return regs
+            if time.monotonic() >= deadline:
+                raise ModbusError(f"debug mode switch timeout: mode={regs[0]}")
+            # START可取消；STOP确认不能因stop_event已置位而立即结束。
+            if target == 1 and self.stop_event.wait(0.01):
+                raise ModbusError("debug start cancelled")
+            if target == 0:
+                time.sleep(0.01)
+
+    def start_debug_acquisition(self) -> None:
+        if self.worker is not None and self.worker.is_alive():
+            self.status_var.set("Busy: stop polling before entering standalone debug")
+            return
+        try:
+            if not self.client.is_open:
+                self.connect()
+            slave, timeout_s = self._ensure_connected_for_worker()
+        except Exception as exc:
+            messagebox.showerror("Standalone debug", str(exc))
+            return
+        if self._start_worker(self._debug_acquisition_worker, slave, timeout_s):
+            self.debug_status_var.set("正在启动独立调试；UTC无效，禁止SD录制")
+
+    def stop_debug_acquisition(self) -> None:
+        if self.worker is not None and self.worker.is_alive():
+            # 普通读取线程没有STOP清理，等它退出后再串行发送停止命令。
+            self.debug_stop_pending = not self.debug_session_active
+            self.stop_event.set()
+            self.debug_status_var.set("正在停止；若通信失败，会话将在10秒后自动退出")
+            return
+        self.debug_stop_pending = False
+        try:
+            slave, timeout_s = self._ensure_connected_for_worker()
+        except Exception as exc:
+            messagebox.showerror("Standalone debug", str(exc))
+            return
+        self._start_worker(self._debug_stop_worker, slave, timeout_s)
+
+    def _debug_stop_worker(self, slave: int, timeout_s: float) -> None:
+        try:
+            self._debug_command(slave, timeout_s, CMD_DEBUG_ACQ_STOP)
+            self._wait_debug_mode(slave, timeout_s, 0)
+            self.events.put(("snapshot", read_snapshot(self.client, slave, timeout_s)))
+        except Exception as exc:
+            self.events.put(("error", exc))
+
+    def _debug_acquisition_worker(self, slave: int, timeout_s: float) -> None:
+        requested = False
+        self.debug_session_active = True
+        try:
+            info = self.client.read_holding_registers(
+                slave, REG_DEVICE_INFO_START, REG_DEVICE_INFO_COUNT, timeout_s
+            )
+            if (info[2] & MODBUS_CAP_DEBUG_ACQ) == 0:
+                raise ModbusError("firmware does not support standalone debug")
+            requested = True
+            self._debug_command(slave, timeout_s, CMD_DEBUG_ACQ_START)
+            self._wait_debug_mode(slave, timeout_s, 1)
+            # 刷新静态/健康缓存，避免显示进入调试前的正常模式信息。
+            self.last_snapshot = read_snapshot(self.client, slave, timeout_s)
+            self.events.put(("snapshot", self.last_snapshot))
+            self._sensor_poll_worker(slave, timeout_s, debug_session=True)
+        except Exception as exc:
+            self.events.put(("error", exc))
+        finally:
+            if requested:
+                try:
+                    self._debug_command(slave, timeout_s, CMD_DEBUG_ACQ_STOP)
+                    self._wait_debug_mode(slave, timeout_s, 0)
+                    self.events.put(("snapshot", read_snapshot(self.client, slave, timeout_s)))
+                except Exception as exc:
+                    self.events.put(("error", ModbusError(
+                        f"debug STOP could not be confirmed; 10-second lease will expire: {exc}"
+                    )))
+            self.debug_session_active = False
+
     def start_sensor_poll(self) -> None:
         if self.worker is not None and self.worker.is_alive():
             return
@@ -2892,7 +3022,7 @@ class ModbusMonitorApp(tk.Tk):
                 self.events.put(("error", exc))
                 self.stop_event.wait(0.5)
 
-    def _sensor_poll_worker(self, slave: int, timeout_s: float) -> None:
+    def _sensor_poll_worker(self, slave: int, timeout_s: float, debug_session: bool = False) -> None:
         previous = self.last_snapshot if self.last_snapshot is not None else empty_snapshot()
         if not previous.firmware_regs or not previous.device_info_regs:
             try:
@@ -2931,6 +3061,7 @@ class ModbusMonitorApp(tk.Tk):
         sensor_rate_started = next_deadline
         last_sensor_frame_id: int | None = None
         last_new_sensor_frame_time = next_deadline
+        debug_renew_deadline = time.monotonic() + DEBUG_RENEW_PERIOD_S
         rate_count = 0
         actual_hz = 0.0
         sensor_hz = 0.0
@@ -2939,10 +3070,28 @@ class ModbusMonitorApp(tk.Tk):
 
         try:
             while not self.stop_event.is_set():
+                if debug_session and time.monotonic() >= debug_renew_deadline:
+                    try:
+                        # 续期失败退出会话，由外层finally发送STOP，不按8ms循环重试。
+                        self._debug_command(slave, timeout_s, CMD_DEBUG_ACQ_RENEW)
+                        debug_regs = self.client.read_holding_registers(
+                            slave, REG_DEBUG_STATUS_START, REG_DEBUG_STATUS_COUNT, timeout_s
+                        )
+                        self.events.put(("debug_status", debug_regs))
+                        if debug_regs[0] != 1:
+                            raise ModbusError("standalone debug session is no longer active")
+                        debug_renew_deadline = time.monotonic() + DEBUG_RENEW_PERIOD_S
+                    except Exception as exc:
+                        self.events.put(("error", exc))
+                        return
                 try:
                     snapshot = read_sensor_snapshot_poll(
                         self.client, slave, timeout_s, previous, actual_hz
                     )
+                    if (debug_session and
+                            not (snapshot.sensor_snapshot_status & SENSOR_SNAPSHOT_STATUS_DEBUG_MODE)):
+                        self.events.put(("error", ModbusError("standalone debug mode ended")))
+                        return
                     rate_count += 1
                     now = time.perf_counter()
                     previous = snapshot
@@ -3036,6 +3185,15 @@ class ModbusMonitorApp(tk.Tk):
                     if self.last_snapshot is not None:
                         self.last_snapshot.sd_regs = sd_regs
                     self._render_sd_status(sd_regs)
+                elif kind == "debug_status":
+                    regs = list(payload)
+                    names = {0: "正常PPS模式", 1: "独立调试（UTC无效／SD禁录）", 2: "正在切换"}
+                    seq = regs_to_u32_le_words(regs, 4)
+                    local_us = regs_to_u64_le_words(regs, 6)
+                    self.debug_status_var.set(
+                        f"{names.get(regs[0], '未知模式')} | 会话剩余{regs[1]}ms "
+                        f"| 触发序号{seq} | 本地采样时间{local_us}us"
+                    )
                 elif kind == "test_log":
                     append_text(self.test_text, str(payload))
                 elif kind == "log":
@@ -3051,6 +3209,10 @@ class ModbusMonitorApp(tk.Tk):
             pass
         if latest_snapshot is not None:
             self._render_snapshot(latest_snapshot)
+        if self.debug_stop_pending and (self.worker is None or not self.worker.is_alive()):
+            self.debug_stop_pending = False
+            if self.client.is_open:
+                self.stop_debug_acquisition()
         self.after(80, self._process_events)
 
     def _render_sd_status(self, regs: list[int]) -> None:
@@ -3125,6 +3287,9 @@ class ModbusMonitorApp(tk.Tk):
         imu_time = format_ros_time(snapshot.imu_status_regs[0:4])
         joint_time = format_ros_time(snapshot.joint_status_regs[0:4])
         touch_time = format_ros_time(snapshot.touch_status_regs[0:4])
+        standalone_debug = (snapshot.sensor_snapshot_status & SENSOR_SNAPSHOT_STATUS_DEBUG_MODE) != 0
+        if standalone_debug:
+            imu_time = joint_time = touch_time = "UNSYNCED (standalone debug)"
         imu_status = snapshot.imu_status_regs[4]
         calib_magic = snapshot.calib_ctrl_regs[0] if len(snapshot.calib_ctrl_regs) > 0 else 0
         calib_command = snapshot.calib_ctrl_regs[1] if len(snapshot.calib_ctrl_regs) > 1 else 0
@@ -3154,7 +3319,7 @@ class ModbusMonitorApp(tk.Tk):
         else:
             poll_text = "Full poll"
         if snapshot.sensor_data_valid:
-            data_status = "DATA READY"
+            data_status = "DEBUG DATA READY / UTC INVALID / SD DISABLED" if standalone_debug else "DATA READY"
         else:
             data_status = f"DATA PAUSED: {snapshot.sensor_invalid_reason}"
         if health.version == 0:
@@ -3167,6 +3332,8 @@ class ModbusMonitorApp(tk.Tk):
             health_banner = f"{health_state}: {current_error_name}"
         else:
             health_banner = health_state
+        if standalone_debug:
+            health_banner = "STANDALONE DEBUG (not PPS/UTC validation)"
         self.status_var.set(
             f"{health_banner} | {data_status} | {poll_text} reads={self.read_count} "
             f"errors={self.error_count} "
@@ -3565,7 +3732,10 @@ class ModbusMonitorApp(tk.Tk):
                 writer.writerow(("touch", index, "raw", value))
 
     def _on_close(self) -> None:
+        self.debug_stop_pending = False
         self.stop_poll()
+        if self.debug_session_active and self.worker is not None:
+            self.worker.join(timeout=1.0)
         self.client.close()
         self.destroy()
 

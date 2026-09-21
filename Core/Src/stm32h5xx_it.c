@@ -22,6 +22,7 @@
 #include "stm32h5xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "acq_sync.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -324,4 +325,14 @@ void FDCAN2_IT0_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+/* 调试模式的PPS仅做输入监测，不接管TIM2采样。 */
+void EXTI15_IRQHandler(void)
+{
+  if (__HAL_GPIO_EXTI_GET_RISING_IT(PPS_IN_Pin) != RESET)
+  {
+    __HAL_GPIO_EXTI_CLEAR_RISING_IT(PPS_IN_Pin);
+    AcqSync_OnDebugPpsEdgeFromIsr();
+  }
+  __HAL_GPIO_EXTI_CLEAR_FALLING_IT(PPS_IN_Pin);
+}
 /* USER CODE END 1 */

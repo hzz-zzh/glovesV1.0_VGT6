@@ -1,6 +1,7 @@
 #include "modbus_time_sync.h"
 
 #include "main.h"
+#include "acq_sync.h"
 
 #define TIME_SYNC_PPB_SCALE             1000000000LL
 #define TIME_SYNC_SECOND_US             1000000ULL
@@ -204,7 +205,7 @@ void ModbusTimeSync_OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
 
 void ModbusTimeSync_OnPpsEdge(uint16_t gpio_pin)
 {
-  if (gpio_pin == PPS_IN_Pin)
+  if ((gpio_pin == PPS_IN_Pin) && (AcqSync_IsNormalMode() != 0U))
   {
     uint64_t elapsed_us = ModbusTimeSync_GetLocalUptimeUsIrqUnsafe();
     uint64_t previous_edge_local_us = time_sync_last_edge_local_us;
@@ -253,6 +254,15 @@ void ModbusTimeSync_OnPpsEdge(uint16_t gpio_pin)
     time_sync_wait_utc_frame = (time_sync_synced == 0U) ? 1U : 0U;
     time_sync_pps_present = 1U;
   }
+}
+
+void ModbusTimeSync_OnAcquisitionModeChanged(void)
+{
+  /* 模式边界必须重新建立PPS关联，不能把调试前的一秒继续当成连续PPS。 */
+  ModbusTimeSync_OnPpsLost();
+  time_sync_edge_count = 0U;
+  time_sync_last_local_interval_us = 0ULL;
+  time_sync_last_edge_local_us = 0ULL;
 }
 
 void ModbusTimeSync_OnPpsLost(void)
@@ -393,6 +403,11 @@ void ModbusTimeSync_SetUtcFromMaster(uint64_t utc_us)
 
   __disable_irq();
   local_now_us = ModbusTimeSync_GetLocalUptimeUsIrqUnsafe();
+  if (AcqSync_IsNormalMode() == 0U)
+  {
+    __set_PRIMASK(irq_mask);
+    return;
+  }
   time_sync_last_sync_utc_us = utc_us;
 
   if (time_sync_pps_present == 0U)

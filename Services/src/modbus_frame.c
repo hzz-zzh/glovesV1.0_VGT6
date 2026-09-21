@@ -39,6 +39,7 @@ typedef struct
 {
   uint8_t valid;
   uint32_t frame_id;
+  uint32_t sensor_seq;               /* 缓存必须属于当前采集代次。 */
   GloveTimestampUs_t timestamp_us;
   uint32_t valid_flags;
   GloveImuSample_t imu[GLOVE_IMU_COUNT];
@@ -138,12 +139,13 @@ static void Modbus_CaptureReadSnapshot(uint8_t capture_diagnostics)
   modbus_read_snapshot.utc_timestamp_us = ModbusTimeSync_GetUtcTimestampUs();
   modbus_read_snapshot.local_uptime_us = ModbusTimeSync_GetLocalUptimeUs();
   modbus_read_snapshot.last_sync_utc_us = ModbusTimeSync_GetLastSyncUtcUs();
-  modbus_read_snapshot.time_synced = ModbusTimeSync_IsSynced();
-  AcqSync_GetStatus(&modbus_read_snapshot.acquisition);
-  now_tick = osKernelGetTickCount();
   snapshot_timeout_ticks = Modbus_MsToTicks(MODBUS_SENSOR_SNAPSHOT_TIMEOUT_MS);
 
   taskENTER_CRITICAL();
+  /* 状态、缓存与帧龄在同一临界区读取，防止新帧发布时间晚于now_tick而下溢。 */
+  now_tick = osKernelGetTickCount();
+  modbus_read_snapshot.time_synced = ModbusTimeSync_IsSynced();
+  AcqSync_GetStatus(&modbus_read_snapshot.acquisition);
   modbus_read_snapshot.imu_fresh_mask = ImuCanTask_GetFreshMask();
   modbus_read_snapshot.imu = modbus_imu_snapshot;
   modbus_read_snapshot.joint = modbus_joint_snapshot;
@@ -156,7 +158,8 @@ static void Modbus_CaptureReadSnapshot(uint8_t capture_diagnostics)
       (modbus_read_snapshot.joint.valid == 0U) ||
       (modbus_read_snapshot.touch.valid == 0U) ||
       ((uint32_t)(now_tick - modbus_sensor_snapshot_tick) > snapshot_timeout_ticks) ||
-      (modbus_read_snapshot.acquisition.pps_present == 0U) ||
+      (modbus_read_snapshot.acquisition.sampling_allowed == 0U) ||
+      (AcqSync_IsSequenceCurrent(modbus_read_snapshot.imu.sensor_seq) == 0U) ||
       (modbus_read_snapshot.imu_fresh_mask != (uint16_t)GLOVE_IMU_VALID_ALL_MASK))
   {
     /* 保留最后一帧供诊断显示，只通过状态位明确禁止主机用于实时控制。 */
@@ -460,6 +463,31 @@ static void Modbus_ProcessCommand(void)
       modbus_cmd_error = CMD_ERROR_INVALID_PARAM;
     }
   }
+  else if ((modbus_cmd_command == CMD_DEBUG_ACQ_START) ||
+           (modbus_cmd_command == CMD_DEBUG_ACQ_STOP) ||
+           (modbus_cmd_command == CMD_DEBUG_ACQ_RENEW))
+  {
+    uint16_t expected_param = (modbus_cmd_command == CMD_DEBUG_ACQ_STOP) ?
+                              0U : CMD_DEBUG_ACQ_MAGIC;
+    if (modbus_cmd_param != expected_param)
+    {
+      modbus_cmd_ack = CMD_ACK_INVALID_PARAM;
+      modbus_cmd_error = CMD_ERROR_INVALID_PARAM;
+    }
+    else
+    {
+      command_status = (modbus_cmd_command == CMD_DEBUG_ACQ_RENEW) ?
+                       AcqSync_RenewDebugLease() :
+                       AcqSync_RequestDebugMode(
+                           (modbus_cmd_command == CMD_DEBUG_ACQ_START) ? 1U : 0U);
+      /* ACK仅表示已接受，实际模式需读取0x0026或0x0041确认。 */
+      modbus_cmd_ack = (command_status == GLOVE_STATUS_OK) ? CMD_ACK_OK :
+                       ((command_status == GLOVE_STATUS_QUEUE_FULL) ?
+                        CMD_ACK_BUSY : CMD_ACK_STATE_DENIED);
+      modbus_cmd_error = (command_status == GLOVE_STATUS_OK) ?
+                         CMD_ERROR_NONE : CMD_ERROR_STATE_DENIED;
+    }
+  }
   else if ((modbus_cmd_command == CMD_LOG_START) ||
            (modbus_cmd_command == CMD_LOG_STOP))
   {
@@ -472,7 +500,7 @@ static void Modbus_ProcessCommand(void)
     {
       /* 485任务只确认命令已经入队，实际结果由SD状态寄存器异步返回。 */
       if ((modbus_cmd_command == CMD_LOG_START) &&
-          (ModbusTimeSync_IsSynced() == 0U))
+          ((AcqSync_IsNormalMode() == 0U) || (ModbusTimeSync_IsSynced() == 0U)))
       {
         command_status = GLOVE_STATUS_NOT_READY;
       }
@@ -919,7 +947,8 @@ static GloveTimestampUs_t Modbus_GetImuTimestampUs(void)
 {
   GloveTimestampUs_t timestamp_us;
 
-  timestamp_us = (modbus_read_snapshot.imu.valid != 0U) ?
+  timestamp_us = ((modbus_read_snapshot.acquisition.mode == ACQ_MODE_NORMAL) &&
+                  (modbus_read_snapshot.imu.valid != 0U)) ?
                  modbus_read_snapshot.imu.timestamp_us : 0ULL;
 
   return timestamp_us;
@@ -929,7 +958,8 @@ static GloveTimestampUs_t Modbus_GetJointTimestampUs(void)
 {
   GloveTimestampUs_t timestamp_us;
 
-  timestamp_us = (modbus_read_snapshot.joint.valid != 0U) ?
+  timestamp_us = ((modbus_read_snapshot.acquisition.mode == ACQ_MODE_NORMAL) &&
+                  (modbus_read_snapshot.joint.valid != 0U)) ?
                  modbus_read_snapshot.joint.timestamp_us : 0ULL;
 
   return timestamp_us;
@@ -979,7 +1009,8 @@ static uint16_t Modbus_ReadSensorSnapshotStatus(void)
   {
     status |= SENSOR_SNAPSHOT_STATUS_VALID;
   }
-  if ((modbus_read_snapshot.time_synced != 0U) &&
+  if ((modbus_read_snapshot.acquisition.mode == ACQ_MODE_NORMAL) &&
+      (modbus_read_snapshot.time_synced != 0U) &&
       ((modbus_read_snapshot.imu.valid_flags & GLOVE_FRAME_FLAG_UTC_VALID) != 0U) &&
       (modbus_read_snapshot.imu.timestamp_us != 0ULL))
   {
@@ -992,6 +1023,10 @@ static uint16_t Modbus_ReadSensorSnapshotStatus(void)
   if (modbus_read_snapshot.acquisition.window_active != 0U)
   {
     status |= SENSOR_SNAPSHOT_STATUS_ACQ_ACTIVE;
+  }
+  if (modbus_read_snapshot.acquisition.mode == ACQ_MODE_DEBUG)
+  {
+    status |= SENSOR_SNAPSHOT_STATUS_DEBUG_MODE;
   }
 
   return status;
@@ -1139,7 +1174,8 @@ static GloveTimestampUs_t Modbus_GetTouchTimestampUs(void)
 {
   GloveTimestampUs_t timestamp_us;
 
-  timestamp_us = (modbus_read_snapshot.touch.valid != 0U) ?
+  timestamp_us = ((modbus_read_snapshot.acquisition.mode == ACQ_MODE_NORMAL) &&
+                  (modbus_read_snapshot.touch.valid != 0U)) ?
                  modbus_read_snapshot.touch.timestamp_us : 0ULL;
 
   return timestamp_us;
@@ -1240,7 +1276,8 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
       return MODBUS_CAP_SENSOR_SNAPSHOT |
              MODBUS_CAP_TIME_SYNC |
              MODBUS_CAP_IMU_CALIBRATION |
-             MODBUS_CAP_SD_LOG;
+             MODBUS_CAP_SD_LOG |
+             MODBUS_CAP_DEBUG_ACQ;
     case REG_DEVICE_HAND_SIDE: return (uint16_t)GloveHandConfig_GetHandSide();
     case REG_HARDWARE_VERSION: return MODBUS_HARDWARE_VERSION_UNKNOWN;
 
@@ -1255,7 +1292,24 @@ static uint16_t Modbus_ReadHoldingRegister(uint16_t reg_addr)
       return modbus_read_snapshot.health.state;
 
     case REG_WORK_MODE:
-      return WORK_MODE_NORMAL;
+    case REG_DEBUG_MODE:
+      return (uint16_t)modbus_read_snapshot.acquisition.mode;
+    case REG_DEBUG_LEASE_MS:
+      return modbus_read_snapshot.acquisition.debug_lease_remaining_ms;
+    case REG_DEBUG_GENERATION:
+    case REG_DEBUG_GENERATION + 1U:
+      return (uint16_t)(modbus_read_snapshot.acquisition.generation >>
+                       ((reg_addr - REG_DEBUG_GENERATION) * 16U));
+    case REG_DEBUG_SAMPLE_SEQ:
+    case REG_DEBUG_SAMPLE_SEQ + 1U:
+      return (uint16_t)(modbus_read_snapshot.acquisition.latest_sample_seq >>
+                       ((reg_addr - REG_DEBUG_SAMPLE_SEQ) * 16U));
+    case REG_DEBUG_SAMPLE_LOCAL_US:
+    case REG_DEBUG_SAMPLE_LOCAL_US + 1U:
+    case REG_DEBUG_SAMPLE_LOCAL_US + 2U:
+    case REG_DEBUG_SAMPLE_LOCAL_US + 3U:
+      return (uint16_t)(modbus_read_snapshot.acquisition.latest_sample_local_us >>
+                       ((reg_addr - REG_DEBUG_SAMPLE_LOCAL_US) * 16U));
 
     case REG_LOG_STATE:
       return modbus_read_snapshot.sd.log_status;
@@ -1625,7 +1679,7 @@ static ModbusResult_t Modbus_HandleReadSensorSnapshot(uint8_t response_addr,
   for (index = 0U; index < MODBUS_REGS_ROS_TIME; index++)
   {
     Modbus_WriteU16(&tx_buf[write_offset],
-                    Modbus_ReadRosTimeRegFromUs(modbus_read_snapshot.imu.timestamp_us,
+                    Modbus_ReadRosTimeRegFromUs(Modbus_GetImuTimestampUs(),
                                                 index));
     write_offset = (uint16_t)(write_offset + 2U);
   }
@@ -1912,6 +1966,13 @@ static ModbusResult_t Modbus_HandleWriteMultipleRegs(uint8_t response_addr,
   {
     uint64_t utc_us;
 
+    if (AcqSync_IsNormalMode() == 0U)
+    {
+      return Modbus_BuildException(response_addr,
+                                   MB_FC_WRITE_MULTIPLE_REGS,
+                                   MB_EX_ILLEGAL_DATA_VALUE,
+                                   tx_buf, tx_buf_size, tx_len);
+    }
     if (Modbus_ReadRosTimeUsFromRegs(data_buf, &utc_us) == 0U)
     {
       return Modbus_BuildException(response_addr,
@@ -2031,10 +2092,19 @@ void Modbus_UpdateFullFrameSnapshot(const GloveFullFrame_t *frame)
     return;
   }
 
-  frame_timestamp_us = frame->raw.timestamp_us;
-
   taskENTER_CRITICAL();
+  /* 校验与更新不可分离，切换前排队的FullFrame不能刷新新模式的缓存。 */
+  if ((AcqSync_IsSequenceCurrent(frame->raw.imu_sensor_seq) == 0U) ||
+      (AcqSync_IsSequenceCurrent(frame->raw.touch_sensor_seq) == 0U))
+  {
+    taskEXIT_CRITICAL();
+    return;
+  }
+  frame_timestamp_us = ((frame->raw.valid_flags & GLOVE_FRAME_FLAG_DEBUG_LOCAL_TIME) != 0U) ?
+                       0ULL : frame->raw.timestamp_us;
+
   modbus_imu_snapshot.frame_id = frame->frame_id;
+  modbus_imu_snapshot.sensor_seq = frame->raw.imu_sensor_seq;
   modbus_imu_snapshot.timestamp_us = frame_timestamp_us;
   modbus_imu_snapshot.valid_flags = frame->raw.valid_flags;
   (void)memcpy(modbus_imu_snapshot.imu,

@@ -645,6 +645,15 @@ static GloveStatus_t TouchAdcTask_CaptureFrame(GloveTouchSensorBlock_t *block,
   {
     block->data.valid_flags |= GLOVE_FRAME_FLAG_UTC_VALID;
   }
+  if (sync->debug_mode != 0U)
+  {
+    block->data.valid_flags |= GLOVE_FRAME_FLAG_DEBUG_LOCAL_TIME;
+  }
+  /* 扫描期间发生模式切换时丢弃整帧，不向新模式发布半旧数据。 */
+  if (AcqSync_IsSequenceCurrent(sync->seq) == 0U)
+  {
+    return GLOVE_STATUS_NOT_READY;
+  }
   TouchAdcTask_Trace("frame_done", seq, 0U);
   s_touch_adc_trace_frame = 0U;
   return GLOVE_STATUS_OK;
@@ -674,6 +683,7 @@ void TouchAdcTask(void *argument)
   uint32_t publish_fail_count = 0U;
   uint8_t health_success_count = 0U;
   uint8_t pps_was_absent = 1U;
+  uint32_t acquisition_generation = 0U;
   AcqSyncSnapshot_t sync = {0};
   AcqSyncStatus_t acq_status;
   GloveStatus_t status;
@@ -719,7 +729,15 @@ void TouchAdcTask(void *argument)
     s_touch_acquisition_paused = 0U;
 
     AcqSync_GetStatus(&acq_status);
-    if (acq_status.pps_present == 0U)
+    if (acquisition_generation != acq_status.generation)
+    {
+      /* 模式切换后不能保留旧同步快照和三帧均值历史。 */
+      acquisition_generation = acq_status.generation;
+      TouchAdcTask_ResetMeanFilter();
+      (void)memset(&sync, 0, sizeof(sync));
+      pps_was_absent = 1U;
+    }
+    if (acq_status.sampling_allowed == 0U)
     {
       if (pps_was_absent == 0U)
       {
@@ -744,7 +762,7 @@ void TouchAdcTask(void *argument)
 
     if (AcqSync_WaitForTouchSync(&sync, TOUCH_ADC_SYNC_WAIT_TIMEOUT_MS) != osOK)
     {
-      if (s_touch_acquisition_enabled != 0U)
+      if ((s_touch_acquisition_enabled != 0U) && (AcqSync_IsSamplingAllowed() != 0U))
       {
         error_count++;
         health_success_count = 0U;
@@ -817,7 +835,7 @@ void TouchAdcTask(void *argument)
       }
       else
       {
-        if (s_touch_acquisition_enabled != 0U)
+        if ((s_touch_acquisition_enabled != 0U) && (status != GLOVE_STATUS_NOT_READY))
         {
           error_count++;
           health_success_count = 0U;

@@ -12,6 +12,7 @@ HAL_StatusTypeDef ModbusTimeSync_Init(void);
 void ModbusTimeSync_OnTimPeriodElapsed(TIM_HandleTypeDef *htim);
 void ModbusTimeSync_OnPpsEdge(uint16_t gpio_pin);
 void ModbusTimeSync_OnPpsLost(void);
+void ModbusTimeSync_OnAcquisitionModeChanged(void);
 
 uint64_t ModbusTimeSync_GetLocalUptimeUs(void);
 uint64_t ModbusTimeSync_GetUtcTimestampUs(void);
